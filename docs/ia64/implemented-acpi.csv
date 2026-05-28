@@ -1,0 +1,25 @@
+area,object,entry_type,condition,behavior,addresses_or_values,test_split,source_refs
+Table,RSDP,feature,ACPI 2.0 root pointer,points to RSDT and XSDT and includes ACPI 1.0 and extended checksums,revision 2; OEM QEMU,checksum validation,roms/ia64-firmware/firmware.c:7044
+Table,RSDT,feature,root table initialized,"contains FADT, MADT, SRAT, SLIT, HCDP, MCFG, SSDT 32-bit pointers",7 entries,table pointer order and checksum,roms/ia64-firmware/firmware.c:7044
+Table,XSDT,feature,root table initialized,"contains FADT, MADT, SRAT, SLIT, HCDP, MCFG, SSDT pointers",7 entries,table pointer order and checksum,roms/ia64-firmware/firmware.c:7044
+Table,FADT/FACP,feature,fixed ACPI description table,"publishes IA-64 profile, SCI IRQ, FACS/DSDT pointers, and GAS PM blocks",SCI 9; PM base 0x80112000,X fields vs legacy zero fields,roms/ia64-firmware/firmware.c:7170
+Table,FACS,feature,firmware ACPI control structure,minimal FACS with zero wake vectors/global lock/flags,version 1,FACS signature/checksum fields,roms/ia64-firmware/firmware.c:7044
+Table,DSDT,feature,AML namespace for PCI root,"defines _SB.PCI0 with PNP0A08/PNP0A03 IDs, _SEG, _BBN, _UID, _CCA, _CRS, _PRT",revision 2; PCI root resources,AML object presence and resource windows,roms/ia64-firmware/firmware.c:7044
+Table,SSDT,feature,AML namespace for serial console,defines \_SB.UAR0 as PNP0501 with _UID and _CRS QWordMemory/IRQ resources,UART MMIO 0x47f0000000 length 8; IRQ4,PNP0501 HID and fixed MMIO/IRQ resource descriptors,roms/ia64-firmware/firmware.c:1338
+Table,MADT/APIC,feature,interrupt controller table,publishes one Local SAPIC and one I/O SAPIC entry,Local SAPIC type 7; I/O SAPIC type 6,enabled LSAPIC and IOSAPIC GSI base,roms/ia64-firmware/firmware.c:7044
+Table,MCFG,feature,PCI ECAM table,publishes PCI segment 0 buses 0..255 at ECAM base,segment 0; bus 0-255,ECAM base and bus range,roms/ia64-firmware/firmware.c:7044
+Table,SRAT,feature,NUMA affinity table,publishes one memory affinity and one processor affinity for proximity domain 0,enabled entries,memory extent and CPU affinity,roms/ia64-firmware/firmware.c:7044
+Table,SLIT,feature,NUMA distance table,publishes one locality distance matrix,distance 10,single locality matrix,roms/ia64-firmware/firmware.c:7044
+Table,HCDP,feature,console table,publishes primary UART console and VGA output descriptors,UART 115200 8n1 IRQ4 primary; VGA PCI 0:4.0 non-primary,UART/VGA descriptor flags,roms/ia64-firmware/firmware.c:7044
+MMIO,ACPI PM block,feature,platform maps PM region,"QEMU device exposes PM1 event, PM1 control, PM timer and internal GPE backing","base 0x80112000 size 0x2000; offsets 0,4,8",PM1 evt/cnt/timer independent access,hw/ia64/ia64_vpc.c:58
+Interrupt,SCI,feature,ACPI PM event changes SCI line,SCI is routed through IOSAPIC IRQ 9,IRQ 9,assert/deassert SCI,hw/ia64/ia64_vpc.c:58
+MMIO,PIB INTA,feature,read from LSAPIC PIB INTA offset,returns 0 for interrupt acknowledge read,size 1,valid read vs other offsets,hw/ia64/ia64_vpc.c:58
+MMIO,PIB XTP,feature,write to LSAPIC PIB XTP offset,write is accepted and ignored,size 1,write XTP ignored path,hw/ia64/ia64_vpc.c:58
+MMIO,PIB IPI,feature,write aligned 8-byte IPI register with vector >=16,delivers SAPIC interrupt to CPU selected by address bits,addr<0x100000; vector>=16,valid IPI vs bad size/alignment/vector,hw/ia64/ia64_vpc.c:58
+Device,IOSAPIC registers,feature,MMIO register select/window access,"implements IOREGSEL, IOWIN, and EOI register behavior",IOREGSEL 0x00; IOWIN 0x10; EOI 0x40,ID/VER/RTE/EOI register selection,hw/ia64/ia64_iosapic.c:1
+Device,IOSAPIC RTE,special_case,RTE is masked or vector is zero,interrupt is not delivered,24 pins; version reports pins-1 and 0x11,masked vs unmasked; vector zero vs nonzero,hw/ia64/ia64_iosapic.c:1
+Device,IOSAPIC level EOI,special_case,EOI vector matches asserted level-triggered pin,EOI retriggers interrupt if line remains high,EOI register 0x40,edge vs level and asserted vs deasserted,hw/ia64/ia64_iosapic.c:1
+EFI config,ACPI table GUID,feature,EFI configuration table initialized,ACPI 2.0 table GUID points to RSDP in EFI ACPI Reclaim memory,ACPI 2.0 GUID,configuration table lookup,roms/ia64-firmware/firmware.c:7044
+EFI config,ACPI 1.0 table GUID,feature,EFI configuration table initialized,ACPI 1.0 table GUID points to ACPI 1.0-compatible RSDP in EFI ACPI Reclaim memory,ACPI 1.0 GUID,configuration table lookup,roms/ia64-firmware/firmware.c:7044
+EFI config,SAL table GUID,feature,EFI configuration table initialized,SAL system table GUID points to SAL table,SAL table GUID,configuration table lookup,roms/ia64-firmware/firmware.c:7044
+SAL table,SST_,feature,SAL system table initialized,contains entrypoint descriptor and platform feature descriptor,revision 0x0330; OEM QEMU; product IA-64,entrypoint descriptor and feature descriptor,roms/ia64-firmware/firmware.c:7044

@@ -1,0 +1,7 @@
+#ifndef IA64_CPU_PARAM_H
+#define IA64_CPU_PARAM_H
+
+#define TARGET_PAGE_BITS 12
+#define TARGET_VIRT_ADDR_SPACE_BITS 64
+
+#endif

@@ -1,0 +1,6 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+build_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+exec "$build_dir/pyvenv/bin/python3" -B -m mesonbuild.mesonmain \
+  devenv -C "$build_dir" -w "$PWD" "$@"

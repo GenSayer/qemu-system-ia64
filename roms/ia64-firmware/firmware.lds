@@ -1,0 +1,64 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* IA-64 EFI firmware linker script. Linked at the machine-model load address. */
+
+ENTRY(_start)
+
+SECTIONS
+{
+    . = 0x100000;
+
+    .text : {
+        *(.text._start)
+        *(.text*)
+        *(.plt*)
+    }
+
+    . = ALIGN(16);
+
+    .rodata : {
+        *(.rodata*)
+    }
+
+    . = ALIGN(16);
+
+    .opd : {
+        *(.opd)
+    }
+
+    . = ALIGN(16);
+
+    .IA_64.unwind_info : {
+        *(.IA_64.unwind_info*)
+    }
+
+    . = ALIGN(16);
+
+    .IA_64.unwind : {
+        *(.IA_64.unwind*)
+    }
+
+    . = ALIGN(0x2000);
+    __runtime_data_start = .;
+
+    .data : {
+        *(.data*)
+    }
+
+    . = ALIGN(16);
+
+    .got : {
+        __gp_start = .;
+        *(.got*)
+    }
+
+    . = ALIGN(16);
+
+    .bss : {
+        _bss_start = .;
+        *(.bss*)
+        *(COMMON)
+        _bss_end = .;
+    }
+
+    _end = .;
+}

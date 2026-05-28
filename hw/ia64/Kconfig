@@ -1,0 +1,15 @@
+config IA64_VPC
+    bool
+    select IA64
+    select GENERIC_LOADER
+    select SERIAL_MM
+    select PCI
+    select VGA_PCI
+    select ISA_BUS
+    select PCKBD
+    select USB_OHCI_PCI
+    select USB_UHCI
+    select USB_HID
+    select AHCI_ICH9
+    select IDE_CMD646
+    select IDE_PCI

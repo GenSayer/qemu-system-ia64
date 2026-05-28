@@ -1,0 +1,12 @@
+*.o
+*.elf
+*.bin
+
+# Local bring-up experiments; the Meson build uses entry.S + firmware.c only.
+/banner.S
+/efi_fw.S
+/fix_gp.py
+/gen_firmware.py
+/mini.S
+/test*.S
+*.pei
