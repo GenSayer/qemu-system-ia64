@@ -5131,6 +5131,12 @@ static void fw_copy_mem(VOID *Destination, const VOID *Source, UINTN Length)
     }
 }
 
+void *memcpy(void *Destination, const void *Source, size_t Length)
+{
+    fw_copy_mem(Destination, Source, Length);
+    return Destination;
+}
+
 static void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value)
 {
     UINT8 *p = (UINT8 *)Buffer;
@@ -5155,6 +5161,12 @@ static void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value)
         *p++ = Value;
         Size--;
     }
+}
+
+void *memset(void *Buffer, int Value, size_t Size)
+{
+    fw_set_mem(Buffer, Size, (UINT8)Value);
+    return Buffer;
 }
 
 static volatile UINT8 *vga_io_reg(UINTN Port)
