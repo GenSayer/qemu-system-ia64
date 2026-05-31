@@ -4,9 +4,13 @@
 # Injects hand-encoded bundles with the generic loader and verifies state.
 
 import re
+import os
+import struct
 import subprocess
 import sys
+import tempfile
 import time
+import zlib
 
 IA64_EXCP_NONE = 0
 IA64_EXCP_BREAK = 1
@@ -19,6 +23,9 @@ IA64_EXCP_PAGE_NOT_PRESENT = 15
 IA64_EXCP_DATA_DIRTY = 17
 IA64_EXCP_INST_ACCESS_BIT = 18
 IA64_EXCP_DATA_ACCESS_BIT = 19
+IA64_EXCP_INST_KEY_MISS = 20
+IA64_EXCP_DATA_KEY_MISS = 21
+IA64_EXCP_KEY_PERMISSION = 22
 IA64_ISR_X = 1 << 32
 IA64_ISR_W = 1 << 33
 IA64_ISR_R = 1 << 34
@@ -26,27 +33,74 @@ IA64_ISR_NA = 1 << 35
 IA64_ISR_SP = 1 << 36
 IA64_ISR_NI = 1 << 39
 IA64_ISR_EI_SHIFT = 41
+IA64_DCR_PP = 1 << 0
+IA64_DCR_BE = 1 << 1
 IA64_DCR_DM = 1 << 8
+IA64_DCR_DK = 1 << 10
+IA64_DCR_DX = 1 << 11
 IA64_DCR_DA = 1 << 13
+IA64_PSR_BE = 1 << 1
+IA64_PSR_UP = 1 << 2
+IA64_PSR_AC = 1 << 3
+IA64_PSR_MFL = 1 << 4
+IA64_PSR_MFH = 1 << 5
+IA64_PSR_IC = 1 << 13
+IA64_PSR_I = 1 << 14
+IA64_PSR_PK = 1 << 15
+IA64_PSR_DT = 1 << 17
+IA64_PSR_DFL = 1 << 18
+IA64_PSR_DFH = 1 << 19
+IA64_PSR_SP = 1 << 20
+IA64_PSR_PP = 1 << 21
+IA64_PSR_DI = 1 << 22
+IA64_PSR_SI = 1 << 23
+IA64_PSR_RT = 1 << 27
+IA64_PSR_MC = 1 << 35
+IA64_PSR_IT = 1 << 36
 IA64_PSR_ED = 1 << 43
 IA64_PSR_VM = 1 << 46
+IA64_CR_ITM = 1
+IA64_CR_SAPIC_IVR = 65
+IA64_CR_SAPIC_TPR = 66
+IA64_CR_SAPIC_EOI = 67
+IA64_CR_SAPIC_IRR3 = 71
+IA64_CR_ITV = 72
 IA64_TPR_MMI = 1 << 16
 IA64_VECTOR_MASKED = 1 << 16
+EFI_SYSTEM_TABLE_SIGNATURE = 0x5453595320494249
+EFI_DEBUG_IMAGE_INFO_UPDATE_IN_PROGRESS = 0x01
+EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED = 0x02
+EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL = 0x01
+EFI_ACPI_20_TABLE_GUID = bytes([
+    0x71, 0xe8, 0x68, 0x88, 0xf1, 0xe4, 0xd3, 0x11,
+    0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81,
+])
+EFI_DEBUG_IMAGE_INFO_TABLE_GUID = bytes([
+    0x77, 0x2e, 0x15, 0x49, 0xda, 0x1a, 0x64, 0x47,
+    0xb7, 0xa2, 0x7a, 0xfe, 0xfe, 0xd9, 0x5e, 0x8b,
+])
 
 IA64_BREAK_VECTOR = 0x2c00
 IA64_ALT_DTLB_VECTOR = 0x1000
 IA64_DATA_NESTED_TLB_VECTOR = 0x1400
+IA64_INST_KEY_MISS_VECTOR = 0x1800
+IA64_DATA_KEY_MISS_VECTOR = 0x1c00
 IA64_DATA_DIRTY_VECTOR = 0x2000
 IA64_INST_ACCESS_BIT_VECTOR = 0x2400
 IA64_DATA_ACCESS_BIT_VECTOR = 0x2800
 IA64_PAGE_NOT_PRESENT_VECTOR = 0x5000
+IA64_KEY_PERMISSION_VECTOR = 0x5100
 IA64_INST_ACCESS_VECTOR = 0x5200
 IA64_DATA_ACCESS_VECTOR = 0x5300
 IA64_GENERAL_VECTOR = 0x5400
 IA64_NAT_CONSUMPTION_VECTOR = 0x5600
 IA64_UNALIGNED_VECTOR = 0x5a00
 IA64_PKR_COUNT = 16
-IA64_TLB_MAX = 64
+IA64_PKR_VALID = 1 << 0
+IA64_PKR_WD = 1 << 1
+IA64_PKR_RD = 1 << 2
+IA64_PKR_XD = 1 << 3
+IA64_TLB_MAX = 256
 IA64_IMPL_PA_BITS = 50
 IA64_IMPL_VA_MSB = 60
 IA64_FIRMWARE_IVT_BASE = 0x10000
@@ -102,8 +156,8 @@ PAL_PAGE_SIZE_MASK = ((1 << 12) | (1 << 13) | (1 << 14) |
 PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_PKR_COUNT - 1) << 16) |
                          (8 << 24) | ((IA64_TLB_MAX - 1) << 32) |
-                         ((IA64_TLB_MAX - 1) << 40) | (4 << 48) |
-                         (3 << 56))
+                         ((IA64_TLB_MAX - 1) << 40) | (2 << 48) |
+                         (1 << 56))
 PAL_VM_SUMMARY_INFO_2 = IA64_IMPL_VA_MSB | (24 << 8)
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_4_1 = (4 << 32) | 1
@@ -117,8 +171,8 @@ PAL_CACHE_INFO_L0_2 = 16384 | (6 << 32) | (12 << 40) | (31 << 48)
 PAL_CACHE_INFO_L1_U_1 = (1 | (1 << 1) | (8 << 8) | (7 << 16) |
                          (7 << 24) | (1 << 32) | (1 << 40))
 PAL_CACHE_INFO_L1_U_2 = (262144 | (7 << 32) | (12 << 40) | (35 << 48))
-PAL_VM_INFO_L0_I = 64 | (4 << 8) | (256 << 16) | (1 << 32)
-PAL_VM_INFO_L1_U = 128 | (4 << 8) | (512 << 16) | (1 << 32) | (1 << 33)
+PAL_VM_INFO_L0_I = (2 | (128 << 8) | (IA64_TLB_MAX << 16) |
+                    (1 << 32) | (1 << 34))
 PAL_CACHE_PROT_DATA_NONE = 64
 PAL_CACHE_PROT_TAG_NONE_L0 = (1 << 30) | (12 << 8) | (31 << 14)
 PAL_PLATFORM_INTERRUPT_BLOCK = 0
@@ -129,6 +183,17 @@ PAL_TR_VALID_ALL = 0xf
 PAL_TR_TEST_PTE = 0x4009661
 PAL_TR_TEST_ITIR = 12 << 2
 PAL_TR_TEST_IFA = 0x8001
+PAL_VIRTUAL_CODE_BASE = 0xe0000000d0000000
+PAL_VIRTUAL_CODE_PA = 0x04000000
+PAL_VIRTUAL_CODE_ENTRY = PAL_VIRTUAL_CODE_BASE + 0x200
+PAL_VIRTUAL_CODE_ENTRY_PA = PAL_VIRTUAL_CODE_PA + 0x200
+PAL_VIRTUAL_PROC_BASE = 0xe0000000e0000000
+PAL_VIRTUAL_PROC_ENTRY = PAL_VIRTUAL_PROC_BASE + 0x60
+PAL_VIRTUAL_ITIR = 14 << 2
+PAL_VIRTUAL_RR = (1 << 8) | PAL_VIRTUAL_ITIR
+PAL_VIRTUAL_CODE_PTE = 0x0010000004000661
+PAL_VIRTUAL_PROC_PTE = 0x0010000000100661
+PAL_VIRTUAL_PSR = (1 << 13) | (1 << 36)
 PAL_COPY_BUFFER_SIZE = 0x1000
 PAL_COPY_BUFFER_ALIGN = 0x1000
 PAL_COPY_TARGET = 0x4000
@@ -2775,6 +2840,61 @@ def run_program(qemu, bundles, entry=0x10, delay=0.25):
     return parse_registers(output), output
 
 
+def run_firmware_pmemsave(qemu, dumps, memory_mb=128, delay=2.0):
+    qemu_abs = os.path.abspath(qemu)
+    firmware = os.path.join(os.path.dirname(qemu_abs),
+                            "roms", "ia64-firmware",
+                            "ia64-firmware.bin")
+    if not os.path.exists(firmware):
+        raise RuntimeError(f"firmware image not found: {firmware}")
+
+    args = [
+        qemu_abs, "-machine", "ia64-vpc", "-smp", "1", "-m",
+        str(memory_mb), "-bios", firmware, "-display", "none",
+        "-serial", "none", "-monitor", "stdio",
+    ]
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(delay)
+        for address, size, path in dumps:
+            proc.stdin.write(f'pmemsave 0x{address:x} 0x{size:x} "{path}"\n')
+        proc.stdin.write("quit\n")
+        proc.stdin.flush()
+        output, stderr = proc.communicate(timeout=8)
+    except Exception:
+        proc.kill()
+        output, stderr = proc.communicate()
+        raise RuntimeError(f"firmware qemu did not complete:\n{output}\n{stderr}")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"firmware qemu exited with {proc.returncode}:\n{output}\n{stderr}")
+    return output
+
+
+def run_firmware_serial(qemu, memory_mb=128, timeout=15.0):
+    qemu_abs = os.path.abspath(qemu)
+    firmware = os.path.join(os.path.dirname(qemu_abs),
+                            "roms", "ia64-firmware",
+                            "ia64-firmware.bin")
+    if not os.path.exists(firmware):
+        raise RuntimeError(f"firmware image not found: {firmware}")
+
+    args = [
+        qemu_abs, "-machine", "ia64-vpc", "-smp", "1", "-m",
+        str(memory_mb), "-bios", firmware, "-display", "none",
+        "-serial", "stdio", "-monitor", "none", "-no-reboot",
+    ]
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    try:
+        output, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        output, _ = proc.communicate()
+    return output
+
+
 def require_registers(name, bundles, expected, entry=0x10):
     def tc(qemu):
         regs, output = run_program(qemu, bundles, entry=entry)
@@ -2976,6 +3096,38 @@ test_rse_alloc_preserves_ar_pfs = require_registers(
         "ar_pfs": 0x105,
     }, entry=0x10)
 
+test_alloc_clears_destination_nat = require_registers(
+    "alloc_clears_destination_nat", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x00, nop_m(), alloc(1, 6, 4, 0, 0),
+         nop_i()),
+        (0x30, 0x08, ld8_fill_postinc(34, 6, 0), nop_i(),
+         nop_i()),
+        (0x40, 0x00, nop_m(), tnat_z(1, 2, 34),
+         nop_i()),
+        (0x50, 0x00, nop_m(), addl(20, 0x11, 0, qp=2),
+         nop_i()),
+        (0x60, 0x00, nop_m(), alloc(34, 6, 4, 0, 0),
+         nop_i()),
+        (0x70, 0x00, nop_m(), tnat_z(3, 4, 34),
+         nop_i()),
+        (0x80, 0x00, nop_m(), addl(21, 0x22, 0, qp=3),
+         addl(22, 0x33, 0, qp=4)),
+        (0x90, 0x00, mov_m_gr_ar(34, 64), nop_i(),
+         nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(),
+         br_cond(0xa0, 0xa0)),
+        (0x200, 0x00, 0, 0,
+         0),
+    ], {
+        "ip": 0xa0,
+        "exception": IA64_EXCP_NONE,
+        "r20": 0x11,
+        "r21": 0x22,
+        "r22": 0,
+    }, entry=0x10)
+
 test_br_call_ret_preserves_ec = require_registers(
     "br_call_ret_preserves_ec", [
         (0x10, 0x00, mov_m_imm_ar(66, 25), nop_i(),
@@ -3092,6 +3244,81 @@ test_rse_loadrs_bspstore_return_uses_covered_frame = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 8,
         "cfm_sol": 6,
+    }, entry=0x10)
+
+test_rse_loadrs_zero_current_frame_invalidates_parents = require_registers(
+    "rse_loadrs_zero_current_frame_invalidates_parents", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(41, 9, 5, 0, 0),
+         nop_i()),
+        (0x40, *movl_mlx(35, 0x123456789abcdef0)),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x50, 0x100)),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x60, 0x200)),
+        (0x70, 0x00, nop_m(), adds(8, 0, 35),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+
+        (0x100, 0x00, nop_m(), alloc(40, 4, 0, 0, 0),
+         nop_i()),
+        (0x110, 0x00, mov_m_ar_gr(42, 17), mov_gr_b(43, 0),
+         nop_i()),
+        (0x120, 0x00, nop_m(), adds(43, 16, 43),
+         nop_i()),
+        (0x130, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x140, *movl_mlx(44, 0x200000)),
+        (0x150, 0x00, st8(44, 40), nop_i(),
+         nop_i()),
+        (0x160, *movl_mlx(44, 0x200008)),
+        (0x170, 0x00, st8(44, 42), nop_i(),
+         nop_i()),
+        (0x180, *movl_mlx(44, 0x200010)),
+        (0x190, 0x00, st8(44, 43), nop_i(),
+         nop_i()),
+        (0x1a0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+
+        (0x200, 0x00, nop_m(), alloc(41, 7, 5, 0, 0),
+         nop_i()),
+        (0x210, *movl_mlx(35, 0x206)),
+        (0x220, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x220, 0x300)),
+        (0x230, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+
+        (0x300, 0x00, nop_m(), alloc(41, 2, 0, 0, 0),
+         nop_i()),
+        (0x310, *movl_mlx(3, 0x200000)),
+        (0x320, 0x00, ld8(14, 3), nop_i(),
+         nop_i()),
+        (0x330, *movl_mlx(3, 0x200008)),
+        (0x340, 0x00, ld8(15, 3), nop_i(),
+         nop_i()),
+        (0x350, *movl_mlx(3, 0x200010)),
+        (0x360, 0x00, ld8(16, 3), nop_i(),
+         nop_i()),
+        (0x370, 0x00, mov_m_gr_ar(0, 16), nop_i(),
+         nop_i()),
+        (0x380, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x390, 0x00, mov_m_gr_ar(14, 64), nop_i(),
+         nop_i()),
+        (0x3a0, 0x00, mov_ar(15, 18), nop_i(),
+         nop_i()),
+        (0x3b0, 0x09, nop_m(), nop_m(),
+         mov_b_gr(0, 16)),
+        (0x3c0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0x80,
+        "r8": 0x123456789abcdef0,
+        "cfm_sof": 9,
+        "cfm_sol": 5,
     }, entry=0x10)
 
 test_rse_call_ret_preserves_region7_bsp = require_registers(
@@ -3429,6 +3656,41 @@ test_rse_zero_sol_cover_return_restores_bsp_base = require_registers(
         "r37": 0x123456789abcdef0,
     }, entry=0x10)
 
+test_rse_loadrs_zero_sol_return_keeps_bsp_without_cover = require_registers(
+    "rse_loadrs_zero_sol_return_keeps_bsp_without_cover", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(1, 8, 0, 0, 0),
+         nop_i()),
+        (0x40, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0x50, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x60, *movl_mlx(3, 64 << 16)),
+        (0x70, 0x00, mov_m_gr_ar(3, 16), nop_i(),
+         nop_i()),
+        (0x80, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x90, *movl_mlx(3, 0x8)),
+        (0xa0, 0x00, mov_m_gr_ar(3, 64), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(3, 0xe0)),
+        (0xc0, 0x09, nop_m(), nop_m(),
+         mov_b_gr(0, 3)),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+        (0xe0, 0x00, mov_m_ar_gr(8, 17), nop_i(),
+         nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(),
+         br_cond(0xf0, 0xf0)),
+    ], {
+        "ip": 0xf0,
+        "r8": 0x100040,
+        "cfm_sof": 8,
+        "cfm_sol": 0,
+    }, entry=0x10)
+
 HIGH_TR_BASE = 0xa000000100000000
 HIGH_TR_TARGET = HIGH_TR_BASE + 0x8430
 HIGH_TR_PSR = ((1 << 13) | (1 << 17) | (1 << 27) |
@@ -3439,6 +3701,13 @@ EIGHT_K_ITIR = 13 << 2
 PTE_ACCESSED = 1 << 5
 PTE_DIRTY = 1 << 6
 PTE_ED = 1 << 52
+KEY_TEST_VA = 0x9000
+KEY_TEST_RID = 0x123
+KEY_TEST_KEY = 0x456
+KEY_TEST_RR = (KEY_TEST_RID << 8) | LOW_VECTOR_ITIR
+KEY_TEST_ITIR = (KEY_TEST_KEY << 8) | LOW_VECTOR_ITIR
+KEY_TEST_PSR = (1 << 13) | (1 << 17) | IA64_PSR_PK
+KEY_TEST_PKR = IA64_PKR_VALID | (KEY_TEST_KEY << 8)
 
 test_rse_rfi_bspstore_rebase_preserves_interrupted_call = require_registers(
     "rse_rfi_bspstore_rebase_preserves_interrupted_call", [
@@ -3626,6 +3895,61 @@ test_rse_rfi_advanced_iip_preserves_nested_call_locals = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 0,
         "cfm_sol": 0,
+    }, entry=0x10)
+
+test_rse_manual_rfi_loadrs_restores_current_frame_base = require_registers(
+    "rse_manual_rfi_loadrs_restores_current_frame_base", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, alloc(14, 9, 3, 0, 0), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(33, 0x123456789abcdef0)),
+        (0x50, *movl_mlx(34, 0x0fedcba987654321)),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x60, 0x100)),
+        (0x70, 0x00, nop_m(), adds(8, 0, 33),
+         nop_i()),
+        (0x80, 0x00, nop_m(), adds(9, 0, 34),
+         nop_i()),
+        (0x90, 0x00, mov_m_ar_gr(10, 17), nop_i(),
+         nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(),
+         br_cond(0xa0, 0xa0)),
+        (0x100, 0x00, alloc(68, 49, 41, 0, 0), nop_i(),
+         nop_i()),
+        (0x110, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0x120, *movl_mlx(20, (1 << 63) | 0x14b1)),
+        (0x130, 0x00, mov_m_gr_cr(20, 23), nop_i(),
+         nop_i()),
+        (0x140, *movl_mlx(20, 0x200)),
+        (0x150, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+         nop_i()),
+        (0x160, 0x00, mov_m_gr_cr(0, 16), nop_i(),
+         nop_i()),
+        (0x170, *movl_mlx(20, (52 * 8) << 16)),
+        (0x180, 0x00, mov_m_gr_ar(20, 16), nop_i(),
+         nop_i()),
+        (0x190, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x1a0, *movl_mlx(20, 0x100000)),
+        (0x1b0, 0x00, mov_ar(20, 18), nop_i(),
+         nop_i()),
+        (0x1c0, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+        (0x200, 0x00, mov_m_gr_ar(68, 64), nop_i(),
+         nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0xa0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x123456789abcdef0,
+        "r9": 0x0fedcba987654321,
+        "r10": 0x100000,
+        "cfm_sof": 9,
+        "cfm_sol": 3,
     }, entry=0x10)
 
 test_rse_rt_translates_with_dt_disabled = require_registers(
@@ -4518,6 +4842,106 @@ test_semaphore_ops_invalidate_advanced_loads = require_registers(
         "r8": 0x33, "r9": 0x20, "r10": 0x55, "r11": 0x40,
         "r12": 0xdd, "r13": 0x60}, entry=0x10)
 
+test_xchg4_result_base_alias_invalidates_alat = require_registers(
+    "xchg4_result_base_alias_invalidates_alat", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x11, 0),
+         nop_i()),
+        (0x20, 0x08, st4(3, 4), ld4_a(5, 3),
+         addl(6, 0x22, 0)),
+        (0x30, 0x00, xchg4(3, 3, 6), addl(5, 0xaa, 0),
+         nop_i()),
+        (0x40, 0x00, addl(7, 0x200, 0), nop_i(),
+         nop_i()),
+        (0x50, 0x00, ld4_c_nc(5, 7), nop_i(),
+         nop_i()),
+        (0x60, 0x00, ld4(8, 7), nop_i(),
+         nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0x70)),
+    ], {"ip": 0x70, "r3": 0x11, "r5": 0x22, "r8": 0x22},
+    entry=0x10)
+
+test_fetchadd4_result_base_alias_invalidates_alat = require_registers(
+    "fetchadd4_result_base_alias_invalidates_alat", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x10, 0),
+         nop_i()),
+        (0x20, 0x08, st4(3, 4), ld4_a(5, 3),
+         nop_i()),
+        (0x30, 0x00, fetchadd4_acq(3, 3, 1), addl(5, 0xaa, 0),
+         nop_i()),
+        (0x40, 0x00, addl(7, 0x200, 0), nop_i(),
+         nop_i()),
+        (0x50, 0x00, ld4_c_nc(5, 7), nop_i(),
+         nop_i()),
+        (0x60, 0x00, ld4(8, 7), nop_i(),
+         nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0x70)),
+    ], {"ip": 0x70, "r3": 0x10, "r5": 0x11, "r8": 0x11},
+    entry=0x10)
+
+test_cmpxchg4_result_base_alias_success_invalidates_alat = require_registers(
+    "cmpxchg4_result_base_alias_success_invalidates_alat", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x40, 0),
+         nop_i()),
+        (0x20, 0x08, st4(3, 4), ld4_a(5, 3),
+         addl(6, 0x55, 0)),
+        (0x30, 0x00, mov_m_imm_ar(32, 0x40), nop_i(),
+         nop_i()),
+        (0x40, 0x00, cmpxchg4_acq(3, 3, 6), addl(5, 0xaa, 0),
+         nop_i()),
+        (0x50, 0x00, addl(7, 0x200, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x00, ld4_c_nc(5, 7), nop_i(),
+         nop_i()),
+        (0x70, 0x00, ld4(8, 7), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], {"ip": 0x80, "r3": 0x40, "r5": 0x55, "r8": 0x55},
+    entry=0x10)
+
+test_cmpxchg4_result_base_alias_failure_keeps_alat = require_registers(
+    "cmpxchg4_result_base_alias_failure_keeps_alat", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x40, 0),
+         nop_i()),
+        (0x20, 0x08, st4(3, 4), ld4_a(5, 3),
+         addl(6, 0x55, 0)),
+        (0x30, 0x00, mov_m_imm_ar(32, 0x41), nop_i(),
+         nop_i()),
+        (0x40, 0x00, cmpxchg4_acq(3, 3, 6), addl(5, 0xaa, 0),
+         nop_i()),
+        (0x50, 0x00, addl(7, 0x200, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x00, ld4_c_nc(5, 7), nop_i(),
+         nop_i()),
+        (0x70, 0x00, ld4(8, 7), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], {"ip": 0x80, "r3": 0x40, "r5": 0xaa, "r8": 0x40},
+    entry=0x10)
+
+test_cmpxchg4_full_ar_ccv_compare = require_registers(
+    "cmpxchg4_full_ar_ccv_compare", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x40, 0),
+         nop_i()),
+        (0x20, *movl_mlx(9, 0x100000040)),
+        (0x30, 0x08, st4(3, 4), ld4_a(5, 3),
+         addl(6, 0x55, 0)),
+        (0x40, 0x00, mov_m_gr_ar(9, 32), addl(5, 0xaa, 0),
+         nop_i()),
+        (0x50, 0x00, cmpxchg4_acq(10, 3, 6), nop_i(),
+         nop_i()),
+        (0x60, 0x00, ld4_c_nc(5, 3), nop_i(),
+         nop_i()),
+        (0x70, 0x00, ld4(8, 3), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], {"ip": 0x80, "r5": 0xaa, "r8": 0x40, "r10": 0x40},
+    entry=0x10)
+
 test_semaphore_ops_clear_result_nat = require_registers(
     "semaphore_ops_clear_result_nat", [
         (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
@@ -4988,6 +5412,53 @@ test_speculative_recovery_dcr_da_defers_access_bit = require_registers(
         "r26": 1,
     }, entry=0x10)
 
+test_speculative_recovery_dcr_dk_defers_key_miss = require_registers(
+    "speculative_recovery_dcr_dk_defers_key_miss", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | PTE_ED)),
+        (0x20, *movl_mlx(23, LOW_VECTOR_TR_PTE)),
+        (0x30, *movl_mlx(19, (1 << 13) | (1 << 17) |
+                         (1 << 36) | IA64_PSR_PK)),
+        (0x40, *movl_mlx(20, IA64_DCR_DK)),
+        (0x50, *movl_mlx(2, 0x2000)),
+        (0x60, *movl_mlx(4, IA64_PKR_VALID)),
+        (0x70, 0x00, adds(7, LOW_VECTOR_ITIR, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+         nop_i()),
+        (0x90, 0x00, itr_i(5, 18), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, mov_m_gr_cr(20, 0), adds(3, 0, 0),
+         nop_i()),
+        (0xb0, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(),
+         nop_i()),
+        (0xc0, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0xd0, 0x00, mov_m_gr_cr(7, 21), adds(6, 6, 0),
+         nop_i()),
+        (0xe0, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0xf0, 0x00, itr_d(6, 23), nop_i(),
+         nop_i()),
+        (0x100, 0x00, srlz_i(), nop_i(),
+         nop_i()),
+        (0x110, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x120, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0x120, 0x430)),
+        (0x4000430, 0x00, ld8_s(31, 2), nop_i(),
+         nop_i()),
+        (0x4000440, 0x00, nop_m(), tnat_z(1, 2, 31),
+         nop_i()),
+        (0x4000450, 0x00, nop_m(), addl(25, 1, 0, qp=1),
+         addl(26, 1, 0, qp=2)),
+        (0x4000460, 0x10, nop_m(), nop_i(),
+         br_cond(0x4000460, 0x460)),
+    ], {
+        "ip": 0x460,
+        "exception": IA64_EXCP_NONE,
+        "r25": 0,
+        "r26": 1,
+    }, entry=0x10)
+
 test_speculative_recovery_unaligned_defers = require_registers(
     "speculative_recovery_unaligned_defers", [
         (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | PTE_ED)),
@@ -5331,22 +5802,93 @@ test_ldfp8_postinc_decode = require_registers("ldfp8_postinc_decode", [
     "exception": IA64_EXCP_NONE}, entry=0x10)
 
 test_ldf_fill_postinc_decode = require_registers("ldf_fill_postinc_decode", [
-    (0x10, 0x00, addl(3, 0x200, 0), nop_i(),
+    (0x10, *movl_mlx(2, 0x123456789abcdef0)),
+    (0x20, 0x00, addl(3, 0x200, 0), addl(7, 0x208, 0),
      nop_i()),
-    (0x20, 0x08, ldf_fill_postinc(9, 3, -48), nop_i(),
+    (0x30, 0x00, addl(5, 0x1003e, 0), nop_i(),
      nop_i()),
-    (0x30, 0x00, nop_m(), getf_sig(4, 9),
+    (0x40, 0x08, st8(3, 2), st8(7, 5),
      nop_i()),
-    (0x40, 0x10, nop_m(), nop_i(),
-     br_cond(0x40, 0x40)),
-    (0x200, 0x00, 0x123456789a, 0x1abcdef,
-     0),
+    (0x50, 0x08, ldf_fill_postinc(9, 3, -48), nop_i(),
+     nop_i()),
+    (0x60, 0x00, nop_m(), getf_sig(4, 9),
+     nop_i()),
+    (0x70, 0x10, nop_m(), nop_i(),
+     br_cond(0x70, 0x70)),
 ], {
-    "ip": 0x40,
+    "ip": 0x70,
     "r3": 0x1d0,
-    "r4": LDF8_DATA,
+    "r4": 0x123456789abcdef0,
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
+
+test_ldf8_loads_integer_register_format = require_registers(
+    "ldf8_loads_integer_register_format", [
+        (0x10, *movl_mlx(2, 0x8000000000000000)),
+        (0x20, 0x00, addl(3, 0x200, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x00, st8(3, 2), nop_i(),
+         nop_i()),
+        (0x40, 0x00, ldf8(6, 3), nop_i(),
+         nop_i()),
+        (0x50, 0x0d, nop_m(), fcvt_fxu(7, 6),
+         nop_i()),
+        (0x60, 0x10, getf_sig(4, 7), nop_i(),
+         br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "r4": 0x8000000000000000,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_ldf8_f1_does_not_change_fixed_register = require_registers(
+    "ldf8_f1_does_not_change_fixed_register", [
+        (0x10, *movl_mlx(2, 0xdeadbeefcafebabe)),
+        (0x20, 0x00, addl(3, 0x200, 0), addl(6, 0x208, 0),
+         nop_i()),
+        (0x30, 0x00, st8(3, 2), nop_i(),
+         nop_i()),
+        (0x40, 0x00, ldf8(1, 3), nop_i(),
+         nop_i()),
+        (0x50, 0x08, stf_spill_postinc(3, 1, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x00, ld8(4, 3), nop_i(),
+         nop_i()),
+        (0x70, 0x00, ld8(5, 6), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "r4": 0x8000000000000000,
+        "r5": 0x000000000000ffff,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_stf_spill_ldf_fill_preserves_sig = require_registers(
+    "stf_spill_ldf_fill_preserves_sig", [
+        (0x10, *movl_mlx(2, 0x0020c49ba5e353f7)),
+        (0x20, 0x00, addl(3, 0x200, 0), addl(4, 0x200, 0),
+         nop_i()),
+        (0x30, 0x00, setf_sig(8, 2), nop_i(),
+         nop_i()),
+        (0x40, 0x08, stf_spill_postinc(3, 8, 16), nop_i(),
+         nop_i()),
+        (0x50, 0x00, setf_sig(8, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x08, ldf_fill_postinc(8, 4, 16), nop_i(),
+         nop_i()),
+        (0x70, 0x0d, nop_m(), fcvt_fxu(8, 8),
+         nop_i()),
+        (0x80, 0x10, getf_sig(5, 8), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "r3": 0x210,
+        "r4": 0x210,
+        "r5": 0x0020c49ba5e353f7,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
 
 test_chk_s_f_decode = require_registers("chk_s_f_decode", [
     (0x10, 0x00, addl(2, 0x55, 0), nop_i(),
@@ -5774,13 +6316,46 @@ test_probe_r_fault_ignored_fields_decode = require_registers(
 
 test_probe_w_imm_decode = require_registers(
     "probe_w_imm_decode", [
-        (0x10, 0x00, addl(3, 0x200, 0), nop_i(),
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | (3 << 7))),
+        (0x20, 0x00, adds(7, 0x68, 0), nop_i(),
          nop_i()),
-        (0x20, 0x08, probe_w_imm(7, 3, 1), nop_i(),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0),
          nop_i()),
-        (0x30, 0x10, nop_m(), nop_i(),
-         br_cond(0x30, 0x30)),
-    ], {"ip": 0x30, "r7": 1}, entry=0x10)
+        (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(),
+         nop_i()),
+        (0x50, 0x00, itr_d(5, 18), nop_i(),
+         nop_i()),
+        (0x60, 0x00, addl(3, 0x200, 0), nop_i(),
+         nop_i()),
+        (0x70, 0x08, probe_w_imm(7, 3, 1), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], {"ip": 0x80, "r7": 1}, entry=0x10)
+
+test_probe_w_dt_disabled_miss_raises_alt_dtlb = require_registers(
+    "probe_w_dt_disabled_miss_raises_alt_dtlb", [
+        (0x10, *movl_mlx(3, HIGH_TR_BASE + 0x80000)),
+        (0x20, *movl_mlx(19, 1 << 13)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x50, 0x08, probe_w_imm(7, 3, 1), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x20,
+                 IA64_ALT_DTLB_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r30": HIGH_TR_BASE + 0x80000,
+        "r31": IA64_ISR_NA | IA64_ISR_W,
+    }, entry=0x10)
 
 test_lfetch_decode = require_registers("lfetch_decode", [
     (0x10, 0x00, addl(3, 0x100, 0), addl(4, 0x180, 0),
@@ -7907,6 +8482,7 @@ test_itr_i_survives_region_register_write = require_registers(
 
 ITC_DATA_BUNDLE = (0x4009000, 0x00, 0x123456789a, 0, 0)
 ITC_DATA_LOW, _ = bundle_words(*ITC_DATA_BUNDLE[1:])
+KEY_TEST_DATA_BUNDLE = (0x4001000, *ITC_DATA_BUNDLE[1:])
 
 test_itc_d_uses_source_pte_and_cr_ifa = require_registers(
     "itc_d_uses_source_pte_and_cr_ifa", [
@@ -7962,7 +8538,7 @@ test_itc_d_pl0_user_read_faults = require_registers(
     }, entry=0x10)
 
 def test_itc_d_replaces_full_tc(qemu):
-    tc_fill_count = 64
+    tc_fill_count = IA64_TLB_MAX
     fill_base = 0x100000
     final_va = fill_base + (tc_fill_count + 1) * 0x4000 + 0x1000
     cursor = 0x40
@@ -8017,7 +8593,7 @@ def test_itc_d_replaces_full_tc(qemu):
             f"itc_d_replaces_full_tc failed: {', '.join(missing)}\n{output}")
 
 def test_itc_d_full_tc_replacement_rotates(qemu):
-    tc_fill_count = 64
+    tc_fill_count = IA64_TLB_MAX
     fill_base = 0x100000
     first_va = fill_base + (tc_fill_count + 1) * 0x4000 + 0x1000
     second_va = first_va + 0x4000
@@ -8130,6 +8706,27 @@ test_itc_d_not_present_raises_page_fault = require_registers(
         "exception": IA64_EXCP_NONE,
         "r30": 0xa000000000000430,
         "r31": IA64_ISR_R,
+    }, entry=0x10)
+
+test_tak_not_present_dtlb_returns_one = require_registers(
+    "tak_not_present_dtlb_returns_one", [
+        (0x10, *movl_mlx(18, 0x0010000004000660)),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, *movl_mlx(7, (0x12345 << 8) | LOW_VECTOR_ITIR)),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0x70, 0x00, tak(31, 19), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r31": 1,
     }, entry=0x10)
 
 test_itr_d_not_present_raises_page_fault = require_registers(
@@ -8310,6 +8907,237 @@ test_itc_d_psr_da_suppresses_one_data_access_bit = require_registers(
         "r31": IA64_ISR_R,
     }, entry=0x10)
 
+test_itc_d_data_key_miss_raises_key_vector = require_registers(
+    "itc_d_data_key_miss_raises_key_vector", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, *movl_mlx(20, 0x123456789abc0000)),
+        (0x60, 0x00, mov_rr_write(16, 0), nop_i(),
+         nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0x90, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, mov_m_gr_cr(20, 25), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xc0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xc0, 0xd0)),
+        (0xd0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xe0, 0x00, ld8(29, 2), nop_i(),
+         nop_i()),
+        (IA64_DATA_KEY_MISS_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_DATA_KEY_MISS_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_DATA_KEY_MISS_VECTOR + 0x20, 0x00, mov_m_cr_gr(28, 21),
+         nop_i(), nop_i()),
+        (IA64_DATA_KEY_MISS_VECTOR + 0x30, 0x00, mov_m_cr_gr(27, 25),
+         nop_i(), nop_i()),
+        (IA64_DATA_KEY_MISS_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DATA_KEY_MISS_VECTOR + 0x40,
+                 IA64_DATA_KEY_MISS_VECTOR + 0x40)),
+    ], {
+        "ip": IA64_DATA_KEY_MISS_VECTOR + 0x40,
+        "exception": IA64_EXCP_NONE,
+        "r30": KEY_TEST_VA,
+        "r31": IA64_ISR_R,
+        "r28": KEY_TEST_RR,
+        "r27": 0x123456789abc0000,
+    }, entry=0x10)
+
+test_itc_d_key_permission_store_raises_permission_vector = require_registers(
+    "itc_d_key_permission_store_raises_permission_vector", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, *movl_mlx(4, KEY_TEST_PKR | IA64_PKR_WD)),
+        (0x60, 0x00, mov_rr_write(16, 0), adds(3, 0, 0),
+         nop_i()),
+        (0x70, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(),
+         nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(29, 0x1122334455667788)),
+        (0xc0, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xd0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xd0, 0xe0)),
+        (0xe0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xf0, 0x00, st8(2, 29), nop_i(),
+         nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x20, 0x00, mov_m_cr_gr(28, 21),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_KEY_PERMISSION_VECTOR + 0x30,
+                 IA64_KEY_PERMISSION_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_KEY_PERMISSION_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r30": KEY_TEST_VA,
+        "r31": IA64_ISR_W,
+        "r28": KEY_TEST_RR,
+    }, entry=0x10)
+
+test_itc_d_matching_pkr_allows_keyed_load = require_registers(
+    "itc_d_matching_pkr_allows_keyed_load", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, *movl_mlx(4, KEY_TEST_PKR)),
+        (0x60, 0x00, mov_rr_write(16, 0), adds(3, 0, 0),
+         nop_i()),
+        (0x70, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(),
+         nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xc0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xc0, 0xd0)),
+        (0xd0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xe0, 0x00, ld8(31, 2), nop_i(),
+         nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(),
+         br_cond(0xf0, 0xf0)),
+        KEY_TEST_DATA_BUNDLE,
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "r31": ITC_DATA_LOW,
+    }, entry=0x10)
+
+test_tpa_key_miss_raises_data_key_miss = require_registers(
+    "tpa_key_miss_raises_data_key_miss", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, 0x00, mov_rr_write(16, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0x80, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0x90, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xa0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xa0, 0xb0)),
+        (0xb0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xc0, 0x00, tpa(31, 2), nop_i(),
+         nop_i()),
+        (IA64_DATA_KEY_MISS_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_DATA_KEY_MISS_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_DATA_KEY_MISS_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DATA_KEY_MISS_VECTOR + 0x20,
+                 IA64_DATA_KEY_MISS_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_DATA_KEY_MISS_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r30": KEY_TEST_VA,
+        "r31": IA64_ISR_NA,
+    }, entry=0x10)
+
+test_probe_key_miss_returns_zero = require_registers(
+    "probe_key_miss_returns_zero", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, 0x00, mov_rr_write(16, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0x80, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0x90, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xa0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xa0, 0xb0)),
+        (0xb0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xc0, 0x08, probe_w_imm(31, 2, 0), nop_i(),
+         nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+    ], {
+        "ip": 0xd0,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0,
+    }, entry=0x10)
+
+test_itr_i_instruction_key_miss_raises_key_vector = require_registers(
+    "itr_i_instruction_key_miss_raises_key_vector", [
+        (0x10, *movl_mlx(16, KEY_TEST_RR)),
+        (0x20, *movl_mlx(17, 0xa000000000000000)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(19, (1 << 13) | (1 << 36) | IA64_PSR_PK)),
+        (0x50, 0x00, mov_rr_write(16, 17), nop_i(),
+         nop_i()),
+        (0x60, 0x00, adds(7, LOW_VECTOR_ITIR, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+         nop_i()),
+        (0x80, 0x00, itr_i(5, 18), nop_i(),
+         nop_i()),
+        (0x90, *movl_mlx(2, 0xa000000000000430)),
+        (0xa0, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0xb0, 0x00, mov_m_gr_cr(7, 21), adds(6, 6, 0),
+         nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0xd0, 0x00, itr_i(6, 18), nop_i(),
+         nop_i()),
+        (0xe0, *movl_mlx(4, IA64_PKR_VALID)),
+        (0xf0, 0x00, adds(3, 0, 0), mov_br_gr(7, 2),
+         nop_i()),
+        (0x100, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(),
+         nop_i()),
+        (0x110, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_call_indirect(6, 7)),
+        (0x4000000 + IA64_INST_KEY_MISS_VECTOR, 0x00,
+         mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (0x4000000 + IA64_INST_KEY_MISS_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (0x4000000 + IA64_INST_KEY_MISS_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(28, 21), nop_i(), nop_i()),
+        (0x4000000 + IA64_INST_KEY_MISS_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_INST_KEY_MISS_VECTOR + 0x30,
+                 IA64_INST_KEY_MISS_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_INST_KEY_MISS_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0xa000000000000430,
+        "r31": (IA64_ISR_X | IA64_ISR_NI |
+                (2 << IA64_ISR_EI_SHIFT)),
+        "r28": KEY_TEST_RR,
+    }, entry=0x10)
+
 test_itr_d_8k_translation_uses_unrounded_paddr = require_registers(
     "itr_d_8k_translation_uses_unrounded_paddr", [
         (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE + 0x2000)),
@@ -8453,15 +9281,40 @@ def test_ar_itc_advances_in_guest_loop(qemu):
             "ar_itc_advances_in_guest_loop failed: "
             f"r16={regs.get('r16')!r} r17={regs.get('r17')!r}\n{output}")
 
+test_mov_to_ivr_illegal = require_exception(
+    "mov_to_ivr_illegal", [
+        (0x10, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_IVR), nop_i(),
+         nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_mov_to_irr_illegal = require_exception(
+    "mov_to_irr_illegal", [
+        (0x10, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_IRR3), nop_i(),
+         nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_mov_to_read_only_cr_predicate_false = require_registers(
+    "mov_to_read_only_cr_predicate_false", [
+        (0x10, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_IVR, qp=1),
+         nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_IRR3, qp=1),
+         nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(),
+         br_cond(0x30, 0x30)),
+    ], {
+        "ip": 0x30,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_async_timer_interrupt_enters_ivt = require_registers(
     "async_timer_interrupt_enters_ivt", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
-        (0x20, 0x00, mov_m_gr_cr(3, 72), nop_i(),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
          nop_i()),
         (0x30, 0x00, mov_m_gr_ar(0, 44), nop_i(),
          nop_i()),
-        (0x40, 0x00, mov_m_gr_cr(0, 1), nop_i(),
+        (0x40, 0x00, mov_m_gr_cr(0, IA64_CR_ITM), nop_i(),
          nop_i()),
         (0x50, *movl_mlx(19, (1 << 13) | (1 << 14))),
         (0x60, 0x10, mov_gr_psr_full(19), nop_i(),
@@ -8478,11 +9331,11 @@ test_async_timer_interrupt_records_boundary_ri = require_registers(
     "async_timer_interrupt_records_boundary_ri", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
-        (0x20, 0x00, mov_m_gr_cr(3, 72), nop_i(),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
          nop_i()),
         (0x30, 0x00, mov_m_gr_ar(0, 44), nop_i(),
          nop_i()),
-        (0x40, 0x00, mov_m_gr_cr(0, 1), nop_i(),
+        (0x40, 0x00, mov_m_gr_cr(0, IA64_CR_ITM), nop_i(),
          nop_i()),
         (0x50, *movl_mlx(19, (1 << 13) | (1 << 14))),
         (0x60, 0x10, mov_gr_psr_full(19), nop_i(),
@@ -8508,16 +9361,16 @@ test_async_timer_interrupt_preserves_bank1_grs = require_registers(
         (0x50, *movl_mlx(27, 0x2227)),
         (0x60, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
-        (0x70, 0x00, mov_m_gr_cr(3, 72), nop_i(),
+        (0x70, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
          nop_i()),
         (0x80, 0x00, mov_m_gr_ar(0, 44), nop_i(),
          nop_i()),
-        (0x90, 0x00, mov_m_gr_cr(0, 1), nop_i(),
+        (0x90, 0x00, mov_m_gr_cr(0, IA64_CR_ITM), nop_i(),
          nop_i()),
         (0xa0, *movl_mlx(19, (1 << 13) | (1 << 14) | (1 << 44))),
         (0xb0, 0x10, mov_gr_psr_full(19), nop_i(),
          br_cond(0xb0, 0xb0)),
-        (0x3000, 0x00, mov_m_cr_gr(5, 65), nop_i(),
+        (0x3000, 0x00, mov_m_cr_gr(5, IA64_CR_SAPIC_IVR), nop_i(),
          nop_i()),
         (0x3010, *movl_mlx(16, 0xa016)),
         (0x3020, *movl_mlx(27, 0xa027)),
@@ -8532,7 +9385,7 @@ test_async_timer_interrupt_preserves_bank1_grs = require_registers(
         (0x3070, *movl_mlx(4, 0x100)),
         (0x3080, 0x00, mov_m_gr_cr(4, 19), nop_i(),
          nop_i()),
-        (0x3090, 0x10, mov_m_gr_cr(0, 67), nop_i(),
+        (0x3090, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(),
          rfi_b()),
         (0x100, 0x00, nop_m(), adds(8, 0, 16),
          nop_i()),
@@ -8555,9 +9408,9 @@ test_async_timer_interrupt_preserves_bank1_grs = require_registers(
 test_tpr_preserves_mmi_and_mic = require_registers(
     "tpr_preserves_mmi_and_mic", [
         (0x10, *movl_mlx(3, 0x12345678900100ff)),
-        (0x20, 0x00, mov_m_gr_cr(3, 66), nop_i(),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_SAPIC_TPR), nop_i(),
          nop_i()),
-        (0x30, 0x00, mov_m_cr_gr(31, 66), nop_i(),
+        (0x30, 0x00, mov_m_cr_gr(31, IA64_CR_SAPIC_TPR), nop_i(),
          nop_i()),
         (0x40, 0x10, nop_m(), nop_i(),
          br_cond(0x40, 0x40)),
@@ -8570,22 +9423,22 @@ test_tpr_preserves_mmi_and_mic = require_registers(
 test_tpr_mmi_masks_timer_until_cleared = require_registers(
     "tpr_mmi_masks_timer_until_cleared", [
         (0x10, *movl_mlx(3, IA64_TPR_MMI)),
-        (0x20, 0x00, mov_m_gr_cr(3, 66), nop_i(),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_SAPIC_TPR), nop_i(),
          nop_i()),
         (0x30, 0x00, adds(4, 0xef, 0), nop_i(),
          nop_i()),
-        (0x40, 0x00, mov_m_gr_cr(4, 72), nop_i(),
+        (0x40, 0x00, mov_m_gr_cr(4, IA64_CR_ITV), nop_i(),
          nop_i()),
         (0x50, 0x00, mov_m_gr_ar(0, 44), nop_i(),
          nop_i()),
-        (0x60, 0x00, mov_m_gr_cr(0, 1), nop_i(),
+        (0x60, 0x00, mov_m_gr_cr(0, IA64_CR_ITM), nop_i(),
          nop_i()),
         (0x70, *movl_mlx(19, (1 << 13) | (1 << 14))),
         (0x80, 0x00, mov_gr_psr_full(19), nop_i(),
          nop_i()),
         (0x90, 0x00, nop_m(), adds(8, 0x2a, 0),
          nop_i()),
-        (0xa0, 0x00, mov_m_gr_cr(0, 66), nop_i(),
+        (0xa0, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), nop_i(),
          nop_i()),
         (0xb0, 0x10, nop_m(), nop_i(),
          br_cond(0xb0, 0xb0)),
@@ -8598,14 +9451,80 @@ test_tpr_mmi_masks_timer_until_cleared = require_registers(
         "r31": 0x63,
     }, entry=0x10)
 
+def sapic_nested_timer_priority_program(first_vector, second_vector):
+    psr_ic_i = (1 << 13) | (1 << 14)
+
+    return [
+        (0x10, *movl_mlx(3, first_vector)),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
+         nop_i()),
+        (0x30, 0x00, mov_m_gr_ar(4, 44), nop_i(),
+         nop_i()),
+        (0x40, 0x00, adds(4, 0x1000, 4), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x60, *movl_mlx(19, psr_ic_i)),
+        (0x70, 0x00, mov_gr_psr_full(19), srlz_d(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+        (0x3000, 0x00, mov_m_cr_gr(5, IA64_CR_SAPIC_IVR),
+         adds(31, 1, 31), nop_i()),
+        (0x3010, 0x00, nop_m(), cmp4_eq_imm(6, 7, 1, 31),
+         nop_i()),
+        (0x3020, 0x10, nop_m(), nop_i(),
+         br_cond(0x3020, 0x3100, qp=7)),
+        (0x3030, *movl_mlx(3, second_vector)),
+        (0x3040, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
+         nop_i()),
+        (0x3050, 0x00, mov_m_gr_ar(4, 44), nop_i(),
+         nop_i()),
+        (0x3060, 0x00, adds(4, 0x1000, 4), nop_i(),
+         nop_i()),
+        (0x3070, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x3080, *movl_mlx(19, psr_ic_i)),
+        (0x3090, 0x00, mov_gr_psr_full(19), srlz_d(),
+         nop_i()),
+        (0x30a0, 0x10, nop_m(), nop_i(),
+         br_cond(0x30a0, 0x30a0)),
+        (0x3100, 0x00, nop_m(), adds(8, 0x5a, 0),
+         nop_i()),
+        (0x3110, 0x10, nop_m(), nop_i(),
+         br_cond(0x3110, 0x3110)),
+    ]
+
+test_sapic_extint_masks_external_until_eoi = require_registers(
+    "sapic_extint_masks_external_until_eoi",
+    sapic_nested_timer_priority_program(0x00, 0xf0),
+    {
+        "ip": 0x30a0,
+        "exception": IA64_EXCP_NONE,
+        "r5": 0x00,
+        "r8": 0,
+        "r31": 1,
+    }, entry=0x10)
+
+test_sapic_same_class_higher_vector_preempts = require_registers(
+    "sapic_same_class_higher_vector_preempts",
+    sapic_nested_timer_priority_program(0xf0, 0xf1),
+    {
+        "ip": 0x3110,
+        "exception": IA64_EXCP_NONE,
+        "r5": 0xf1,
+        "r8": 0x5a,
+        "r31": 2,
+    }, entry=0x10)
+
 test_pal_halt_light_wakes_on_due_itm = require_registers(
     "pal_halt_light_wakes_on_due_itm", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
-        (0x20, 0x00, mov_m_gr_cr(3, 72), nop_i(),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
          nop_i()),
         (0x30, *movl_mlx(4, 0x200000)),
-        (0x40, 0x00, mov_m_gr_cr(4, 1), nop_i(),
+        (0x40, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
          nop_i()),
         (0x50, *movl_mlx(28, PAL_HALT_LIGHT)),
         (0x60, *movl_mlx(19, (1 << 13) | (1 << 14))),
@@ -8629,12 +9548,12 @@ test_pal_halt_light_wakes_on_due_itm = require_registers(
 test_masked_itv_discards_due_timer = require_registers(
     "masked_itv_discards_due_timer", [
         (0x10, *movl_mlx(3, IA64_VECTOR_MASKED | 0xef)),
-        (0x20, 0x00, mov_m_gr_cr(3, 72), nop_i(),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
          nop_i()),
         (0x30, 0x00, mov_m_gr_ar(0, 44), nop_i(),
          nop_i()),
         (0x40, *movl_mlx(4, 0x1000)),
-        (0x50, 0x00, mov_m_gr_cr(4, 1), nop_i(),
+        (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
          nop_i()),
         (0x60, *movl_mlx(8, 0x10000)),
         (0x70, 0x02, nop_m(), mov_lc_gr(8),
@@ -8643,7 +9562,7 @@ test_masked_itv_discards_due_timer = require_registers(
          br_cloop(0x80, 0x80)),
         (0x90, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
-        (0xa0, 0x00, mov_m_gr_cr(3, 72), nop_i(),
+        (0xa0, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
          nop_i()),
         (0xb0, *movl_mlx(19, (1 << 13) | (1 << 14))),
         (0xc0, 0x00, mov_gr_psr_full(19), nop_i(),
@@ -8658,6 +9577,34 @@ test_masked_itv_discards_due_timer = require_registers(
         "r31": 0,
     }, entry=0x10)
 
+test_invalid_itv_vector_is_ignored = require_registers(
+    "invalid_itv_vector_is_ignored", [
+        (0x10, *movl_mlx(3, 1)),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
+         nop_i()),
+        (0x30, 0x00, mov_m_gr_ar(0, 44), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(4, 0x1000)),
+        (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x60, *movl_mlx(8, 0x10000)),
+        (0x70, 0x02, nop_m(), mov_lc_gr(8),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cloop(0x80, 0x80)),
+        (0x90, *movl_mlx(19, (1 << 13) | (1 << 14))),
+        (0xa0, 0x00, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(),
+         br_cond(0xb0, 0xb0)),
+        (0x3000, 0x10, nop_m(), adds(31, 0x66, 0),
+         br_cond(0x3000, 0x3000)),
+    ], {
+        "ip": 0xb0,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0,
+    }, entry=0x10)
+
 test_past_itm_does_not_fire = require_registers(
     "past_itm_does_not_fire", [
         (0x10, *movl_mlx(4, 0x200000)),
@@ -8665,9 +9612,9 @@ test_past_itm_does_not_fire = require_registers(
          nop_i()),
         (0x30, 0x00, mov_m_gr_ar(4, 44), nop_i(),
          nop_i()),
-        (0x40, 0x00, mov_m_gr_cr(3, 72), nop_i(),
+        (0x40, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
          nop_i()),
-        (0x50, 0x00, mov_m_gr_cr(0, 1), nop_i(),
+        (0x50, 0x00, mov_m_gr_cr(0, IA64_CR_ITM), nop_i(),
          nop_i()),
         (0x60, *movl_mlx(19, (1 << 13) | (1 << 14))),
         (0x70, 0x10, mov_gr_psr_full(19), nop_i(),
@@ -8683,16 +9630,17 @@ test_past_rearmed_itm_does_not_interrupt = require_registers(
     "past_rearmed_itm_does_not_interrupt", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
-        (0x20, 0x00, mov_m_gr_cr(3, 72), nop_i(),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
          nop_i()),
         (0x30, 0x00, mov_m_gr_ar(0, 44), nop_i(),
          nop_i()),
-        (0x40, 0x00, mov_m_gr_cr(0, 1), nop_i(),
+        (0x40, 0x00, mov_m_gr_cr(0, IA64_CR_ITM), nop_i(),
          nop_i()),
         (0x50, *movl_mlx(19, (1 << 13) | (1 << 14))),
         (0x60, 0x10, mov_gr_psr_full(19), nop_i(),
          br_cond(0x60, 0x60)),
-        (0x3000, 0x00, mov_m_cr_gr(5, 65), adds(31, 1, 31),
+        (0x3000, 0x00, mov_m_cr_gr(5, IA64_CR_SAPIC_IVR),
+         adds(31, 1, 31),
          nop_i()),
         (0x3010, 0x00, nop_m(), cmp4_eq_imm(6, 7, 1, 31),
          nop_i()),
@@ -8702,11 +9650,12 @@ test_past_rearmed_itm_does_not_interrupt = require_registers(
         (0x3040, 0x00, mov_m_gr_ar(4, 44), nop_i(),
          nop_i()),
         (0x3050, *movl_mlx(6, 0x100)),
-        (0x3060, 0x00, mov_m_gr_cr(6, 1), nop_i(),
+        (0x3060, 0x00, mov_m_gr_cr(6, IA64_CR_ITM), nop_i(),
          nop_i()),
-        (0x3070, 0x10, mov_m_gr_cr(0, 67), nop_i(),
+        (0x3070, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(),
          rfi_b()),
-        (0x3080, 0x00, mov_m_gr_cr(0, 67), adds(8, 0x2a, 0),
+        (0x3080, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI),
+         adds(8, 0x2a, 0),
          nop_i()),
         (0x3090, 0x10, nop_m(), nop_i(),
          br_cond(0x3090, 0x3090)),
@@ -9053,6 +10002,45 @@ test_rsm_ic_serialized_data_nested_tlb = require_registers(
         "r31": 0x6f,
     }, entry=0x10)
 
+INTERRUPTION_PSR_INPUT = (
+    IA64_PSR_UP | IA64_PSR_MFL | IA64_PSR_MFH |
+    IA64_PSR_AC | IA64_PSR_IC | IA64_PSR_I | IA64_PSR_PK |
+    IA64_PSR_DFL | IA64_PSR_DFH | IA64_PSR_SP |
+    IA64_PSR_DI | IA64_PSR_SI | IA64_PSR_DT | IA64_PSR_RT |
+    IA64_PSR_MC | IA64_PSR_VM
+)
+
+INTERRUPTION_PSR_EXPECTED = (
+    IA64_PSR_BE | IA64_PSR_UP | IA64_PSR_MFL | IA64_PSR_MFH |
+    IA64_PSR_PK | IA64_PSR_DT | IA64_PSR_PP | IA64_PSR_RT |
+    IA64_PSR_MC
+)
+
+test_exception_entry_initializes_psr = require_registers(
+    "exception_entry_initializes_psr", [
+        (0x10, *movl_mlx(16, IA64_DCR_BE | IA64_DCR_PP)),
+        (0x20, *movl_mlx(19, INTERRUPTION_PSR_INPUT)),
+        (0x30, 0x00, mov_m_gr_cr(16, 0), nop_i(),
+         nop_i()),
+        (0x40, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0x40, 0x50)),
+        (0x50, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x60, 0x00, break_m(0x42), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR, 0x00, mov_m_psr_gr(29), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 16),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_BREAK_VECTOR + 0x20, IA64_BREAK_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_BREAK_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r29": INTERRUPTION_PSR_EXPECTED,
+        "r30": INTERRUPTION_PSR_INPUT,
+    }, entry=0x10)
+
 test_exception_preserves_translation_bits = require_registers(
     "exception_preserves_translation_bits", [
         (0x10, *movl_mlx(18, 0x0010000004000661)),
@@ -9099,6 +10087,53 @@ test_tpa_indexed_decode = require_registers("tpa_indexed_decode", [
      br_cond(0x90, 0x90)),
 ], {"ip": 0x90, "exception": IA64_EXCP_NONE, "r31": 0x4008430}, entry=0x10)
 
+test_tpa_dt_disabled_uses_dtlb_entry = require_registers(
+    "tpa_dt_disabled_uses_dtlb_entry", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, 0x00, adds(7, 0x68, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(),
+         nop_i()),
+        (0x50, 0x00, itr_d(5, 18), nop_i(),
+         nop_i()),
+        (0x60, 0x00, addl(2, 0x8430, 0), nop_i(),
+         nop_i()),
+        (0x70, 0x00, tpa(31, 2), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x4008430,
+    }, entry=0x10)
+
+test_tpa_dt_disabled_miss_raises_alt_dtlb = require_registers(
+    "tpa_dt_disabled_miss_raises_alt_dtlb", [
+        (0x10, *movl_mlx(2, HIGH_TR_BASE + 0x90000)),
+        (0x20, *movl_mlx(19, 1 << 13)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x50, 0x00, tpa(31, 2), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x20,
+                 IA64_ALT_DTLB_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r30": HIGH_TR_BASE + 0x90000,
+        "r31": IA64_ISR_NA,
+    }, entry=0x10)
+
 test_tpa_uses_short_vhpt_walk = require_registers(
     "tpa_uses_short_vhpt_walk", [
         (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
@@ -9134,6 +10169,40 @@ test_tpa_uses_short_vhpt_walk = require_registers(
         "exception": IA64_EXCP_NONE,
         "r31": 0x4000430,
         "r30": 5,
+    }, entry=0x10)
+
+test_tak_uses_short_vhpt_walk = require_registers(
+    "tak_uses_short_vhpt_walk", [
+        (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
+        (0x20, *movl_mlx(17, 0xa000000000000000)),
+        (0x30, *movl_mlx(18, 0x539)),
+        (0x40, *movl_mlx(19, 0xbffc000000000000)),
+        (0x50, *movl_mlx(20, 0x0010000004009661)),
+        (0x60, *movl_mlx(21, 0x0010000004000661)),
+        (0x70, *movl_mlx(22, 0x4008000)),
+        (0x80, 0x00, st8(22, 21), nop_i(),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(16, 8), adds(7, 0x38, 0),
+         nop_i()),
+        (0xa0, 0x00, mov_rr_write(18, 17), nop_i(),
+         nop_i()),
+        (0xb0, 0x00, mov_m_gr_cr(19, 20), nop_i(),
+         nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0),
+         nop_i()),
+        (0xd0, 0x00, itr_d(5, 20), nop_i(),
+         nop_i()),
+        (0xe0, *movl_mlx(2, 0xa000000000000430)),
+        (0xf0, 0x00, ssm(1 << 17), nop_i(),
+         nop_i()),
+        (0x100, 0x00, tak(31, 2), nop_i(),
+         nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(),
+         br_cond(0x110, 0x110)),
+    ], {
+        "ip": 0x110,
+        "exception": IA64_EXCP_NONE,
+        "r31": 5,
     }, entry=0x10)
 
 test_short_vhpt_not_present_raises_page_fault = require_registers(
@@ -9499,7 +10568,7 @@ test_speculative_load_defers_short_vhpt_walk = require_registers(
         "exception": IA64_EXCP_NONE,
         "r25": 0,
         "r26": 1,
-        "r30": 0,
+        "r30": 5,
     }, entry=0x10)
 
 test_speculative_load_defers_region6_vhpt_not_present = require_registers(
@@ -9624,7 +10693,7 @@ test_translation_hash_m_unit_decode = require_registers(
          br_cond(0x50, 0x50)),
     ], {
         "ip": 0x50,
-        "r17": 0,
+        "r17": 1,
         "r18": 0x12345000,
         "r19": 0x12345,
     }, entry=0x10)
@@ -9643,7 +10712,7 @@ test_translation_hash_m46_ignored_bits_decode = require_registers(
     ], {
         "ip": 0x50,
         "exception": IA64_EXCP_NONE,
-        "r17": 0,
+        "r17": 1,
         "r18": 0x12345000,
         "r19": 0x12345,
     }, entry=0x10)
@@ -9689,6 +10758,221 @@ test_translation_hash_ops_clear_dest_nat = require_registers(
         "r28": 0,
         "r29": 1,
         "r30": 0,
+    }, entry=0x10)
+
+test_translation_hash_nat_source_rules = require_registers(
+    "translation_hash_nat_source_rules", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x00, thash(17, 16), nop_i(),
+         nop_i()),
+        (0x40, 0x00, ttag(18, 16), nop_i(),
+         nop_i()),
+        (0x50, 0x00, nop_m(), tnat_z(1, 2, 17),
+         nop_i()),
+        (0x60, 0x00, nop_m(), addl(25, 1, 0, qp=1),
+         addl(26, 1, 0, qp=2)),
+        (0x70, 0x00, nop_m(), tnat_z(3, 4, 18),
+         nop_i()),
+        (0x80, 0x00, nop_m(), addl(27, 1, 0, qp=3),
+         addl(28, 1, 0, qp=4)),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_cond(0x90, 0x90)),
+        (0x200, 0x00, 0, 0,
+         0),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r25": 0,
+        "r26": 1,
+        "r27": 0,
+        "r28": 1,
+    }, entry=0x10)
+
+test_tak_nat_source_consumes_non_access = require_registers(
+    "tak_nat_source_consumes_non_access", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x00, ssm(1 << 13), nop_i(),
+         nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x50, 0x00, tak(17, 16), nop_i(),
+         nop_i()),
+        (0x5600, 0x00, mov_m_cr_gr(14, 20), nop_i(),
+         nop_i()),
+        (0x5610, 0x00, mov_m_cr_gr(15, 17), nop_i(),
+         nop_i()),
+        (0x5620, 0x10, nop_m(), nop_i(),
+         br_cond(0x5620, 0x5620)),
+        (0x200, 0x00, 0, 0,
+         0),
+    ], {
+        "ip": 0x5620,
+        "exception": IA64_EXCP_NONE,
+        "r14": 0,
+        "r15": IA64_ISR_NA,
+    }, entry=0x10)
+
+test_tpa_nat_source_consumes_non_access = require_registers(
+    "tpa_nat_source_consumes_non_access", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x00, ssm(1 << 13), nop_i(),
+         nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x50, 0x00, tpa(17, 16), nop_i(),
+         nop_i()),
+        (0x5600, 0x00, mov_m_cr_gr(14, 20), nop_i(),
+         nop_i()),
+        (0x5610, 0x00, mov_m_cr_gr(15, 17), nop_i(),
+         nop_i()),
+        (0x5620, 0x10, nop_m(), nop_i(),
+         br_cond(0x5620, 0x5620)),
+        (0x200, 0x00, 0, 0,
+         0),
+    ], {
+        "ip": 0x5620,
+        "exception": IA64_EXCP_NONE,
+        "r14": 0,
+        "r15": IA64_ISR_NA,
+    }, entry=0x10)
+
+def register_nat_consumption_test(name, fault_bundle, expected_isr=0,
+                                  enable_ic=True):
+    bundles = [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(),
+         nop_i()),
+    ]
+    fault_ip = 0x30
+    if enable_ic:
+        bundles.extend([
+            (0x30, 0x00, ssm(1 << 13), nop_i(),
+             nop_i()),
+            (0x40, 0x00, srlz_d(), nop_i(),
+             nop_i()),
+        ])
+        fault_ip = 0x50
+    bundles.extend([
+        (fault_ip, *fault_bundle),
+        (0x5600, 0x00, mov_m_cr_gr(14, 20), nop_i(),
+         nop_i()),
+        (0x5610, 0x00, mov_m_cr_gr(15, 17), nop_i(),
+         nop_i()),
+        (0x5620, 0x10, nop_m(), nop_i(),
+         br_cond(0x5620, 0x5620)),
+        (0x200, 0x00, 0, 0,
+         0),
+    ])
+    return require_registers(name, bundles, {
+        "ip": 0x5620,
+        "exception": IA64_EXCP_NONE,
+        "r14": 0,
+        "r15": expected_isr,
+    }, entry=0x10)
+
+test_mov_ar_nat_source_consumes = register_nat_consumption_test(
+    "mov_ar_nat_source_consumes",
+    (0x00, mov_m_gr_ar(16, 65), nop_i(), nop_i()))
+
+test_mov_br_nat_source_consumes = register_nat_consumption_test(
+    "mov_br_nat_source_consumes",
+    (0x09, nop_m(), nop_m(), mov_b_gr(0, 16)),
+    2 << IA64_ISR_EI_SHIFT)
+
+test_mov_pr_nat_source_consumes = register_nat_consumption_test(
+    "mov_pr_nat_source_consumes",
+    (0x00,
+     bitfield(3, 33, 3) | bitfield(16, 13, 7) | bitfield(0x7f, 6, 7),
+     nop_i(), nop_i()))
+
+test_mov_cr_nat_source_consumes = register_nat_consumption_test(
+    "mov_cr_nat_source_consumes",
+    (0x00, mov_m_gr_cr(16, 0), nop_i(), nop_i()))
+
+test_mov_psr_nat_source_consumes = register_nat_consumption_test(
+    "mov_psr_nat_source_consumes",
+    (0x00, mov_m_gr_psrl(16), nop_i(), nop_i()))
+
+test_mov_um_nat_source_consumes = register_nat_consumption_test(
+    "mov_um_nat_source_consumes",
+    (0x00, mov_m_gr_psr_um(16), nop_i(), nop_i()))
+
+test_mov_rr_nat_index_consumes = register_nat_consumption_test(
+    "mov_rr_nat_index_consumes",
+    (0x00, mov_rr_read(17, 16), nop_i(), nop_i()))
+
+test_mov_pkr_nat_index_consumes = register_nat_consumption_test(
+    "mov_pkr_nat_index_consumes",
+    (0x00, mov_pkr_indexed(16, 17, bit36=1), nop_i(), nop_i()))
+
+test_mov_pmc_nat_value_consumes = register_nat_consumption_test(
+    "mov_pmc_nat_value_consumes",
+    (0x00, mov_grpmc_indexed(3, 16), nop_i(), nop_i()))
+
+test_mov_cpuid_nat_index_consumes = register_nat_consumption_test(
+    "mov_cpuid_nat_index_consumes",
+    (0x00, mov_cpuid(17, 16), nop_i(), nop_i()))
+
+test_itc_d_nat_pte_consumes = register_nat_consumption_test(
+    "itc_d_nat_pte_consumes",
+    (0x00, itc_d(16), nop_i(), nop_i()),
+    IA64_ISR_NI, enable_ic=False)
+
+test_itr_d_nat_slot_consumes = register_nat_consumption_test(
+    "itr_d_nat_slot_consumes",
+    (0x00, itr_d(16, 17), nop_i(), nop_i()),
+    IA64_ISR_NI, enable_ic=False)
+
+test_ptc_l_nat_addr_consumes = register_nat_consumption_test(
+    "ptc_l_nat_addr_consumes",
+    (0x00, ptc_l(16, 17), nop_i(), nop_i()))
+
+test_ptr_d_nat_size_consumes = register_nat_consumption_test(
+    "ptr_d_nat_size_consumes",
+    (0x00, ptr_d(17, 16), nop_i(), nop_i()))
+
+test_ptc_e_nat_addr_consumes = register_nat_consumption_test(
+    "ptc_e_nat_addr_consumes",
+    (0x00, ptc_e(16), nop_i(), nop_i()))
+
+test_fc_nat_source_consumes_non_access = register_nat_consumption_test(
+    "fc_nat_source_consumes_non_access",
+    (0x00, fc_i(16), nop_i(), nop_i()),
+    IA64_ISR_NA | IA64_ISR_R)
+
+test_setf_nat_source_sets_fr_natval = require_registers(
+    "setf_nat_source_sets_fr_natval", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x00, setf_sig(7, 16), nop_i(),
+         nop_i()),
+        (0x40, 0x10, getf_sig(18, 7), nop_i(),
+         nop_b()),
+        (0x50, 0x02, nop_m(), tnat_z(1, 2, 18),
+         adds(19, 1, 0, qp=1)),
+        (0x60, 0x00, nop_m(), adds(20, 1, 0, qp=2),
+         nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0x70)),
+        (0x200, 0x00, 0, 0,
+         0),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r19": 0,
+        "r20": 1,
     }, entry=0x10)
 
 test_short_vhpt_thash_decode = require_registers(
@@ -10177,7 +11461,7 @@ test_region6_local_sapic_store = require_registers("region6_local_sapic_store", 
      br_cond(0x30, 0x40)),
     (0x40, 0x00, st8(3, 4), nop_i(),
      nop_i()),
-    (0x50, 0x00, mov_m_cr_gr(30, 71), nop_i(),
+    (0x50, 0x00, mov_m_cr_gr(30, IA64_CR_SAPIC_IRR3), nop_i(),
      nop_i()),
     (0x60, 0x10, nop_m(), nop_i(),
      br_cond(0x60, 0x60)),
@@ -10210,7 +11494,7 @@ test_region6_processor_interrupt_block_xtp_store = require_registers(
          br_cond(0x30, 0x40)),
         (0x40, 0x00, st1_postinc(3, 4, 0), nop_i(),
          nop_i()),
-        (0x50, 0x00, mov_m_cr_gr(30, 71), nop_i(),
+        (0x50, 0x00, mov_m_cr_gr(30, IA64_CR_SAPIC_IRR3), nop_i(),
          nop_i()),
         (0x60, 0x10, nop_m(), nop_i(),
          br_cond(0x60, 0x60)),
@@ -10237,6 +11521,112 @@ test_firmware_identity_under_translation = require_registers(
         "exception": IA64_EXCP_NONE,
         "r31": FW_IDENTITY_DATA,
     }, entry=0x10)
+
+
+def test_firmware_debug_tables(qemu):
+    memory_mb = 192
+    low_ram_end = memory_mb * 1024 * 1024
+    system_table_pointer_base = (low_ram_end - 1) & ~((4 * 1024 * 1024) - 1)
+    estp_fd, estp_path = tempfile.mkstemp(prefix="ia64-estp-", suffix=".bin")
+    low_fd, low_path = tempfile.mkstemp(prefix="ia64-low-", suffix=".bin")
+    os.close(estp_fd)
+    os.close(low_fd)
+    try:
+        run_firmware_pmemsave(qemu, [
+            (system_table_pointer_base, 0x1000, estp_path),
+            (0, 0x400000, low_path),
+        ], memory_mb=memory_mb)
+        with open(estp_path, "rb") as f:
+            estp = f.read(0x1000)
+        with open(low_path, "rb") as f:
+            low = f.read()
+    finally:
+        for path in (estp_path, low_path):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    if len(estp) < 24:
+        raise RuntimeError("short EFI system table pointer dump")
+    signature, system_table_base, pointer_crc, reserved = \
+        struct.unpack_from("<QQII", estp, 0)
+    crc_bytes = bytearray(estp[:24])
+    crc_bytes[16:20] = b"\x00\x00\x00\x00"
+    if signature != EFI_SYSTEM_TABLE_SIGNATURE:
+        raise RuntimeError(f"bad EFI system table pointer signature 0x{signature:x}")
+    if reserved != 0:
+        raise RuntimeError(f"nonzero EFI system table pointer reserved 0x{reserved:x}")
+    if (zlib.crc32(crc_bytes) & 0xffffffff) != pointer_crc:
+        raise RuntimeError("EFI system table pointer CRC mismatch")
+    if system_table_base + 120 > len(low):
+        raise RuntimeError(f"EFI system table outside low dump 0x{system_table_base:x}")
+
+    table = low[system_table_base:system_table_base + 160]
+    table_sig, revision, header_size, table_crc, table_reserved = \
+        struct.unpack_from("<QIIII", table, 0)
+    if table_sig != EFI_SYSTEM_TABLE_SIGNATURE:
+        raise RuntimeError(f"bad EFI system table signature 0x{table_sig:x}")
+    if revision != 0x0001000a or header_size != 120 or table_reserved != 0:
+        raise RuntimeError(
+            f"unexpected EFI system table header rev=0x{revision:x} "
+            f"size={header_size} reserved=0x{table_reserved:x}")
+    table_crc_bytes = bytearray(table[:header_size])
+    table_crc_bytes[16:20] = b"\x00\x00\x00\x00"
+    if (zlib.crc32(table_crc_bytes) & 0xffffffff) != table_crc:
+        raise RuntimeError("EFI system table CRC mismatch")
+
+    entry_count, config_table = struct.unpack_from("<QQ", table, 104)
+    if entry_count < 7:
+        raise RuntimeError(f"too few EFI configuration table entries {entry_count}")
+    if config_table + entry_count * 24 > len(low):
+        raise RuntimeError(f"EFI configuration table outside low dump 0x{config_table:x}")
+
+    config = {}
+    for i in range(entry_count):
+        off = config_table + i * 24
+        guid = bytes(low[off:off + 16])
+        vendor_table, = struct.unpack_from("<Q", low, off + 16)
+        config[guid] = vendor_table
+    if config.get(EFI_ACPI_20_TABLE_GUID) != 0x800000:
+        raise RuntimeError("ACPI 2.0 RSDP configuration table is not physical 0x800000")
+    debug_header = config.get(EFI_DEBUG_IMAGE_INFO_TABLE_GUID)
+    if debug_header is None:
+        raise RuntimeError("missing EFI debug image info configuration table")
+    if debug_header + 16 > len(low):
+        raise RuntimeError(f"debug image info header outside low dump 0x{debug_header:x}")
+
+    update_status, table_size, debug_table = \
+        struct.unpack_from("<IIQ", low, debug_header)
+    if update_status != EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED:
+        raise RuntimeError(f"unexpected debug image update status 0x{update_status:x}")
+    if update_status & EFI_DEBUG_IMAGE_INFO_UPDATE_IN_PROGRESS:
+        raise RuntimeError("debug image info table left in update-in-progress state")
+    if table_size != 9:
+        raise RuntimeError(f"unexpected debug image info table size {table_size}")
+    if debug_table + table_size * 8 > len(low):
+        raise RuntimeError(f"debug image info table outside low dump 0x{debug_table:x}")
+
+    first_normal, = struct.unpack_from("<Q", low, debug_table)
+    if first_normal + 24 > len(low):
+        raise RuntimeError(f"debug image normal entry outside low dump 0x{first_normal:x}")
+    image_info_type, loaded_image, image_handle = \
+        struct.unpack_from("<I4xQQ", low, first_normal)
+    if image_info_type != EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL:
+        raise RuntimeError(f"unexpected debug image info type {image_info_type}")
+    if loaded_image == 0 or image_handle != 0x2000:
+        raise RuntimeError(
+            f"unexpected firmware debug image entry loaded=0x{loaded_image:x} "
+            f"handle=0x{image_handle:x}")
+
+
+def test_firmware_load_image_selftests(qemu):
+    output = run_firmware_serial(qemu)
+    expected = "Loaded Image Options: SourceBuffer contract verified"
+
+    if expected not in output:
+        raise RuntimeError(f"missing firmware load-image selftest line:\n{output}")
+
 
 test_rfi_restores_translation_bits = require_registers(
     "rfi_restores_translation_bits", [
@@ -11156,10 +12546,10 @@ test_pal_vm_info_l0_data = require_registers("pal_vm_info_l0_data",
      "r9": PAL_VM_INFO_L0_I, "r10": PAL_PAGE_SIZE_MASK,
      "r11": 0}, entry=0x10)
 
-test_pal_vm_info_l1_unified = require_registers("pal_vm_info_l1_unified",
+test_pal_vm_info_l1_invalid = require_registers("pal_vm_info_l1_invalid",
     pal_call_program(PAL_VM_INFO, [(29, 1), (30, 2), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
-     "r9": PAL_VM_INFO_L1_U, "r10": PAL_PAGE_SIZE_MASK,
+    {"ip": 0x60, "r28": PAL_VM_INFO,
+     "r8": -2 & 0xffffffffffffffff, "r9": 0, "r10": 0,
      "r11": 0}, entry=0x10)
 
 test_pal_vm_info_invalid = require_registers("pal_vm_info_invalid",
@@ -11247,6 +12637,46 @@ test_pal_vm_tr_read_misaligned_buffer = require_registers(
     {"ip": 0x80, "r28": PAL_VM_TR_READ,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+test_pal_proc_entry_virtual_itr = require_registers(
+    "pal_proc_entry_virtual_itr", [
+        (0x10, *movl_mlx(18, PAL_VIRTUAL_CODE_PTE)),
+        (0x20, *movl_mlx(22, PAL_VIRTUAL_PROC_PTE)),
+        (0x30, *movl_mlx(20, PAL_VIRTUAL_CODE_BASE)),
+        (0x40, *movl_mlx(21, PAL_VIRTUAL_PROC_BASE)),
+        (0x50, *movl_mlx(25, PAL_VIRTUAL_RR)),
+        (0x60, 0x00, mov_rr_write(25, 21), nop_i(), nop_i()),
+        (0x70, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(20, 20), adds(7, PAL_VIRTUAL_ITIR, 0),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0), nop_i()),
+        (0xa0, 0x00, itr_i(5, 18), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_m_gr_cr(21, 20), adds(6, 6, 0), nop_i()),
+        (0xc0, 0x00, itr_i(6, 22), nop_i(), nop_i()),
+        (0xd0, *movl_mlx(23, PAL_VIRTUAL_CODE_ENTRY)),
+        (0xe0, *movl_mlx(24, PAL_VIRTUAL_PROC_ENTRY)),
+        (0xf0, *movl_mlx(19, PAL_VIRTUAL_PSR)),
+        (0x100, 0x00, nop_m(), mov_b_gr(7, 23), nop_i()),
+        (0x110, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_call_indirect(6, 7)),
+        (PAL_VIRTUAL_CODE_ENTRY_PA, *movl_mlx(28, PAL_VERSION)),
+        (PAL_VIRTUAL_CODE_ENTRY_PA + 0x10, 0x00, nop_m(), mov_b_gr(7, 24),
+         nop_i()),
+        (PAL_VIRTUAL_CODE_ENTRY_PA + 0x20, 0x10, nop_m(), nop_i(),
+         br_call_indirect(0, 7)),
+        (PAL_VIRTUAL_CODE_ENTRY_PA + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(PAL_VIRTUAL_CODE_ENTRY + 0x30,
+                 PAL_VIRTUAL_CODE_ENTRY + 0x30)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": PAL_VIRTUAL_CODE_ENTRY + 0x30,
+        "r28": PAL_VERSION,
+        "r8": 0,
+        "r9": PAL_VERSION_VALUE,
+        "r10": PAL_VERSION_VALUE,
+        "r11": 0,
+    }, entry=0x10)
 
 test_pal_prefetch_vis = require_registers("pal_prefetch_vis",
     pal_call_program(PAL_PREFETCH_VIS),
@@ -12243,6 +13673,55 @@ test_firmware_unaligned_store_assist = require_registers(
     },
 )
 
+test_firmware_unaligned_speculative_load_assist = require_registers(
+    "firmware_unaligned_speculative_load_assist",
+    [
+        (0x10, *movl_mlx(20, 0x1122334455667788)),
+        (0x20, *movl_mlx(21, 0x99aabbccddeeff00)),
+        (0x30, 0x00, addl(3, 0x300, 0), addl(5, 0x304, 0),
+         nop_i()),
+        (0x40, 0x0a, st8(3, 20), adds(3, 8, 3), nop_i()),
+        (0x50, 0x0a, st8(3, 21), adds(3, -8, 3), nop_i()),
+        (0x60, 0x00, addl(2, 0x10000, 0), nop_i(), nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x80, 0x00, ssm((1 << 13) | (1 << 3)), nop_i(), nop_i()),
+        (0x90, 0x00, ld8_s(4, 5), nop_i(), nop_i()),
+        (0xa0, 0x00, nop_m(), adds(8, 0, 4), nop_i()),
+        (0xb0, 0x00, nop_m(), tnat_z(1, 2, 4), nop_i()),
+        (0xc0, 0x00, nop_m(), addl(9, 1, 0, qp=1),
+         addl(10, 1, 0, qp=2)),
+        (0xd0, 0x00, ld8_a(6, 3), nop_i(), nop_i()),
+        (0xe0, 0x00, nop_m(), addl(6, 0x55, 0), nop_i()),
+        (0xf0, 0x00, ld8_a(6, 5), nop_i(), nop_i()),
+        (0x100, 0x00, nop_m(), adds(11, 0, 6), nop_i()),
+        (0x110, 0x00, nop_m(), addl(6, 0x77, 0), nop_i()),
+        (0x120, 0x00, ld8_c_nc(6, 3), nop_i(), nop_i()),
+        (0x130, 0x00, ld8_a(7, 3), nop_i(), nop_i()),
+        (0x140, 0x00, nop_m(), addl(7, 0x66, 0), nop_i()),
+        (0x150, 0x00, ld8_sa(7, 5), nop_i(), nop_i()),
+        (0x160, 0x00, nop_m(), adds(12, 0, 7), nop_i()),
+        (0x170, 0x00, nop_m(), tnat_z(3, 4, 7), nop_i()),
+        (0x180, 0x00, nop_m(), addl(13, 1, 0, qp=3),
+         addl(14, 1, 0, qp=4)),
+        (0x190, 0x00, nop_m(), addl(7, 0x88, 0), nop_i()),
+        (0x1a0, 0x00, ld8_c_nc(7, 3), nop_i(), nop_i()),
+        (0x1b0, 0x10, nop_m(), nop_i(), br_cond(0x1b0, 0x1b0)),
+    ],
+    {
+        "ip": 0x1b0,
+        "exception": IA64_EXCP_NONE,
+        "r6": 0x1122334455667788,
+        "r7": 0x1122334455667788,
+        "r8": 0xddeeff0011223344,
+        "r9": 1,
+        "r10": 0,
+        "r11": 0x55,
+        "r12": 0x66,
+        "r13": 1,
+        "r14": 0,
+    },
+)
+
 test_speculative_unaligned_defers = require_registers(
     "speculative_unaligned_defers",
     [
@@ -12539,6 +14018,15 @@ TEST_NAMES = {
     "store_invalidates_advanced_load": test_store_invalidates_advanced_load,
     "rse_call_invalidates_stacked_alat": test_rse_call_invalidates_stacked_alat,
     "semaphore_ops_invalidate_advanced_loads": test_semaphore_ops_invalidate_advanced_loads,
+    "xchg4_result_base_alias_invalidates_alat":
+        test_xchg4_result_base_alias_invalidates_alat,
+    "fetchadd4_result_base_alias_invalidates_alat":
+        test_fetchadd4_result_base_alias_invalidates_alat,
+    "cmpxchg4_result_base_alias_success_invalidates_alat":
+        test_cmpxchg4_result_base_alias_success_invalidates_alat,
+    "cmpxchg4_result_base_alias_failure_keeps_alat":
+        test_cmpxchg4_result_base_alias_failure_keeps_alat,
+    "cmpxchg4_full_ar_ccv_compare": test_cmpxchg4_full_ar_ccv_compare,
     "semaphore_ops_clear_result_nat": test_semaphore_ops_clear_result_nat,
     "fetchadd4_alt_dtlb_sets_read_write_isr":
         test_fetchadd4_alt_dtlb_sets_read_write_isr,
@@ -12563,6 +14051,8 @@ TEST_NAMES = {
         test_speculative_recovery_dcr_dm_defers_tlb_miss,
     "speculative_recovery_dcr_da_defers_access_bit":
         test_speculative_recovery_dcr_da_defers_access_bit,
+    "speculative_recovery_dcr_dk_defers_key_miss":
+        test_speculative_recovery_dcr_dk_defers_key_miss,
     "speculative_recovery_unaligned_defers":
         test_speculative_recovery_unaligned_defers,
     "ld8_s_d2_hint_decode": test_ld8_s_d2_hint_decode,
@@ -12656,6 +14146,10 @@ TEST_NAMES = {
     "fp_alat_does_not_satisfy_gr_check_load": test_fp_alat_does_not_satisfy_gr_check_load,
     "ldfp8_postinc_decode": test_ldfp8_postinc_decode,
     "ldf_fill_postinc_decode": test_ldf_fill_postinc_decode,
+    "ldf8_loads_integer_register_format": test_ldf8_loads_integer_register_format,
+    "ldf8_f1_does_not_change_fixed_register":
+        test_ldf8_f1_does_not_change_fixed_register,
+    "stf_spill_ldf_fill_preserves_sig": test_stf_spill_ldf_fill_preserves_sig,
     "st1_postinc_decode": test_st1_postinc_decode,
     "st8_postinc_same_base_value_uses_old_base":
         test_st8_postinc_same_base_value_uses_old_base,
@@ -12677,6 +14171,8 @@ TEST_NAMES = {
     "probe_r_fault_ignored_fields_decode":
         test_probe_r_fault_ignored_fields_decode,
     "probe_w_imm_decode": test_probe_w_imm_decode,
+    "probe_w_dt_disabled_miss_raises_alt_dtlb":
+        test_probe_w_dt_disabled_miss_raises_alt_dtlb,
     "sxt1_decode": test_sxt1_decode,
     "mov_lc_imm_decode": test_mov_lc_imm_decode,
     "mov_br_hint_decode": test_mov_br_hint_decode,
@@ -12696,6 +14192,8 @@ TEST_NAMES = {
     "itc_d_preserves_24bit_key": test_itc_d_preserves_24bit_key,
     "itc_d_not_present_raises_page_fault":
         test_itc_d_not_present_raises_page_fault,
+    "tak_not_present_dtlb_returns_one":
+        test_tak_not_present_dtlb_returns_one,
     "itc_d_clear_accessed_raises_data_access_bit":
         test_itc_d_clear_accessed_raises_data_access_bit,
     "itc_d_clear_dirty_raises_dirty_bit":
@@ -12704,19 +14202,39 @@ TEST_NAMES = {
         test_itc_d_clear_accessed_store_precedes_dirty_bit,
     "itc_d_psr_da_suppresses_one_data_access_bit":
         test_itc_d_psr_da_suppresses_one_data_access_bit,
+    "itc_d_data_key_miss_raises_key_vector":
+        test_itc_d_data_key_miss_raises_key_vector,
+    "itc_d_key_permission_store_raises_permission_vector":
+        test_itc_d_key_permission_store_raises_permission_vector,
+    "itc_d_matching_pkr_allows_keyed_load":
+        test_itc_d_matching_pkr_allows_keyed_load,
+    "tpa_key_miss_raises_data_key_miss":
+        test_tpa_key_miss_raises_data_key_miss,
+    "probe_key_miss_returns_zero": test_probe_key_miss_returns_zero,
+    "itr_i_instruction_key_miss_raises_key_vector":
+        test_itr_i_instruction_key_miss_raises_key_vector,
     "itc_i_m_unit_decode": test_itc_i_m_unit_decode,
     "itc_i_resumes_next_slot_after_tb_exit":
         test_itc_i_resumes_next_slot_after_tb_exit,
     "ptc_l_m_unit_decode": test_ptc_l_m_unit_decode,
     "ptc_l_keeps_nonoverlapping_tc": test_ptc_l_keeps_nonoverlapping_tc,
     "ar_itc_advances_in_guest_loop": test_ar_itc_advances_in_guest_loop,
+    "mov_to_ivr_illegal": test_mov_to_ivr_illegal,
+    "mov_to_irr_illegal": test_mov_to_irr_illegal,
+    "mov_to_read_only_cr_predicate_false":
+        test_mov_to_read_only_cr_predicate_false,
     "async_timer_interrupt_enters_ivt": test_async_timer_interrupt_enters_ivt,
     "async_timer_interrupt_records_boundary_ri": test_async_timer_interrupt_records_boundary_ri,
     "async_timer_interrupt_preserves_bank1_grs": test_async_timer_interrupt_preserves_bank1_grs,
     "tpr_preserves_mmi_and_mic": test_tpr_preserves_mmi_and_mic,
     "tpr_mmi_masks_timer_until_cleared": test_tpr_mmi_masks_timer_until_cleared,
+    "sapic_extint_masks_external_until_eoi":
+        test_sapic_extint_masks_external_until_eoi,
+    "sapic_same_class_higher_vector_preempts":
+        test_sapic_same_class_higher_vector_preempts,
     "pal_halt_light_wakes_on_due_itm": test_pal_halt_light_wakes_on_due_itm,
     "masked_itv_discards_due_timer": test_masked_itv_discards_due_timer,
+    "invalid_itv_vector_is_ignored": test_invalid_itv_vector_is_ignored,
     "past_itm_does_not_fire": test_past_itm_does_not_fire,
     "past_rearmed_itm_does_not_interrupt":
         test_past_rearmed_itm_does_not_interrupt,
@@ -12738,9 +14256,15 @@ TEST_NAMES = {
         test_rsm_ic_inflight_dtlb_not_data_nested,
     "rsm_ic_serialized_data_nested_tlb":
         test_rsm_ic_serialized_data_nested_tlb,
+    "exception_entry_initializes_psr": test_exception_entry_initializes_psr,
     "exception_preserves_translation_bits": test_exception_preserves_translation_bits,
     "tpa_indexed_decode": test_tpa_indexed_decode,
+    "tpa_dt_disabled_uses_dtlb_entry":
+        test_tpa_dt_disabled_uses_dtlb_entry,
+    "tpa_dt_disabled_miss_raises_alt_dtlb":
+        test_tpa_dt_disabled_miss_raises_alt_dtlb,
     "tpa_uses_short_vhpt_walk": test_tpa_uses_short_vhpt_walk,
+    "tak_uses_short_vhpt_walk": test_tak_uses_short_vhpt_walk,
     "short_vhpt_not_present_raises_page_fault":
         test_short_vhpt_not_present_raises_page_fault,
     "short_vhpt_not_present_entry_is_cached":
@@ -12767,6 +14291,31 @@ TEST_NAMES = {
         test_translation_hash_m46_ignored_bits_decode,
     "translation_hash_ops_clear_dest_nat":
         test_translation_hash_ops_clear_dest_nat,
+    "translation_hash_nat_source_rules":
+        test_translation_hash_nat_source_rules,
+    "tak_nat_source_consumes_non_access":
+        test_tak_nat_source_consumes_non_access,
+    "tpa_nat_source_consumes_non_access":
+        test_tpa_nat_source_consumes_non_access,
+    "mov_ar_nat_source_consumes": test_mov_ar_nat_source_consumes,
+    "mov_br_nat_source_consumes": test_mov_br_nat_source_consumes,
+    "mov_pr_nat_source_consumes": test_mov_pr_nat_source_consumes,
+    "mov_cr_nat_source_consumes": test_mov_cr_nat_source_consumes,
+    "mov_psr_nat_source_consumes": test_mov_psr_nat_source_consumes,
+    "mov_um_nat_source_consumes": test_mov_um_nat_source_consumes,
+    "mov_rr_nat_index_consumes": test_mov_rr_nat_index_consumes,
+    "mov_pkr_nat_index_consumes": test_mov_pkr_nat_index_consumes,
+    "mov_pmc_nat_value_consumes": test_mov_pmc_nat_value_consumes,
+    "mov_cpuid_nat_index_consumes": test_mov_cpuid_nat_index_consumes,
+    "itc_d_nat_pte_consumes": test_itc_d_nat_pte_consumes,
+    "itr_d_nat_slot_consumes": test_itr_d_nat_slot_consumes,
+    "ptc_l_nat_addr_consumes": test_ptc_l_nat_addr_consumes,
+    "ptr_d_nat_size_consumes": test_ptr_d_nat_size_consumes,
+    "ptc_e_nat_addr_consumes": test_ptc_e_nat_addr_consumes,
+    "fc_nat_source_consumes_non_access":
+        test_fc_nat_source_consumes_non_access,
+    "setf_nat_source_sets_fr_natval":
+        test_setf_nat_source_sets_fr_natval,
     "short_vhpt_thash_decode": test_short_vhpt_thash_decode,
     "thash_uses_pta_with_walker_disabled":
         test_thash_uses_pta_with_walker_disabled,
@@ -12801,6 +14350,8 @@ TEST_NAMES = {
         test_region6_processor_interrupt_block_inta_read,
     "region6_processor_interrupt_block_xtp_store":
         test_region6_processor_interrupt_block_xtp_store,
+    "firmware_debug_tables": test_firmware_debug_tables,
+    "firmware_load_image_selftests": test_firmware_load_image_selftests,
     "firmware_identity_under_translation": test_firmware_identity_under_translation,
     "rfi_restores_translation_bits": test_rfi_restores_translation_bits,
     "rfi_resumes_at_ipsr_ri_slot": test_rfi_resumes_at_ipsr_ri_slot,
@@ -12881,11 +14432,13 @@ TEST_NAMES = {
     "rse_nested_alloc_call_preserves_output_arg": test_rse_nested_alloc_call_preserves_output_arg,
     "rse_call_uses_high_sol_output_arg": test_rse_call_uses_high_sol_output_arg,
     "rse_alloc_preserves_ar_pfs": test_rse_alloc_preserves_ar_pfs,
+    "alloc_clears_destination_nat": test_alloc_clears_destination_nat,
     "br_call_ret_preserves_ec": test_br_call_ret_preserves_ec,
     "rse_bsp_is_current_frame_base": test_rse_bsp_is_current_frame_base,
     "rse_call_ret_updates_bsp_base": test_rse_call_ret_updates_bsp_base,
     "rse_call_ret_preserves_caller_local": test_rse_call_ret_preserves_caller_local,
     "rse_loadrs_bspstore_return_uses_covered_frame": test_rse_loadrs_bspstore_return_uses_covered_frame,
+    "rse_loadrs_zero_current_frame_invalidates_parents": test_rse_loadrs_zero_current_frame_invalidates_parents,
     "rse_call_ret_preserves_region7_bsp": test_rse_call_ret_preserves_region7_bsp,
     "rse_flushrs": test_rse_flushrs,
     "rse_cover_flushrs_spills_covered_frame": test_rse_cover_flushrs_spills_covered_frame,
@@ -12897,6 +14450,8 @@ TEST_NAMES = {
     "rse_untracked_return_restores_high_caller_local": test_rse_untracked_return_restores_high_caller_local,
     "rse_loadrs_cover_span_restores_embedded_frame": test_rse_loadrs_cover_span_restores_embedded_frame,
     "rse_zero_sol_cover_return_restores_bsp_base": test_rse_zero_sol_cover_return_restores_bsp_base,
+    "rse_loadrs_zero_sol_return_keeps_bsp_without_cover":
+        test_rse_loadrs_zero_sol_return_keeps_bsp_without_cover,
     "rse_rt_translates_with_dt_disabled": test_rse_rt_translates_with_dt_disabled,
     "rse_bspstore_physical_trim_preserves_frame": test_rse_bspstore_physical_trim_preserves_frame,
     "rse_bspstore_physical_alias_survives_rt_disable": test_rse_bspstore_physical_alias_survives_rt_disable,
@@ -12905,6 +14460,7 @@ TEST_NAMES = {
     "rse_rfi_invalid_ifs_bspstore_rebase_preserves_retry": test_rse_rfi_invalid_ifs_bspstore_rebase_preserves_retry,
     "rse_rfi_bspstore_advanced_iip_spills_parent_frame": test_rse_rfi_bspstore_advanced_iip_spills_parent_frame,
     "rse_rfi_advanced_iip_preserves_nested_call_locals": test_rse_rfi_advanced_iip_preserves_nested_call_locals,
+    "rse_manual_rfi_loadrs_restores_current_frame_base": test_rse_manual_rfi_loadrs_restores_current_frame_base,
     "rse_exception_loadrs_preserves_interrupted_call": test_rse_exception_loadrs_preserves_interrupted_call,
     "rse_exception_restores_snapshot_arrays": test_rse_exception_restores_snapshot_arrays,
     "rse_exception_flushrs_preserves_high_local": test_rse_exception_flushrs_preserves_high_local,
@@ -12935,7 +14491,7 @@ TEST_NAMES = {
     "pal_ptce_info_reserved_arg": test_pal_ptce_info_reserved_arg,
     "pal_vm_info": test_pal_vm_info,
     "pal_vm_info_l0_data": test_pal_vm_info_l0_data,
-    "pal_vm_info_l1_unified": test_pal_vm_info_l1_unified,
+    "pal_vm_info_l1_invalid": test_pal_vm_info_l1_invalid,
     "pal_vm_info_invalid": test_pal_vm_info_invalid,
     "pal_vm_info_unified_bad_type": test_pal_vm_info_unified_bad_type,
     "pal_vm_tr_read_dtr": test_pal_vm_tr_read_dtr,
@@ -12943,6 +14499,7 @@ TEST_NAMES = {
     "pal_vm_tr_read_empty": test_pal_vm_tr_read_empty,
     "pal_vm_tr_read_invalid": test_pal_vm_tr_read_invalid,
     "pal_vm_tr_read_misaligned_buffer": test_pal_vm_tr_read_misaligned_buffer,
+    "pal_proc_entry_virtual_itr": test_pal_proc_entry_virtual_itr,
     "pal_prefetch_vis": test_pal_prefetch_vis,
     "pal_prefetch_vis_reserved_arg": test_pal_prefetch_vis_reserved_arg,
     "pal_cache_flush": test_pal_cache_flush,
@@ -13081,6 +14638,8 @@ TEST_NAMES = {
         test_no_ic_data_access_enters_vector_with_ni,
     "firmware_unaligned_load_assist": test_firmware_unaligned_load_assist,
     "firmware_unaligned_store_assist": test_firmware_unaligned_store_assist,
+    "firmware_unaligned_speculative_load_assist":
+        test_firmware_unaligned_speculative_load_assist,
     "speculative_unaligned_defers": test_speculative_unaligned_defers,
     "cmp_ge_or_decode": test_cmp_ge_or_decode,
     "cmp_ge_or_issue_raw_decode": test_cmp_ge_or_issue_raw_decode,

@@ -18,9 +18,12 @@
 #define IOSAPIC_REG_VER    0x01
 #define IOSAPIC_RTE_BASE   0x10
 
-#define RTE_VECTOR_MASK    0x00000000000000FFULL
-#define RTE_MASKED         0x0000000000010000ULL
-#define RTE_TRIGGER_LEVEL  0x0000000000008000ULL
+#define RTE_VECTOR_MASK      0x00000000000000FFULL
+#define RTE_DELIVERY_STATUS  0x0000000000001000ULL
+#define RTE_REMOTE_IRR       0x0000000000004000ULL
+#define RTE_MASKED           0x0000000000010000ULL
+#define RTE_TRIGGER_LEVEL    0x0000000000008000ULL
+#define RTE_RO_BITS          (RTE_DELIVERY_STATUS | RTE_REMOTE_IRR)
 
 struct IA64IOSapicState {
     SysBusDevice parent_obj;
@@ -35,15 +38,66 @@ static void iosapic_update(IA64IOSapicState *s, int pin)
     uint64_t rte = s->rte[pin];
     uint8_t vector = rte & RTE_VECTOR_MASK;
     bool masked = (rte & RTE_MASKED) != 0;
+    bool level_triggered = (rte & RTE_TRIGGER_LEVEL) != 0;
     CPUState *cs;
 
-    if (masked || vector == 0) {
+    if (masked || vector == 0 || (level_triggered && !s->irq_level[pin])) {
         return;
     }
 
     cs = first_cpu;
-    if (cs) {
-        ia64_sapic_set_irq(cs, vector);
+    if (!cs) {
+        return;
+    }
+
+    if (level_triggered) {
+        if (rte & RTE_REMOTE_IRR) {
+            return;
+        }
+        s->rte[pin] |= RTE_REMOTE_IRR;
+    }
+
+    ia64_sapic_set_irq(cs, vector);
+}
+
+static void iosapic_fix_edge_remote_irr(IA64IOSapicState *s, int pin)
+{
+    if (!(s->rte[pin] & RTE_TRIGGER_LEVEL)) {
+        s->rte[pin] &= ~RTE_REMOTE_IRR;
+    }
+}
+
+static void iosapic_rte_write(IA64IOSapicState *s, int pin, uint32_t val,
+                              bool high)
+{
+    uint64_t ro_bits = s->rte[pin] & RTE_RO_BITS;
+
+    if (high) {
+        s->rte[pin] = (s->rte[pin] & 0xFFFFFFFFULL) | ((uint64_t)val << 32);
+    } else {
+        s->rte[pin] = (s->rte[pin] & 0xFFFFFFFF00000000ULL) | val;
+    }
+
+    s->rte[pin] = (s->rte[pin] & ~RTE_RO_BITS) | ro_bits;
+    iosapic_fix_edge_remote_irr(s, pin);
+    iosapic_update(s, pin);
+}
+
+static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
+{
+    unsigned pin;
+
+    for (pin = 0; pin < IA64_IOSAPIC_NUM_PINS; pin++) {
+        if ((s->rte[pin] & RTE_VECTOR_MASK) != vector ||
+            !(s->rte[pin] & RTE_TRIGGER_LEVEL)) {
+            continue;
+        }
+        if (!(s->rte[pin] & RTE_REMOTE_IRR)) {
+            continue;
+        }
+        s->rte[pin] &= ~RTE_REMOTE_IRR;
+        iosapic_update(s, pin);
+        return;
     }
 }
 
@@ -111,27 +165,12 @@ static void iosapic_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
         } else if (index >= IOSAPIC_RTE_BASE &&
                    index < IOSAPIC_RTE_BASE + IA64_IOSAPIC_NUM_PINS * 2) {
             int pin = (index - IOSAPIC_RTE_BASE) / 2;
-            if ((index - IOSAPIC_RTE_BASE) & 1) {
-                s->rte[pin] = (s->rte[pin] & 0xFFFFFFFFULL) |
-                              ((uint64_t)val << 32);
-            } else {
-                s->rte[pin] = (s->rte[pin] & 0xFFFFFFFF00000000ULL) | val;
-            }
+            iosapic_rte_write(s, pin, (uint32_t)val,
+                              (index - IOSAPIC_RTE_BASE) & 1);
         }
         break;
     case IOSAPIC_EOI:
-        {
-            unsigned pin;
-            for (pin = 0; pin < IA64_IOSAPIC_NUM_PINS; pin++) {
-                if ((s->rte[pin] & RTE_VECTOR_MASK) == ((uint32_t)val & 0xFF)) {
-                    break;
-                }
-            }
-            if (pin < IA64_IOSAPIC_NUM_PINS &&
-                (s->rte[pin] & RTE_TRIGGER_LEVEL) && s->irq_level[pin]) {
-                iosapic_update(s, pin);
-            }
-        }
+        iosapic_eoi(s, (uint8_t)val);
         break;
     default:
         break;

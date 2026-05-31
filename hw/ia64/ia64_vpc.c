@@ -40,7 +40,6 @@
 #define IA64_FW_LOW_RAM_MIN (96 * MiB)
 #define IA64_IVT_BASE   0x10000ULL
 #define IA64_IVT_SIZE   0x8000ULL
-#define IA64_PCI_MMIO_BASE 0x0000008000000000ULL
 #define IA64_IDE_DATA0_IO_BASE  0x00000800U
 #define IA64_IDE_CMD0_IO_BASE   0x00000808U
 #define IA64_IDE_DATA1_IO_BASE  0x00000810U
@@ -48,10 +47,10 @@
 #define IA64_IDE_BMDMA_IO_BASE  0x0000c000U
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
-#define IA64_OHCI_MMIO_PCI_BASE 0x00010000U
-#define IA64_AHCI_MMIO_PCI_BASE 0x00020000U
-#define IA64_VGA_FB_PCI_BASE   0x01000000U
-#define IA64_VGA_MMIO_PCI_BASE 0x02000000U
+#define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
+#define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
+#define IA64_VGA_FB_PCI_BASE    (IA64_PCI_MMIO_BASE + 0x01000000ULL)
+#define IA64_VGA_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #define IA64_IOSAPIC_BASE       0x0000000080110000ULL
@@ -297,8 +296,8 @@ static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
     pin = pci_dev->config[PCI_INTERRUPT_PIN];
     if (pin >= 1 && pin <= PCI_NUM_PINS) {
         pci_default_write_config(pci_dev, PCI_INTERRUPT_LINE,
-                                 ia64_pci_route_intx(pci_dev->devfn,
-                                                     pin - 1), 1);
+                                 ia64_pci_route_intx_gsi(pci_dev->devfn,
+                                                         pin - 1), 1);
     }
 }
 
@@ -724,8 +723,11 @@ static void ia64_vpc_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pci_host), &error_fatal);
     pci_bus = PCI_BUS(qdev_get_child_bus(pci_host, "pci"));
 
-    for (i = 0; i < 4; i++) {
-        qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(iosapic, i));
+    /* Leave ISA/SCI lines in the legacy range and route PCI INTx above 15. */
+    for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
+        qdev_connect_gpio_out(pci_host, i,
+                              qdev_get_gpio_in(iosapic,
+                                               IA64_PCI_INTX_GSI_BASE + i));
     }
 
     ia64_vpc_ide_dev = pci_new(-1, "cmd646-ide");

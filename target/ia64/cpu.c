@@ -80,6 +80,9 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
     [IA64_EXCP_DATA_DIRTY]       = 0x2000,
     [IA64_EXCP_INST_ACCESS_BIT]  = 0x2400,
     [IA64_EXCP_DATA_ACCESS_BIT]  = 0x2800,
+    [IA64_EXCP_INST_KEY_MISS]    = 0x1800,
+    [IA64_EXCP_DATA_KEY_MISS]    = 0x1c00,
+    [IA64_EXCP_KEY_PERMISSION]   = 0x5100,
 };
 
 typedef enum Ia64SlotUnit {
@@ -748,17 +751,31 @@ static int64_t ia64_chk_a_disp(uint64_t raw)
     return ia64_sign_extend(field, 21) * 16;
 }
 
-static bool ia64_address_matches_physical_entry(uint64_t address,
-                                                uint64_t entry_pa)
+static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
+                                                            uint64_t address,
+                                                            uint64_t entry_pa)
 {
     uint64_t pa;
+    uint8_t perm;
+    uint32_t rid;
 
-    if (address == entry_pa) {
-        return true;
+    if (!(env->psr & IA64_PSR_IT)) {
+        return address == entry_pa;
     }
 
     if (ia64_firmware_identity_pa(address, &pa) ||
-        ia64_region7_identity_pa(address, &pa)) {
+        ia64_sal_boot_virtual_pa(env, address, &pa)) {
+        return pa == entry_pa;
+    }
+
+    rid = ia64_region_rid(env, address);
+    if (ia64_tlb_lookup(env->tlb_inst, env->tlb_inst_count, address, rid,
+                        ia64_psr_cpl(env->psr), true, &pa, &perm) &&
+        (perm & IA64_TLB_X)) {
+        return pa == entry_pa;
+    }
+
+    if (ia64_sal_boot_identity_pa(env, address, &pa)) {
         return pa == entry_pa;
     }
 
@@ -769,13 +786,14 @@ static bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
 {
     const uint64_t pal_proc_entry_pa = IA64_FW_IDENTITY_BASE + 0x60;
 
-    if (ia64_address_matches_physical_entry(address, pal_proc_entry_pa)) {
+    if (ia64_instruction_address_matches_physical_entry(
+            env, address, pal_proc_entry_pa)) {
         return true;
     }
 
     return env->pal_proc_copy_valid &&
-           ia64_address_matches_physical_entry(address,
-                                               env->pal_proc_copy_addr);
+           ia64_instruction_address_matches_physical_entry(
+               env, address, env->pal_proc_copy_addr);
 }
 
 static Ia64Opcode ia64_memory_opcode_from_x6a(uint64_t x6a)
@@ -1361,14 +1379,30 @@ static bool ia64_opcode_has_firmware_unaligned_load_assist(Ia64Opcode opcode)
     case IA64_OP_LD2:
     case IA64_OP_LD4:
     case IA64_OP_LD8:
+    case IA64_OP_LD1S:
+    case IA64_OP_LD2S:
+    case IA64_OP_LD4S:
+    case IA64_OP_LD8S:
     case IA64_OP_LD1A:
     case IA64_OP_LD2A:
     case IA64_OP_LD4A:
     case IA64_OP_LD8A:
+    case IA64_OP_LD1SA:
+    case IA64_OP_LD2SA:
+    case IA64_OP_LD4SA:
+    case IA64_OP_LD8SA:
     case IA64_OP_LD1FILL:
     case IA64_OP_LD2FILL:
     case IA64_OP_LD4FILL:
     case IA64_OP_LD8FILL:
+    case IA64_OP_LD1C_CLR:
+    case IA64_OP_LD2C_CLR:
+    case IA64_OP_LD4C_CLR:
+    case IA64_OP_LD8C_CLR:
+    case IA64_OP_LD1C_NC:
+    case IA64_OP_LD2C_NC:
+    case IA64_OP_LD4C_NC:
+    case IA64_OP_LD8C_NC:
         return true;
     default:
         return false;
@@ -1393,17 +1427,70 @@ static bool ia64_opcode_has_firmware_unaligned_store_assist(Ia64Opcode opcode)
     }
 }
 
-static bool ia64_opcode_is_advanced_load(Ia64Opcode opcode)
+static bool ia64_opcode_is_control_speculative_load(Ia64Opcode opcode)
+{
+    switch (opcode) {
+    case IA64_OP_LD1S:
+    case IA64_OP_LD2S:
+    case IA64_OP_LD4S:
+    case IA64_OP_LD8S:
+    case IA64_OP_LD1SA:
+    case IA64_OP_LD2SA:
+    case IA64_OP_LD4SA:
+    case IA64_OP_LD8SA:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ia64_opcode_is_data_speculative_load(Ia64Opcode opcode)
 {
     switch (opcode) {
     case IA64_OP_LD1A:
     case IA64_OP_LD2A:
     case IA64_OP_LD4A:
     case IA64_OP_LD8A:
+    case IA64_OP_LD1SA:
+    case IA64_OP_LD2SA:
+    case IA64_OP_LD4SA:
+    case IA64_OP_LD8SA:
         return true;
     default:
         return false;
     }
+}
+
+static bool ia64_opcode_is_check_load_clear(Ia64Opcode opcode)
+{
+    switch (opcode) {
+    case IA64_OP_LD1C_CLR:
+    case IA64_OP_LD2C_CLR:
+    case IA64_OP_LD4C_CLR:
+    case IA64_OP_LD8C_CLR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ia64_opcode_is_check_load_no_clear(Ia64Opcode opcode)
+{
+    switch (opcode) {
+    case IA64_OP_LD1C_NC:
+    case IA64_OP_LD2C_NC:
+    case IA64_OP_LD4C_NC:
+    case IA64_OP_LD8C_NC:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ia64_opcode_is_check_load(Ia64Opcode opcode)
+{
+    return ia64_opcode_is_check_load_clear(opcode) ||
+           ia64_opcode_is_check_load_no_clear(opcode);
 }
 
 static bool ia64_opcode_is_fill_load(Ia64Opcode opcode)
@@ -5067,8 +5154,22 @@ static void ia64_gen_fr_ld(uint8_t reg, TCGv_i64 addr, int mmu_idx, MemOp memop)
     TCGv_i64 dst = ia64_fr_is_writable(reg) ? cpu_fr[reg] : tcg_temp_new_i64();
 
     tcg_gen_qemu_ld_i64(dst, addr, mmu_idx, memop);
-    ia64_gen_fr_nat_clear(reg);
-    ia64_gen_fr_sig_clear(reg);
+    if (ia64_fr_is_writable(reg)) {
+        ia64_gen_fr_nat_clear(reg);
+        ia64_gen_fr_sig_clear(reg);
+    }
+}
+
+static void ia64_gen_fr_ld_sig(uint8_t reg, TCGv_i64 addr, int mmu_idx,
+                               MemOp memop)
+{
+    TCGv_i64 dst = ia64_fr_is_writable(reg) ? cpu_fr[reg] : tcg_temp_new_i64();
+
+    tcg_gen_qemu_ld_i64(dst, addr, mmu_idx, memop);
+    if (ia64_fr_is_writable(reg)) {
+        ia64_gen_fr_nat_clear(reg);
+        ia64_gen_fr_sig_set(reg);
+    }
 }
 
 static void ia64_gen_raise_exception(uint32_t exception, uint64_t fault_ip,
@@ -5434,6 +5535,20 @@ static void ia64_gen_raise_exception(uint32_t exception, uint64_t fault_ip,
                                 tcg_constant_i32(fault_slot));
 }
 
+static bool ia64_cr_is_read_only(uint32_t cr_num)
+{
+    switch (cr_num) {
+    case IA64_CR_SAPIC_IVR:
+    case IA64_CR_SAPIC_IRR0:
+    case IA64_CR_SAPIC_IRR1:
+    case IA64_CR_SAPIC_IRR2:
+    case IA64_CR_SAPIC_IRR3:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void ia64_gen_gr_nat_clear(uint8_t reg)
 {
     if (reg == 0) {
@@ -5505,6 +5620,15 @@ static void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src)
     }
 
     ia64_gen_gr_nat_assign(dst, ia64_gen_gr_nat_read(src));
+}
+
+static void ia64_gen_fr_nat_from_gr(uint8_t dst, uint8_t src)
+{
+    if (dst <= 1) {
+        return;
+    }
+
+    ia64_gen_fr_nat_assign(dst, ia64_gen_gr_nat_read(src));
 }
 
 static void ia64_gen_gr_nat_from_2(uint8_t dst, uint8_t src1, uint8_t src2)
@@ -5661,6 +5785,12 @@ static void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
                                      tcg_constant_i64(insn->address),
                                      tcg_constant_i32(insn->slot));
     gen_set_label(ok);
+}
+
+static void ia64_gen_check_nat_register(const Ia64Instruction *insn,
+                                        uint8_t reg)
+{
+    ia64_gen_check_nat_consumption(insn, reg, 0, IA64_NAT_ACCESS);
 }
 
 static void ia64_gen_check_nat_access(const Ia64Instruction *insn,
@@ -5846,9 +5976,13 @@ static void ia64_gen_fp_load_value(DisasContext *ctx,
         ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx, MO_LEUL);
         break;
     case IA64_OP_LDFD:
-    case IA64_OP_LDF8:
-    case IA64_OP_LDF_FILL:
         ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx, MO_LEUQ);
+        break;
+    case IA64_OP_LDF8:
+        ia64_gen_fr_ld_sig(insn->r1, addr, ctx->mmu_idx, MO_LEUQ);
+        break;
+    case IA64_OP_LDF_FILL:
+        gen_helper_ldf_fill(tcg_env, tcg_constant_i32(insn->r1), addr);
         break;
     case IA64_OP_LDFE:
         gen_helper_ldfe(tcg_env, tcg_constant_i32(insn->r1), addr);
@@ -5984,10 +6118,14 @@ static void ia64_gen_fp_load_pair_value(DisasContext *ctx,
         ia64_gen_fr_ld(insn->r2, second, ctx->mmu_idx, MO_LEUL);
         break;
     case IA64_OP_LDFPD:
-    case IA64_OP_LDFP8:
         ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx, MO_LEUQ);
         tcg_gen_addi_i64(second, addr, 8);
         ia64_gen_fr_ld(insn->r2, second, ctx->mmu_idx, MO_LEUQ);
+        break;
+    case IA64_OP_LDFP8:
+        ia64_gen_fr_ld_sig(insn->r1, addr, ctx->mmu_idx, MO_LEUQ);
+        tcg_gen_addi_i64(second, addr, 8);
+        ia64_gen_fr_ld_sig(insn->r2, second, ctx->mmu_idx, MO_LEUQ);
         break;
     default:
         g_assert_not_reached();
@@ -7687,6 +7825,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         ia64_gen_gr_write_nat_clear(insn->r1, cpu_br[insn->r2 & 7]);
         break;
     case IA64_OP_MOV_GRBR:
+        ia64_gen_check_nat_register(insn, insn->r1);
         tcg_gen_mov_i64(cpu_br[insn->r2 & 7],
                         ia64_gr_src(insn->r1));
         break;
@@ -7699,6 +7838,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         }
         break;
     case IA64_OP_MOV_GRPR:
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_pr(tcg_env, ia64_gr_src(insn->r1),
                             tcg_constant_i64(insn->imm));
         break;
@@ -7714,6 +7854,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         }
         break;
     case IA64_OP_MOV_GRAR:
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_ar(tcg_env, tcg_constant_i32(insn->r2),
                             ia64_gr_src(insn->r1));
         break;
@@ -7729,16 +7870,28 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         }
         break;
     case IA64_OP_MOV_GRCR:
+        if (ia64_cr_is_read_only(insn->r2)) {
+            ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
+                                      insn->raw, insn->slot);
+            if (skip == NULL) {
+                return true;
+            }
+            break;
+        }
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_cr(tcg_env, tcg_constant_i32(insn->r2),
                             ia64_gr_src(insn->r1));
         break;
     case IA64_OP_MOV_RRGR: {
         TCGv_i64 val = tcg_temp_new_i64();
+        ia64_gen_check_nat_register(insn, insn->r2);
         gen_helper_mov_rrgr_read(val, tcg_env, ia64_gr_src(insn->r2));
         ia64_gen_gr_write_nat_clear(insn->r1, val);
         break;
     }
     case IA64_OP_MOV_GRRR:
+        ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_mov_grrr_write(tcg_env, ia64_gr_src(insn->r2),
                                   ia64_gr_src(insn->r1));
         break;
@@ -7750,15 +7903,19 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
     }
     case IA64_OP_MOV_PKRGR_INDEXED: {
         TCGv_i64 val = tcg_temp_new_i64();
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_mov_pkrgr_indexed_read(val, tcg_env, ia64_gr_src(insn->r3));
         ia64_gen_gr_write_nat_clear(insn->r1, val);
         break;
     }
     case IA64_OP_MOV_GRPKR:
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_mov_grpkr_write(tcg_env, tcg_constant_i32(insn->r2),
                                    ia64_gr_src(insn->r1));
         break;
     case IA64_OP_MOV_GRPKR_INDEXED:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_mov_grpkr_indexed_write(tcg_env, ia64_gr_src(insn->r3),
                                            ia64_gr_src(insn->r1));
         break;
@@ -7772,6 +7929,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         TCGv_i64 new_psr = tcg_temp_new_i64();
         TCGv_i64 um = tcg_temp_new_i64();
 
+        ia64_gen_check_nat_register(insn, insn->r1);
         tcg_gen_andi_i64(new_psr, cpu_psr, ~IA64_PSR_UM_MASK);
         tcg_gen_andi_i64(um, ia64_gr_src(insn->r1), IA64_PSR_UM_MASK);
         tcg_gen_or_i64(new_psr, new_psr, um);
@@ -7785,6 +7943,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         break;
     }
     case IA64_OP_MOV_GRIBR:
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_ibr(tcg_env, tcg_constant_i32(insn->r2 - 12),
                              ia64_gr_src(insn->r1));
         break;
@@ -7794,6 +7953,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         TCGv_i32 index = tcg_temp_new_i32();
         TCGv_i64 val = tcg_temp_new_i64();
 
+        ia64_gen_check_nat_register(insn, insn->r3);
         tcg_gen_andi_i64(index64, ia64_gr_src(insn->r3), 7);
         tcg_gen_extrl_i64_i32(index, index64);
         if (insn->opcode == IA64_OP_MOV_IBRGR_INDEXED) {
@@ -7809,6 +7969,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         TCGv_i64 index64 = tcg_temp_new_i64();
         TCGv_i32 index = tcg_temp_new_i32();
 
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r1);
         tcg_gen_andi_i64(index64, ia64_gr_src(insn->r3), 7);
         tcg_gen_extrl_i64_i32(index, index64);
         if (insn->opcode == IA64_OP_MOV_GRIBR_INDEXED) {
@@ -7825,6 +7987,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         break;
     }
     case IA64_OP_MOV_GRDBR:
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_dbr(tcg_env, tcg_constant_i32(insn->r2 - 8),
                              ia64_gr_src(insn->r1));
         break;
@@ -7835,16 +7998,20 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         break;
     }
     case IA64_OP_MOV_GRPMC:
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_pmc(tcg_env, tcg_constant_i32(insn->r2 - 32),
                             ia64_gr_src(insn->r1));
         break;
     case IA64_OP_MOV_PMCGR_INDEXED: {
         TCGv_i64 val = tcg_temp_new_i64();
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_read_pmc_indexed(val, tcg_env, ia64_gr_src(insn->r3));
         ia64_gen_gr_write_nat_clear(insn->r1, val);
         break;
     }
     case IA64_OP_MOV_GRPMC_INDEXED:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_pmc_indexed(tcg_env, ia64_gr_src(insn->r3),
                                      ia64_gr_src(insn->r1));
         break;
@@ -7855,16 +8022,20 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         break;
     }
     case IA64_OP_MOV_GRPMD:
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_pmd(tcg_env, tcg_constant_i32(insn->r2 - 64),
                             ia64_gr_src(insn->r1));
         break;
     case IA64_OP_MOV_PMDGR_INDEXED: {
         TCGv_i64 val = tcg_temp_new_i64();
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_read_pmd_indexed(val, tcg_env, ia64_gr_src(insn->r3));
         ia64_gen_gr_write_nat_clear(insn->r1, val);
         break;
     }
     case IA64_OP_MOV_GRPMD_INDEXED:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_pmd_indexed(tcg_env, ia64_gr_src(insn->r3),
                                      ia64_gr_src(insn->r1));
         break;
@@ -7876,23 +8047,28 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
     }
     case IA64_OP_MOV_CPUID_INDEXED: {
         TCGv_i64 val = tcg_temp_new_i64();
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_read_cpuid(val, tcg_env, ia64_gr_src(insn->r3));
         ia64_gen_gr_write_nat_clear(insn->r1, val);
         break;
     }
     case IA64_OP_MOV_DAHRGR_INDEXED: {
         TCGv_i64 val = tcg_temp_new_i64();
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_read_dahr_indexed(val, tcg_env, ia64_gr_src(insn->r3));
         ia64_gen_gr_write_nat_clear(insn->r1, val);
         break;
     }
     case IA64_OP_MOV_MSRGR: {
         TCGv_i64 val = tcg_temp_new_i64();
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_read_msr(val, tcg_env, ia64_gr_src(insn->r3));
         ia64_gen_gr_write_nat_clear(insn->r1, val);
         break;
     }
     case IA64_OP_MOV_GRMSR:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_write_msr(tcg_env, ia64_gr_src(insn->r3),
                              ia64_gr_src(insn->r1));
         break;
@@ -7916,6 +8092,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         break;
     }
     case IA64_OP_MOV_GRPSR:
+        ia64_gen_check_nat_register(insn, insn->r1);
         gen_helper_mov_psr_write(tcg_env, ia64_gr_src(insn->r1),
                                  tcg_constant_i32(insn->imm != 0));
         break;
@@ -7962,11 +8139,15 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         gen_helper_loadrs_rse(tcg_env);
         break;
     case IA64_OP_ITR_D:
+        ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(insn->r2),
                                ia64_gr_src(insn->r3),
                                tcg_constant_i32(1));
         break;
     case IA64_OP_ITR_I:
+        ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(insn->r2),
                                ia64_gr_src(insn->r3),
                                tcg_constant_i32(0));
@@ -7977,20 +8158,26 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         }
         break;
     case IA64_OP_PTR_D:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r2);
         gen_helper_ptr_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(1));
         break;
     case IA64_OP_PTR_I:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r2);
         gen_helper_ptr_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(0));
         break;
     case IA64_OP_ITC_D:
+        ia64_gen_check_nat_register(insn, insn->r2);
         gen_helper_itc_insert(tcg_env, ia64_gr_src(insn->r2),
                               tcg_constant_i32(1));
         break;
     case IA64_OP_ITC_I:
+        ia64_gen_check_nat_register(insn, insn->r2);
         gen_helper_itc_insert(tcg_env, ia64_gr_src(insn->r2),
                               tcg_constant_i32(0));
         ia64_gen_exit_to_slot_completed(insn->address, insn->slot + 1,
@@ -8000,21 +8187,28 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         }
         break;
     case IA64_OP_PTC_L:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r2);
         gen_helper_ptc_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(0));
         break;
     case IA64_OP_PTC_G:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r2);
         gen_helper_ptc_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(1));
         break;
     case IA64_OP_PTC_E:
+        ia64_gen_check_nat_register(insn, insn->r3);
         gen_helper_ptc_purge(tcg_env, ia64_gr_src(insn->r3),
                               tcg_constant_i64(0),
                               tcg_constant_i32(2));
         break;
     case IA64_OP_PTC_GA:
+        ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_check_nat_register(insn, insn->r2);
         gen_helper_ptc_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(3));
@@ -8056,15 +8250,11 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         }
         break;
     case IA64_OP_STF_SPILL: {
-        TCGv_i64 spill_tail = tcg_temp_new_i64();
         ia64_gen_check_nat_non_access(insn, insn->r3, true);
         ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 16, false,
                                  true);
-        tcg_gen_qemu_st_i64(ia64_fr_src(insn->r2), ia64_gr_src(insn->r3),
-                             ctx->mmu_idx, MO_LEUQ);
-        tcg_gen_addi_i64(spill_tail, ia64_gr_src(insn->r3), 8);
-        tcg_gen_qemu_st_i64(tcg_constant_i64(0), spill_tail,
-                             ctx->mmu_idx, MO_LEUQ);
+        gen_helper_stf_spill(tcg_env, ia64_gr_src(insn->r3),
+                             tcg_constant_i32(insn->r2));
         gen_helper_invalidate_alat_store(tcg_env, ia64_gr_src(insn->r3),
                                          tcg_constant_i32(16));
         if (insn->imm != 0 && insn->r3 != 0) {
@@ -8452,27 +8642,35 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
     }
     case IA64_OP_SETF_D:
         ia64_gen_fr_mov(insn->r1, ia64_gr_src(insn->r2));
+        ia64_gen_fr_nat_from_gr(insn->r1, insn->r2);
         break;
     case IA64_OP_SETF_S: {
         TCGv_i64 val = tcg_temp_new_i64();
 
         tcg_gen_ext32u_i64(val, ia64_gr_src(insn->r2));
         ia64_gen_fr_mov(insn->r1, val);
+        ia64_gen_fr_nat_from_gr(insn->r1, insn->r2);
         break;
     }
     case IA64_OP_SETF_EXP:
         ia64_gen_fr_mov(insn->r1, ia64_gr_src(insn->r2));
+        ia64_gen_fr_nat_from_gr(insn->r1, insn->r2);
         break;
     case IA64_OP_SETF_SIG:
         ia64_gen_fr_mov_sig(insn->r1, ia64_gr_src(insn->r2));
+        ia64_gen_fr_nat_from_gr(insn->r1, insn->r2);
         break;
-    case IA64_OP_TPA:
+    case IA64_OP_TPA: {
+        TCGv_i64 val = tcg_temp_new_i64();
+
+        ia64_gen_check_nat_consumption(insn, insn->r3, 0,
+                                       IA64_NAT_NON_ACCESS);
+        gen_helper_tpa(val, tcg_env, ia64_gr_src(insn->r3));
         if (insn->r1 != 0) {
-            TCGv_i64 val = tcg_temp_new_i64();
-            gen_helper_tpa(val, tcg_env, ia64_gr_src(insn->r3));
-            tcg_gen_mov_i64(cpu_gr[insn->r1], val);
+            ia64_gen_gr_write_nat_clear(insn->r1, val);
         }
         break;
+    }
     case IA64_OP_SYNC_I:
     case IA64_OP_FWB:
         break;
@@ -8543,19 +8741,31 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
     case IA64_OP_THASH:
     case IA64_OP_TTAG: {
         TCGv_i64 result = tcg_temp_new_i64();
+
         if (insn->opcode == IA64_OP_TAK) {
+            ia64_gen_check_nat_consumption(insn, insn->r3, 0,
+                                           IA64_NAT_NON_ACCESS);
             gen_helper_tak(result, tcg_env, ia64_gr_src(insn->r3));
+            if (insn->r1 != 0) {
+                ia64_gen_gr_write_nat_clear(insn->r1, result);
+            }
         } else if (insn->opcode == IA64_OP_THASH) {
             gen_helper_thash(result, tcg_env, ia64_gr_src(insn->r3));
+            if (insn->r1 != 0) {
+                tcg_gen_mov_i64(cpu_gr[insn->r1], result);
+                ia64_gen_gr_nat_from_1(insn->r1, insn->r3);
+            }
         } else {
             gen_helper_ttag(result, tcg_env, ia64_gr_src(insn->r3));
-        }
-        if (insn->r1 != 0) {
-            ia64_gen_gr_write_nat_clear(insn->r1, result);
+            if (insn->r1 != 0) {
+                tcg_gen_mov_i64(cpu_gr[insn->r1], result);
+                ia64_gen_gr_nat_from_1(insn->r1, insn->r3);
+            }
         }
         break;
     }
     case IA64_OP_FC:
+        ia64_gen_check_nat_non_access(insn, insn->r3, false);
         gen_helper_fc(tcg_env, ia64_gr_src(insn->r3));
         break;
     case IA64_OP_INVALA:
@@ -8797,19 +9007,22 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
     case IA64_OP_XCHG8: {
         MemOp memop = ia64_memop_for_opcode(insn->opcode);
         uint32_t size = ia64_memop_size(memop);
+        TCGv_i64 addr = tcg_temp_new_i64();
+        TCGv_i64 value = tcg_temp_new_i64();
 
         ia64_gen_check_nat_semaphore(insn, insn->r3, IA64_NAT_NON_ACCESS);
         ia64_gen_check_nat_semaphore(insn, insn->r2, IA64_NAT_ACCESS);
-        ia64_gen_check_alignment_access(insn, ia64_gr_src(insn->r3),
-                                        size, true,
+        tcg_gen_mov_i64(addr, ia64_gr_src(insn->r3));
+        tcg_gen_mov_i64(value, ia64_gr_src(insn->r2));
+        ia64_gen_check_alignment_access(insn, addr, size, true,
                                         IA64_ISR_R | IA64_ISR_W);
-        gen_helper_check_semaphore_access(tcg_env, ia64_gr_src(insn->r3));
+        gen_helper_check_semaphore_access(tcg_env, addr);
         ia64_gen_memory_release(insn);
-        tcg_gen_atomic_xchg_i64(cpu_gr[insn->r1], ia64_gr_src(insn->r3),
-                                 ia64_gr_src(insn->r2), ctx->mmu_idx, memop);
+        tcg_gen_atomic_xchg_i64(cpu_gr[insn->r1], addr, value,
+                                ctx->mmu_idx, memop);
         ia64_gen_memory_acquire(insn);
         ia64_gen_gr_nat_clear(insn->r1);
-        gen_helper_invalidate_alat_store(tcg_env, ia64_gr_src(insn->r3),
+        gen_helper_invalidate_alat_store(tcg_env, addr,
                                          tcg_constant_i32(size));
         break;
     }
@@ -8818,19 +9031,22 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
     case IA64_OP_CMPXCHG4:
     case IA64_OP_CMPXCHG8: {
         MemOp memop = ia64_memop_for_opcode(insn->opcode);
+        uint32_t size = ia64_memop_size(memop);
+        TCGv_i64 addr = tcg_temp_new_i64();
+        TCGv_i64 value = tcg_temp_new_i64();
         TCGv_i64 ccv = tcg_temp_new_i64();
+
         ia64_gen_check_nat_semaphore(insn, insn->r3, IA64_NAT_NON_ACCESS);
         ia64_gen_check_nat_semaphore(insn, insn->r2, IA64_NAT_ACCESS);
-        ia64_gen_check_alignment_access(insn, ia64_gr_src(insn->r3),
-                                        ia64_memop_size(memop), true,
+        tcg_gen_mov_i64(addr, ia64_gr_src(insn->r3));
+        tcg_gen_mov_i64(value, ia64_gr_src(insn->r2));
+        ia64_gen_check_alignment_access(insn, addr, size, true,
                                         IA64_ISR_R | IA64_ISR_W);
-        gen_helper_check_semaphore_access(tcg_env, ia64_gr_src(insn->r3));
+        gen_helper_check_semaphore_access(tcg_env, addr);
         gen_helper_read_ar(ccv, tcg_env, tcg_constant_i32(32));
         ia64_gen_memory_release(insn);
-        gen_helper_cmpxchg(cpu_gr[insn->r1], tcg_env,
-                            ia64_gr_src(insn->r3), ccv,
-                            ia64_gr_src(insn->r2),
-                            tcg_constant_i32(ia64_memop_size(memop)));
+        gen_helper_cmpxchg(cpu_gr[insn->r1], tcg_env, addr, ccv, value,
+                            tcg_constant_i32(size));
         ia64_gen_memory_acquire(insn);
         ia64_gen_gr_nat_clear(insn->r1);
         break;
@@ -8861,20 +9077,24 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn)
         TCGv_i64 addend = insn->imm ?
                            tcg_constant_i64(insn->imm) :
                            ia64_gr_src(insn->r2);
+        TCGv_i64 addr = tcg_temp_new_i64();
+        TCGv_i64 value = tcg_temp_new_i64();
+
         ia64_gen_check_nat_semaphore(insn, insn->r3, IA64_NAT_NON_ACCESS);
         if (!insn->imm) {
             ia64_gen_check_nat_semaphore(insn, insn->r2, IA64_NAT_ACCESS);
         }
-        ia64_gen_check_alignment_access(insn, ia64_gr_src(insn->r3),
-                                        size, true,
+        tcg_gen_mov_i64(addr, ia64_gr_src(insn->r3));
+        tcg_gen_mov_i64(value, addend);
+        ia64_gen_check_alignment_access(insn, addr, size, true,
                                         IA64_ISR_R | IA64_ISR_W);
-        gen_helper_check_semaphore_access(tcg_env, ia64_gr_src(insn->r3));
+        gen_helper_check_semaphore_access(tcg_env, addr);
         ia64_gen_memory_release(insn);
-        tcg_gen_atomic_fetch_add_i64(cpu_gr[insn->r1], ia64_gr_src(insn->r3),
-                                     addend, ctx->mmu_idx, memop);
+        tcg_gen_atomic_fetch_add_i64(cpu_gr[insn->r1], addr, value,
+                                     ctx->mmu_idx, memop);
         ia64_gen_memory_acquire(insn);
         ia64_gen_gr_nat_clear(insn->r1);
-        gen_helper_invalidate_alat_store(tcg_env, ia64_gr_src(insn->r3),
+        gen_helper_invalidate_alat_store(tcg_env, addr,
                                          tcg_constant_i32(size));
         break;
     }
@@ -9208,12 +9428,19 @@ static int sapic_vector_priority(int vector)
     return -1;
 }
 
+static int sapic_vector_priority_class(int vector)
+{
+    return vector >= 16 ? vector >> 4 : -1;
+}
+
 static bool sapic_vector_unmasked(CPUIA64State *env, int vector)
 {
     uint64_t tpr = env->cr[IA64_CR_SAPIC_TPR];
     int isr = sapic_find_isr(env);
+    int vector_priority = sapic_vector_priority(vector);
+    int vector_class = sapic_vector_priority_class(vector);
 
-    if (sapic_vector_priority(vector) <= sapic_vector_priority(isr)) {
+    if (vector_priority <= sapic_vector_priority(isr)) {
         return false;
     }
 
@@ -9224,7 +9451,7 @@ static bool sapic_vector_unmasked(CPUIA64State *env, int vector)
         return !(tpr & IA64_TPR_MMI);
     }
     return !(tpr & IA64_TPR_MMI) &&
-           ((uint64_t)(vector & 0xF0) > (tpr & IA64_TPR_MIC_MASK));
+           ((uint64_t)vector_class > ((tpr & IA64_TPR_MIC_MASK) >> 4));
 }
 
 static int sapic_find_irr(CPUIA64State *env)
@@ -9286,11 +9513,16 @@ bool ia64_sapic_has_pending(CPUIA64State *env)
     return vector != IA64_SPURIOUS_VECTOR;
 }
 
-static uint8_t ia64_itv_vector(CPUIA64State *env)
+static bool ia64_external_interrupt_vector_valid(int vector)
+{
+    return vector == 0 || vector == 2 || (vector >= 16 && vector < 256);
+}
+
+static int ia64_itv_vector(CPUIA64State *env)
 {
     uint8_t vector = env->cr[IA64_CR_ITV] & 0xFF;
 
-    return vector >= 16 ? vector : IA64_TIMER_VECTOR;
+    return ia64_external_interrupt_vector_valid(vector) ? vector : -1;
 }
 
 static bool ia64_itv_masked(CPUIA64State *env)
@@ -9298,11 +9530,12 @@ static bool ia64_itv_masked(CPUIA64State *env)
     return env->cr[IA64_CR_ITV] & IA64_VECTOR_MASKED;
 }
 
-static void ia64_sapic_clear_irr(CPUIA64State *env, uint8_t vector)
+static void ia64_sapic_clear_irr(CPUIA64State *env, int vector)
 {
     int idx = vector / 64;
     int bit = vector % 64;
 
+    g_assert(vector >= 0 && vector < 256);
     env->sapic_irr[idx] &= ~(1ULL << bit);
     ia64_sapic_update_interrupt(env);
 }
@@ -9349,6 +9582,11 @@ void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 static void ia64_itm_raise(CPUIA64State *env, uint64_t itm_value)
 {
     IA64CPU *cpu = container_of(env, IA64CPU, env);
+    int vector = ia64_itv_vector(env);
+
+    if (vector < 0) {
+        return;
+    }
 
     if (env->itm_last_match_valid && env->itm_last_match == itm_value) {
         ia64_sapic_update_interrupt(env);
@@ -9357,16 +9595,21 @@ static void ia64_itm_raise(CPUIA64State *env, uint64_t itm_value)
 
     env->itm_last_match = itm_value;
     env->itm_last_match_valid = true;
-    ia64_sapic_set_irq(CPU(cpu), ia64_itv_vector(env));
+    ia64_sapic_set_irq(CPU(cpu), vector);
 }
 
 static bool ia64_itm_update_pending(CPUIA64State *env, uint64_t itc,
                                     uint64_t itm_value, bool was_armed)
 {
     int64_t delta_ticks = (int64_t)(itm_value - itc);
+    int vector = ia64_itv_vector(env);
+
+    if (vector < 0) {
+        return true;
+    }
 
     if (ia64_itv_masked(env)) {
-        ia64_sapic_clear_irr(env, ia64_itv_vector(env));
+        ia64_sapic_clear_irr(env, vector);
         return true;
     }
 
@@ -9490,10 +9733,10 @@ bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
     return (va & ~mask) == (entry->va & ~mask);
 }
 
-const IA64TlbEntry *ia64_tlb_find(const IA64TlbEntry *tlb, uint8_t tlb_count,
+const IA64TlbEntry *ia64_tlb_find(const IA64TlbEntry *tlb, uint16_t tlb_count,
                                   uint64_t va, uint32_t rid, bool is_ifetch)
 {
-    uint8_t i;
+    uint16_t i;
 
     for (i = 0; i < tlb_count; i++) {
         if (ia64_tlb_match(&tlb[i], va, rid, is_ifetch)) {
@@ -9503,7 +9746,7 @@ const IA64TlbEntry *ia64_tlb_find(const IA64TlbEntry *tlb, uint8_t tlb_count,
     return NULL;
 }
 
-bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint8_t tlb_count,
+bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint16_t tlb_count,
                            uint64_t va, uint32_t rid, uint8_t access_level,
                            bool is_ifetch, uint64_t *pa, uint8_t *perm)
 {
@@ -9630,7 +9873,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 {
     IA64CPU *cpu = IA64_CPU(cs);
     const IA64TlbEntry *tlb;
-    uint8_t tlb_count;
+    uint16_t tlb_count;
     bool is_ifetch = (access_type == MMU_INST_FETCH);
     uint8_t needed = is_ifetch ? IA64_TLB_X :
                      (access_type == MMU_DATA_STORE ? IA64_TLB_W :
@@ -9639,6 +9882,9 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     uint8_t perm;
     uint32_t rid;
     IA64Exception excp;
+    bool is_rse = !is_ifetch && mmu_idx == MMU_IDX_VIRT &&
+                  !(cpu->env.psr & IA64_PSR_DT) &&
+                  (cpu->env.psr & IA64_PSR_RT);
 
     if (mmu_idx == MMU_PHYS_IDX) {
         vaddr page = addr & TARGET_PAGE_MASK;
@@ -9691,9 +9937,9 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
             ia64_tlb_entry_translate(entry, addr, ia64_psr_cpl(cpu->env.psr),
                                      &pa, &perm);
-            pte_excp = ia64_pte_exception_for_access(
-                entry->pte, perm, needed, is_ifetch,
-                access_type == MMU_DATA_STORE, cpu->env.psr);
+            pte_excp = ia64_tlb_exception_for_access(
+                &cpu->env, entry, perm, needed, is_ifetch,
+                access_type == MMU_DATA_STORE, is_rse);
             if (pte_excp != IA64_EXCP_NONE) {
                 if (probe) {
                     return false;
@@ -9725,9 +9971,10 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
     if (!is_ifetch) {
         uint64_t pte = 0;
+        uint32_t key = 0;
 
         if (ia64_vhpt_walk_full(&cpu->env, addr, rid, false, &pa, &perm,
-                                &pte)) {
+                                &pte, &key)) {
             int prot;
             IA64Exception pte_excp;
             const IA64TlbEntry *new_entry =
@@ -9735,9 +9982,13 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                               addr, rid, false);
             uint64_t page_size = new_entry ? new_entry->ps : TARGET_PAGE_SIZE;
 
-            pte_excp = ia64_pte_exception_for_access(
-                pte, perm, needed, false, access_type == MMU_DATA_STORE,
-                cpu->env.psr);
+            pte_excp = new_entry ?
+                ia64_tlb_exception_for_access(
+                    &cpu->env, new_entry, perm, needed, false,
+                    access_type == MMU_DATA_STORE, is_rse) :
+                ia64_translation_exception_for_access(
+                    &cpu->env, pte, key, perm, needed, false,
+                    access_type == MMU_DATA_STORE, is_rse);
             if (pte_excp != IA64_EXCP_NONE) {
                 if (probe) {
                     return false;
@@ -9759,9 +10010,10 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
     if (is_ifetch) {
         uint64_t pte = 0;
+        uint32_t key = 0;
 
         if (ia64_vhpt_walk_full(&cpu->env, addr, rid, true, &pa, &perm,
-                                &pte)) {
+                                &pte, &key)) {
             int prot;
             IA64Exception pte_excp;
             const IA64TlbEntry *new_entry =
@@ -9769,8 +10021,11 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                               addr, rid, true);
             uint64_t page_size = new_entry ? new_entry->ps : TARGET_PAGE_SIZE;
 
-            pte_excp = ia64_pte_exception_for_access(
-                pte, perm, needed, true, false, cpu->env.psr);
+            pte_excp = new_entry ?
+                ia64_tlb_exception_for_access(
+                    &cpu->env, new_entry, perm, needed, true, false, false) :
+                ia64_translation_exception_for_access(
+                    &cpu->env, pte, key, perm, needed, true, false, false);
             if (pte_excp != IA64_EXCP_NONE) {
                 if (probe) {
                     return false;
@@ -9871,6 +10126,9 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
     case IA64_EXCP_ALT_DTLB:
     case IA64_EXCP_DATA_ACCESS:
     case IA64_EXCP_INST_ACCESS:
+    case IA64_EXCP_INST_KEY_MISS:
+    case IA64_EXCP_DATA_KEY_MISS:
+    case IA64_EXCP_KEY_PERMISSION:
     case IA64_EXCP_DATA_DIRTY:
     case IA64_EXCP_INST_ACCESS_BIT:
     case IA64_EXCP_DATA_ACCESS_BIT:
@@ -9881,6 +10139,24 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
     default:
         return false;
     }
+}
+
+#define IA64_PSR_INTERRUPTION_PRESERVED_MASK \
+    (IA64_PSR_UP | IA64_PSR_MFL | IA64_PSR_MFH | IA64_PSR_PK | \
+     IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_MC | IA64_PSR_IT)
+
+static uint64_t ia64_interruption_psr(CPUIA64State *env)
+{
+    uint64_t psr = env->psr & IA64_PSR_INTERRUPTION_PRESERVED_MASK;
+
+    if (env->cr_dcr & IA64_DCR_BE) {
+        psr |= IA64_PSR_BE;
+    }
+    if (env->cr_dcr & IA64_DCR_PP) {
+        psr |= IA64_PSR_PP;
+    }
+
+    return psr;
 }
 
 static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
@@ -9913,6 +10189,9 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     case IA64_EXCP_DATA_NESTED_TLB:
     case IA64_EXCP_DATA_ACCESS:
     case IA64_EXCP_INST_ACCESS:
+    case IA64_EXCP_INST_KEY_MISS:
+    case IA64_EXCP_DATA_KEY_MISS:
+    case IA64_EXCP_KEY_PERMISSION:
     case IA64_EXCP_DATA_DIRTY:
     case IA64_EXCP_INST_ACCESS_BIT:
     case IA64_EXCP_DATA_ACCESS_BIT:
@@ -10008,6 +10287,9 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
             memcpy(frame->rse_cover_bsp, cpu->env.rse_cover_bsp,
                    frame->rse_cover_depth *
                    sizeof(cpu->env.rse_cover_bsp[0]));
+            memcpy(frame->rse_cover_is_loadrs, cpu->env.rse_cover_is_loadrs,
+                   frame->rse_cover_depth *
+                   sizeof(cpu->env.rse_cover_is_loadrs[0]));
         }
         cpu->env.cr_ipsr = (cpu->env.psr & ~IA64_PSR_RI_MASK) |
                            (((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT);
@@ -10038,10 +10320,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
         }
     }
 
-    ia64_set_psr(&cpu->env, (cpu->env.psr &
-                               ~(IA64_PSR_IC | IA64_PSR_I |
-                                 IA64_PSR_CPL_MASK | IA64_PSR_RI_MASK |
-                                 IA64_PSR_BN)));
+    ia64_set_psr(&cpu->env, ia64_interruption_psr(&cpu->env));
     cpu->env.psr_ic_inflight = false;
 
     cpu->env.ip = (cpu->env.cr_iva & ~0x7fffULL) | vector;
@@ -10124,6 +10403,18 @@ static void ia64_unaligned_base_update(CPUIA64State *env,
     }
 }
 
+static void ia64_firmware_defer_speculative_load(CPUIA64State *env,
+                                                 const Ia64Instruction *insn)
+{
+    if (insn->r1 != 0) {
+        env->gr[insn->r1] = 0;
+        ia64_gr_nat_set_runtime(env, insn->r1, true);
+    }
+    if (ia64_opcode_is_data_speculative_load(insn->opcode)) {
+        helper_invalidate_alat_reg(env, insn->r1);
+    }
+}
+
 static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
                                                 uint64_t fault_addr,
                                                 uint8_t fault_slot)
@@ -10148,7 +10439,6 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
      */
     if (env->cr_iva != IA64_FIRMWARE_IVT_BASE ||
         !(env->psr & IA64_PSR_IC) ||
-        (env->cr_isr & IA64_ISR_SP) ||
         fault_slot > 2) {
         return false;
     }
@@ -10175,16 +10465,52 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
     }
 
     if (ia64_opcode_has_firmware_unaligned_load_assist(insn.opcode)) {
+        bool check_load_clear = ia64_opcode_is_check_load_clear(insn.opcode);
+        bool check_load_no_clear =
+            ia64_opcode_is_check_load_no_clear(insn.opcode);
+
         memop = ia64_memop_for_opcode(insn.opcode);
         size = ia64_memop_size(memop);
         addr = env->gr[insn.r3];
-        if (addr != fault_addr ||
-            ((addr & 0xfff) + size - 1) > 0xfff ||
-            size > sizeof(data) ||
-            !ia64_debug_read(cs, addr, data, size)) {
+        if (addr != fault_addr || ((addr & 0xfff) + size - 1) > 0xfff) {
             return false;
         }
 
+        if (ia64_opcode_is_control_speculative_load(insn.opcode) &&
+            (env->cr_isr & IA64_ISR_SP) &&
+            (env->cr_isr & IA64_ISR_ED)) {
+            ia64_firmware_defer_speculative_load(env, &insn);
+            ia64_unaligned_base_update(env, &insn, addr);
+            ia64_resume_after_instruction(env, env->fault_ip, fault_slot);
+            env->exception = IA64_EXCP_NONE;
+            return true;
+        }
+
+        /*
+         * IA-64 SDM Vol. 2, 17.3.1 requires unaligned handlers to force
+         * failed data-speculative loads; ALAT cannot track all misalignment
+         * sizes for later store-conflict checks.
+         */
+        if (ia64_opcode_is_data_speculative_load(insn.opcode)) {
+            helper_invalidate_alat_reg(env, insn.r1);
+            ia64_unaligned_base_update(env, &insn, addr);
+            ia64_resume_after_instruction(env, env->fault_ip, fault_slot);
+            env->exception = IA64_EXCP_NONE;
+            return true;
+        }
+
+        if (ia64_opcode_is_check_load(insn.opcode) &&
+            helper_check_load_alat_addr(env, insn.r1, addr, size,
+                                        check_load_clear)) {
+            ia64_unaligned_base_update(env, &insn, addr);
+            ia64_resume_after_instruction(env, env->fault_ip, fault_slot);
+            env->exception = IA64_EXCP_NONE;
+            return true;
+        }
+
+        if (size > sizeof(data) || !ia64_debug_read(cs, addr, data, size)) {
+            return false;
+        }
         if (insn.r1 != 0) {
             env->gr[insn.r1] = ldm_p(data, memop);
             if (ia64_opcode_is_fill_load(insn.opcode)) {
@@ -10197,7 +10523,7 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
                 }
             } else {
                 ia64_gr_nat_clear_runtime(env, insn.r1);
-                if (ia64_opcode_is_advanced_load(insn.opcode)) {
+                if (check_load_no_clear) {
                     helper_set_alat(env, insn.r1, addr, size);
                 }
             }
@@ -10416,9 +10742,9 @@ static void ia64_cpu_realize(DeviceState *dev, Error **errp)
 }
 
 static void ia64_dump_tlb(FILE *f, const char *name, const IA64TlbEntry *tlb,
-                          uint8_t count)
+                          uint16_t count)
 {
-    uint8_t i;
+    uint16_t i;
 
     for (i = 0; i < count; i++) {
         const IA64TlbEntry *entry = &tlb[i];

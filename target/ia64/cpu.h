@@ -30,7 +30,7 @@
 #define IA64_PMD_COUNT   64
 #define IA64_PKR_COUNT   16
 #define IA64_MSR_COUNT   1024
-#define IA64_TLB_MAX     64
+#define IA64_TLB_MAX     256
 #define IA64_RSE_FRAME_MAX 128
 #define IA64_EXCP_FRAME_MAX 8
 
@@ -45,12 +45,24 @@
 #define IA64_FR_ONE      0x3ff0000000000000ULL
 
 /* ---- PSR bit definitions ---- */
+#define IA64_PSR_BE      (1ULL << 1)
+#define IA64_PSR_UP      (1ULL << 2)
+#define IA64_PSR_AC      (1ULL << 3)
+#define IA64_PSR_MFL     (1ULL << 4)
+#define IA64_PSR_MFH     (1ULL << 5)
 #define IA64_PSR_IC      (1ULL << 13)
 #define IA64_PSR_I       (1ULL << 14)
+#define IA64_PSR_PK      (1ULL << 15)
 #define IA64_PSR_UM_MASK 0x7fULL
-#define IA64_PSR_AC      (1ULL << 3)
 #define IA64_PSR_DT      (1ULL << 17)
+#define IA64_PSR_DFL     (1ULL << 18)
+#define IA64_PSR_DFH     (1ULL << 19)
+#define IA64_PSR_SP      (1ULL << 20)
+#define IA64_PSR_PP      (1ULL << 21)
+#define IA64_PSR_DI      (1ULL << 22)
+#define IA64_PSR_SI      (1ULL << 23)
 #define IA64_PSR_RT      (1ULL << 27)
+#define IA64_PSR_MC      (1ULL << 35)
 #define IA64_PSR_IT      (1ULL << 36)
 #define IA64_PSR_CPL_MASK (3ULL << 32)
 #define IA64_PSR_CPL_SHIFT 32
@@ -221,6 +233,17 @@ static inline bool ia64_region6_local_sapic_pa(uint64_t va, uint64_t *pa)
 #define IA64_ITIR_KEY_MASK   (0xffffffULL << 8)
 #define IA64_ITIR_KEY_SHIFT  8
 
+/* ---- Protection Key Register fields ---- */
+#define IA64_PKR_VALID       (1ULL << 0)
+#define IA64_PKR_WD          (1ULL << 1)
+#define IA64_PKR_RD          (1ULL << 2)
+#define IA64_PKR_XD          (1ULL << 3)
+#define IA64_PKR_KEY_SHIFT   8
+#define IA64_PKR_KEY_MASK \
+    (((1ULL << IA64_IMPL_KEY_BITS) - 1) << IA64_PKR_KEY_SHIFT)
+#define IA64_PKR_MASK        (IA64_PKR_VALID | IA64_PKR_WD | IA64_PKR_RD | \
+                              IA64_PKR_XD | IA64_PKR_KEY_MASK)
+
 /* ---- PTE fields ---- */
 #define IA64_PTE_PRESENT  (1ULL << 0)
 #define IA64_PTE_ACCESSED (1ULL << 5)
@@ -237,6 +260,7 @@ static inline bool ia64_region6_local_sapic_pa(uint64_t va, uint64_t *pa)
 
 /* ---- DCR fields ---- */
 #define IA64_DCR_PP          (1ULL << 0)
+#define IA64_DCR_BE          (1ULL << 1)
 #define IA64_DCR_LC          (1ULL << 2)
 #define IA64_DCR_DM          (1ULL << 8)
 #define IA64_DCR_DP          (1ULL << 9)
@@ -261,7 +285,6 @@ static inline bool ia64_region6_local_sapic_pa(uint64_t va, uint64_t *pa)
 #define IA64_CR_LRR0          80
 #define IA64_CR_LRR1          81
 
-#define IA64_TIMER_VECTOR         239
 #define IA64_SPURIOUS_VECTOR      0x0F
 #define IA64_VECTOR_MASKED        (1ULL << 16)
 #define IA64_TPR_MIC_MASK         0x00000000000000f0ULL
@@ -360,6 +383,7 @@ typedef struct IA64ExceptionFrame {
     uint64_t rse_cover_nat[IA64_RSE_FRAME_MAX][2];
     uint8_t rse_cover_sof[IA64_RSE_FRAME_MAX];
     uint64_t rse_cover_bsp[IA64_RSE_FRAME_MAX];
+    bool rse_cover_is_loadrs[IA64_RSE_FRAME_MAX];
 } IA64ExceptionFrame;
 
 /* ---- Exception type enum (internal IDs, not IVT vectors) ---- */
@@ -384,6 +408,9 @@ typedef enum IA64Exception {
     IA64_EXCP_DATA_DIRTY = 17,
     IA64_EXCP_INST_ACCESS_BIT = 18,
     IA64_EXCP_DATA_ACCESS_BIT = 19,
+    IA64_EXCP_INST_KEY_MISS = 20,
+    IA64_EXCP_DATA_KEY_MISS = 21,
+    IA64_EXCP_KEY_PERMISSION = 22,
     IA64_EXCP_MAX,
 } IA64Exception;
 
@@ -433,23 +460,19 @@ typedef struct IA64TlbEntry {
     uint8_t  pending_purge;
     uint32_t rid;
     uint32_t key;
-    uint8_t  slot;
+    uint16_t slot;
 } IA64TlbEntry;
 
-bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint8_t tlb_count,
+bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint16_t tlb_count,
                      uint64_t va, uint32_t rid, uint8_t access_level,
                      bool is_ifetch, uint64_t *pa, uint8_t *perm);
 
 const IA64TlbEntry *ia64_tlb_find(const IA64TlbEntry *tlb,
-                                  uint8_t tlb_count, uint64_t va,
+                                  uint16_t tlb_count, uint64_t va,
                                   uint32_t rid, bool is_ifetch);
 
 bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
                     uint32_t rid, bool is_ifetch);
-
-bool ia64_tlb_probe(const IA64TlbEntry *tlb, uint8_t tlb_count,
-                    uint64_t va, uint32_t rid, uint8_t access_level,
-                    bool is_ifetch, uint64_t *pa, uint8_t *perm);
 
 static inline bool ia64_tlb_entry_present(const IA64TlbEntry *entry)
 {
@@ -558,10 +581,10 @@ typedef struct CPUArchState {
     /* TLB */
     IA64TlbEntry tlb_data[IA64_TLB_MAX];
     IA64TlbEntry tlb_inst[IA64_TLB_MAX];
-    uint8_t       tlb_data_count;
-    uint8_t       tlb_inst_count;
-    uint8_t       tlb_data_replace;
-    uint8_t       tlb_inst_replace;
+    uint16_t      tlb_data_count;
+    uint16_t      tlb_inst_count;
+    uint16_t      tlb_data_replace;
+    uint16_t      tlb_inst_replace;
 
     /* pending external interrupt */
     uint8_t pending_extint;
@@ -600,6 +623,7 @@ typedef struct CPUArchState {
     uint64_t rse_cover_nat[IA64_RSE_FRAME_MAX][2];
     uint8_t rse_cover_sof[IA64_RSE_FRAME_MAX];
     uint64_t rse_cover_bsp[IA64_RSE_FRAME_MAX];
+    bool rse_cover_is_loadrs[IA64_RSE_FRAME_MAX];
 
     uint32_t excp_frame_depth;
     IA64ExceptionFrame excp_frames[IA64_EXCP_FRAME_MAX];
@@ -624,6 +648,89 @@ typedef struct CPUArchState {
     uint64_t fr_sig[2];
     float_status fp_status;
 } CPUIA64State;
+
+static inline bool ia64_key_check_enabled(const CPUIA64State *env,
+                                          bool is_ifetch, bool is_rse)
+{
+    uint64_t translation_bit;
+
+    if (!(env->psr & IA64_PSR_PK)) {
+        return false;
+    }
+
+    translation_bit = is_ifetch ? IA64_PSR_IT :
+                      (is_rse ? IA64_PSR_RT : IA64_PSR_DT);
+    return env->psr & translation_bit;
+}
+
+static inline IA64Exception
+ia64_key_exception_for_access(const CPUIA64State *env, uint32_t key,
+                              uint8_t needed, bool is_ifetch, bool is_rse)
+{
+    const uint64_t pkr_key = (uint64_t)key << IA64_PKR_KEY_SHIFT;
+    uint64_t disable_bits = 0;
+    bool matched = false;
+
+    if (!ia64_key_check_enabled(env, is_ifetch, is_rse)) {
+        return IA64_EXCP_NONE;
+    }
+
+    for (uint32_t i = 0; i < IA64_PKR_COUNT; i++) {
+        uint64_t pkr = env->pkr[i];
+
+        if ((pkr & IA64_PKR_VALID) &&
+            (pkr & IA64_PKR_KEY_MASK) == pkr_key) {
+            matched = true;
+            disable_bits = pkr;
+            break;
+        }
+    }
+
+    if (!matched) {
+        return is_ifetch ? IA64_EXCP_INST_KEY_MISS :
+                           IA64_EXCP_DATA_KEY_MISS;
+    }
+
+    if (((needed & IA64_TLB_R) && (disable_bits & IA64_PKR_RD)) ||
+        ((needed & IA64_TLB_W) && (disable_bits & IA64_PKR_WD)) ||
+        ((needed & IA64_TLB_X) && (disable_bits & IA64_PKR_XD))) {
+        return IA64_EXCP_KEY_PERMISSION;
+    }
+
+    return IA64_EXCP_NONE;
+}
+
+static inline IA64Exception
+ia64_translation_exception_for_access(const CPUIA64State *env, uint64_t pte,
+                                      uint32_t key, uint8_t perm,
+                                      uint8_t needed, bool is_ifetch,
+                                      bool is_write, bool is_rse)
+{
+    IA64Exception excp;
+
+    if (!(pte & IA64_PTE_PRESENT)) {
+        return IA64_EXCP_PAGE_NOT_PRESENT;
+    }
+
+    excp = ia64_key_exception_for_access(env, key, needed, is_ifetch, is_rse);
+    if (excp != IA64_EXCP_NONE) {
+        return excp;
+    }
+
+    return ia64_pte_exception_for_access(pte, perm, needed, is_ifetch,
+                                         is_write, env->psr);
+}
+
+static inline IA64Exception
+ia64_tlb_exception_for_access(const CPUIA64State *env,
+                              const IA64TlbEntry *entry, uint8_t perm,
+                              uint8_t needed, bool is_ifetch,
+                              bool is_write, bool is_rse)
+{
+    return ia64_translation_exception_for_access(env, entry->pte, entry->key,
+                                                perm, needed, is_ifetch,
+                                                is_write, is_rse);
+}
 
 static inline uint8_t ia64_rr_index(uint64_t va)
 {
@@ -762,14 +869,17 @@ static inline bool ia64_exception_initializes_iha(int excp)
 {
     return excp != IA64_EXCP_ALT_ITLB &&
            excp != IA64_EXCP_ALT_DTLB &&
-           excp != IA64_EXCP_DATA_NESTED_TLB;
+           excp != IA64_EXCP_DATA_NESTED_TLB &&
+           excp != IA64_EXCP_INST_KEY_MISS &&
+           excp != IA64_EXCP_DATA_KEY_MISS &&
+           excp != IA64_EXCP_KEY_PERMISSION;
 }
 
 bool ia64_vhpt_walk(CPUIA64State *env, uint64_t va, uint32_t rid,
                     bool is_ifetch, uint64_t *pa, uint8_t *perm);
 bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
                          bool is_ifetch, uint64_t *pa, uint8_t *perm,
-                         uint64_t *pte);
+                         uint64_t *pte, uint32_t *key);
 bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
                                bool is_ifetch, uint64_t *entry_va);
 bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,

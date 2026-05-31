@@ -7,6 +7,23 @@
 
 #define TYPE_IA64_PCI_HOST_BRIDGE "ia64-pcihost"
 
-int ia64_pci_route_intx(uint8_t devfn, int irq_num);
+#define IA64_PCI_MMIO_BASE        0x00000000c1000000ULL
+#define IA64_PCI_MMIO_SIZE        0x0000000010000000ULL
+#define IA64_PCI_IO_BASE          0x000000800010000000ULL
+#define IA64_PCI_IO_SIZE          0x0000000001000000ULL
+#define IA64_PCI_IO_SPARSE_SKIP   0x1000ULL
+/* Sparse IA-64 port encoding expands the legacy 16-bit I/O port space. */
+#define IA64_PCI_IO_SPARSE_SIZE   0x0000000004000000ULL
+#define IA64_PCI_CONFIG_BASE      0x0000007ff0000000ULL
+#define IA64_PCI_CONFIG_SIZE      0x0000000010000000ULL
+
+#if (IA64_PCI_IO_BASE & (IA64_PCI_IO_SPARSE_SIZE - 1)) != 0
+#error "IA64_PCI_IO_BASE must be aligned for sparse I/O port addresses"
+#endif
+
+#define IA64_PCI_INTX_GSI_BASE 16
+#define IA64_PCI_INTX_LINES    4
+
+int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num);
 
 #endif

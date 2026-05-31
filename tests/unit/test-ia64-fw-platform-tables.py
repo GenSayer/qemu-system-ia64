@@ -146,15 +146,15 @@ def main():
         return 1
 
     dsdt_size = symbol_size("mDsdt")
-    if dsdt_size != 0x1d1:
+    if dsdt_size != 0x1db:
         print("not ok 1 - IA-64 DSDT layout size")
-        print(f"# expected mDsdt size 0x1d1, got 0x{dsdt_size:x}")
+        print(f"# expected mDsdt size 0x1db, got 0x{dsdt_size:x}")
         return 1
 
     ssdt_size = symbol_size("mSsdt")
-    if ssdt_size != 0x84:
+    if ssdt_size != 0x91:
         print("not ok 1 - IA-64 SSDT serial layout size")
-        print(f"# expected mSsdt size 0x84, got 0x{ssdt_size:x}")
+        print(f"# expected mSsdt size 0x91, got 0x{ssdt_size:x}")
         return 1
 
     mcfg_size = symbol_size("mMcfg")
@@ -198,6 +198,10 @@ def main():
             return 1
 
     ssdt = symbol_bytes("mSsdt")
+    if b"\x5b\x83\x0bCPU0\x00\x00\x00\x00\x00\x00" not in ssdt:
+        print("not ok 1 - SSDT processor AML")
+        print("# missing ACPI Processor CPU0 declaration")
+        return 1
     for token in [b"UAR0", b"PNP0501", b"_CRS"]:
         if token not in ssdt:
             print("not ok 1 - SSDT serial AML")
@@ -207,7 +211,8 @@ def main():
         ((0x47F0000000).to_bytes(8, "little"), "UART MMIO base"),
         ((0x47F0000007).to_bytes(8, "little"), "UART MMIO limit"),
         ((8).to_bytes(8, "little"), "UART MMIO length"),
-        (b"\x22\x10\x00", "UART IRQ4 descriptor"),
+        (b"\x8a\x2b\x00\x00\x0d\x01", "UART QWordMemory consumer descriptor"),
+        (b"\x22\x10\x00\x79\x00", "UART IRQ4 descriptor and EndTag"),
     ]:
         if value not in ssdt:
             print("not ok 1 - SSDT serial AML")

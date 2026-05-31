@@ -6,7 +6,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu/units.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/pci/pci_host.h"
 #include "hw/pci/pci.h"
@@ -22,18 +21,13 @@ struct IA64PCIState {
     PCIHostState parent_obj;
 
     MemoryRegion pci_mmio;
+    MemoryRegion pci_mmio_window;
     MemoryRegion pci_io;
     MemoryRegion pci_io_sparse;
     MemoryRegion pci_config;
     AddressSpace pci_io_as;
-    qemu_irq irq[4];
+    qemu_irq irq[IA64_PCI_INTX_LINES];
 };
-
-#define IA64_PCI_IO_BASE        0x80000FF00000ULL
-#define IA64_PCI_IO_DENSE_SIZE  (16 * MiB)
-#define IA64_PCI_IO_SPARSE_SKIP 0x1000
-#define IA64_PCI_CONFIG_BASE    0x7FF0000000ULL
-#define IA64_PCI_CONFIG_SIZE    (256 * MiB)
 
 static hwaddr ia64_pci_sparse_io_port(hwaddr encoded)
 {
@@ -66,8 +60,7 @@ static uint64_t ia64_pci_sparse_io_read(void *opaque, hwaddr addr,
     hwaddr port = ia64_pci_sparse_io_port(addr + IA64_PCI_IO_SPARSE_SKIP);
     hwaddr dense = ia64_pci_dense_io_addr(port);
 
-    if (port >= IA64_PCI_IO_DENSE_SIZE ||
-        port + size > IA64_PCI_IO_DENSE_SIZE) {
+    if (port >= IA64_PCI_IO_SIZE || port + size > IA64_PCI_IO_SIZE) {
         return ~0ULL;
     }
 
@@ -93,8 +86,7 @@ static void ia64_pci_sparse_io_write(void *opaque, hwaddr addr, uint64_t data,
     hwaddr port = ia64_pci_sparse_io_port(addr + IA64_PCI_IO_SPARSE_SKIP);
     hwaddr dense = ia64_pci_dense_io_addr(port);
 
-    if (port >= IA64_PCI_IO_DENSE_SIZE ||
-        port + size > IA64_PCI_IO_DENSE_SIZE) {
+    if (port >= IA64_PCI_IO_SIZE || port + size > IA64_PCI_IO_SIZE) {
         return;
     }
 
@@ -199,21 +191,26 @@ static const MemoryRegionOps ia64_pci_config_ops = {
     },
 };
 
-int ia64_pci_route_intx(uint8_t devfn, int irq_num)
+static int ia64_pci_route_intx_output(uint8_t devfn, int irq_num)
 {
-    return (PCI_SLOT(devfn) + irq_num) & 3;
+    return (PCI_SLOT(devfn) + irq_num) % IA64_PCI_INTX_LINES;
+}
+
+int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num)
+{
+    return IA64_PCI_INTX_GSI_BASE + ia64_pci_route_intx_output(devfn, irq_num);
 }
 
 static int ia64_pci_map_irq(PCIDevice *d, int irq_num)
 {
-    return ia64_pci_route_intx(d->devfn, irq_num);
+    return ia64_pci_route_intx_output(d->devfn, irq_num);
 }
 
 static void ia64_pci_set_irq(void *opaque, int irq_num, int level)
 {
     IA64PCIState *s = opaque;
 
-    if (irq_num < 4) {
+    if (irq_num < IA64_PCI_INTX_LINES) {
         qemu_set_irq(s->irq[irq_num], level);
     }
 }
@@ -223,8 +220,17 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
     IA64PCIState *s = IA64_PCI_HOST_BRIDGE(dev);
     PCIHostState *phb = PCI_HOST_BRIDGE(dev);
 
+    /*
+     * PCI BAR values on this platform are identity-mapped CPU physical
+     * addresses.  Keep the PCI bus address space large enough to contain the
+     * advertised low MMIO window at its bus address, then expose only that
+     * window into system memory.
+     */
     memory_region_init(&s->pci_mmio, OBJECT(dev), "pci-mmio",
-                       16ULL * GiB);
+                       IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE);
+    memory_region_init_alias(&s->pci_mmio_window, OBJECT(dev),
+                             "pci-mmio-window", &s->pci_mmio,
+                             IA64_PCI_MMIO_BASE, IA64_PCI_MMIO_SIZE);
     /*
      * IA-64 sparse I/O uses a 24-bit port offset within each io_space slot.
      * Linux constructs CPU virtual addresses that can reach beyond 64 KiB
@@ -232,24 +238,26 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
      * must cover the full 16 MiB aperture.
      */
     memory_region_init(&s->pci_io, OBJECT(dev), "pci-io",
-                       IA64_PCI_IO_DENSE_SIZE);
+                       IA64_PCI_IO_SIZE);
     address_space_init(&s->pci_io_as, &s->pci_io, "ia64-pci-io");
     memory_region_init_io(&s->pci_io_sparse, OBJECT(dev),
                           &ia64_pci_sparse_io_ops, s, "pci-io-sparse",
-                          IA64_PCI_IO_DENSE_SIZE - IA64_PCI_IO_SPARSE_SKIP);
+                          IA64_PCI_IO_SPARSE_SIZE -
+                          IA64_PCI_IO_SPARSE_SKIP);
     memory_region_init_io(&s->pci_config, OBJECT(dev),
                           &ia64_pci_config_ops, s, "ia64-pci-config",
                           IA64_PCI_CONFIG_SIZE);
 
-    qdev_init_gpio_out(dev, s->irq, 4);
+    qdev_init_gpio_out(dev, s->irq, IA64_PCI_INTX_LINES);
 
     phb->bus = pci_register_root_bus(dev, "pci",
                                      ia64_pci_set_irq, ia64_pci_map_irq, s,
                                      &s->pci_mmio, &s->pci_io,
                                      PCI_DEVFN(0, 0), 4, TYPE_PCI_BUS);
 
-    memory_region_add_subregion(get_system_memory(), 0x8000000000ULL,
-                                &s->pci_mmio);
+    memory_region_add_subregion_overlap(get_system_memory(),
+                                        IA64_PCI_MMIO_BASE,
+                                        &s->pci_mmio_window, 1);
     memory_region_add_subregion(get_system_memory(), IA64_PCI_IO_BASE,
                                 &s->pci_io);
     memory_region_add_subregion_overlap(get_system_memory(),

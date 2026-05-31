@@ -13,6 +13,9 @@ SECTIONS
         *(.plt*)
     }
 
+    . = ALIGN(0x2000);
+    __runtime_data_start = .;
+
     . = ALIGN(16);
 
     .rodata : {
@@ -36,9 +39,6 @@ SECTIONS
     .IA_64.unwind : {
         *(.IA_64.unwind*)
     }
-
-    . = ALIGN(0x2000);
-    __runtime_data_start = .;
 
     .data : {
         *(.data*)

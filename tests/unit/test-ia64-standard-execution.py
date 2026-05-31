@@ -36,16 +36,42 @@ ACPI_RECLAIM_BASE = 0x00800000
 ACPI_RECLAIM_END = 0x00820000
 ACPI_PM_BASE = 0x80112000
 ACPI_SCI_IRQ = 9
+ACPI_FADT_FLAG_WBINVD = 1 << 0
+ACPI_FADT_FLAG_PWR_BUTTON = 1 << 4
+ACPI_FADT_FLAG_SLP_BUTTON = 1 << 5
+ACPI_FADT_FLAG_TMR_VAL_EXT = 1 << 8
+ACPI_FADT_EXPECTED_FLAGS = (
+    ACPI_FADT_FLAG_WBINVD |
+    ACPI_FADT_FLAG_PWR_BUTTON |
+    ACPI_FADT_FLAG_SLP_BUTTON |
+    ACPI_FADT_FLAG_TMR_VAL_EXT
+)
 PCI_CONFIG_ECAM_BASE = 0x7FF0000000
+PCI_MMIO_BASE = 0xC1000000
+PCI_MMIO_SIZE = 0x10000000
+PCI_IO_SIZE = 0x1000000
+PCI_IO_SPARSE_SIZE = 0x4000000
+LEGACY_IO_BASE = 0x800010000000
+PCI_IO_TRANSLATION_OFFSET = (-LEGACY_IO_BASE) & ((1 << 64) - 1)
+PCI_INTX_GSI_BASE = 16
+PCI_INTX_LINES = 4
 IOSAPIC_BASE = 0x80110000
+IOSAPIC_RTE_DELIVERY_STATUS = 1 << 12
+IOSAPIC_RTE_REMOTE_IRR = 1 << 14
+IOSAPIC_RTE_TRIGGER_LEVEL = 1 << 15
+IOSAPIC_RTE_MASKED = 1 << 16
 UART_BASE = 0x47F0000000
 UART_BAUD = 115200
 HCDP_UART_IRQ = 4
 HCDP_UART_PRIMARY_CONSOLE = 1 << 2
+HCDP_PCI_TRANSLATE_IOPORT = 1 << 1
 VGA_VENDOR_ID = 0x1234
 VGA_DEVICE_ID = 0x1111
 EFI_RUNTIME_SERVICES_DATA = 6
 EFI_ACPI_RECLAIM_MEMORY = 9
+EFI_MEMORY_MAPPED_IO = 11
+EFI_MEMORY_MAPPED_IO_PORT_SPACE = 12
+EFI_MEMORY_UC = 0x1
 EFI_MEMORY_RUNTIME = 0x8000000000000000
 EFI_MEMORY_WB = 0x8
 EFI_ACPI20_TABLE_GUID = bytes.fromhex(
@@ -96,6 +122,126 @@ def u64(data, off):
 
 def gas_address(data, off):
     return u32(data, off + 4) | (u32(data, off + 8) << 32)
+
+
+def aml_pkg_length(data, off):
+    lead = data[off]
+    follow = lead >> 6
+    if follow == 0:
+        return lead & 0x3f, 1
+
+    length = lead & 0x0f
+    for index in range(follow):
+        length |= data[off + 1 + index] << (4 + index * 8)
+    return length, 1 + follow
+
+
+def aml_integer(data, off):
+    op = data[off]
+    if op == 0x00:
+        return 0, off + 1
+    if op == 0x01:
+        return 1, off + 1
+    if op == 0x0a:
+        return data[off + 1], off + 2
+    if op == 0x0b:
+        return u16(data, off + 1), off + 3
+    if op == 0x0c:
+        return u32(data, off + 1), off + 5
+    if op == 0x0e:
+        return u64(data, off + 1), off + 9
+    raise RuntimeError(f"unsupported AML integer opcode 0x{op:02x}")
+
+
+def aml_package(data, off):
+    if data[off] != 0x12:
+        raise RuntimeError(f"expected AML PackageOp at 0x{off:x}")
+    length, length_bytes = aml_pkg_length(data, off + 1)
+    count_off = off + 1 + length_bytes
+    end = off + 1 + length
+    return data[count_off], count_off + 1, end
+
+
+def dsdt_prt_entries(dsdt):
+    name_off = dsdt.index(b"_PRT")
+    if name_off == 0 or dsdt[name_off - 1] != 0x08:
+        raise RuntimeError("DSDT _PRT must be a NameOp")
+
+    count, off, end = aml_package(dsdt, name_off + 4)
+    entries = []
+    while off < end:
+        entry_count, entry_off, entry_end = aml_package(dsdt, off)
+        values = []
+        for _ in range(entry_count):
+            value, entry_off = aml_integer(dsdt, entry_off)
+            values.append(value)
+        if entry_off != entry_end:
+            raise RuntimeError("DSDT _PRT package has trailing AML")
+        entries.append(values)
+        off = entry_end
+
+    if len(entries) != count or off != end:
+        raise RuntimeError("DSDT _PRT package length/count mismatch")
+    return entries
+
+
+def aml_named_buffer_resource_bytes(data, name, label):
+    name_off = data.index(name)
+    if name_off == 0 or data[name_off - 1] != 0x08:
+        raise RuntimeError(f"{label} must be a NameOp")
+
+    off = name_off + 4
+    if data[off] != 0x11:
+        raise RuntimeError(f"{label} must be a BufferOp")
+    length, length_bytes = aml_pkg_length(data, off + 1)
+    buffer_len_off = off + 1 + length_bytes
+    end = off + 1 + length
+    buffer_len, resource_off = aml_integer(data, buffer_len_off)
+    if resource_off + buffer_len != end:
+        raise RuntimeError(f"{label} buffer length mismatch")
+    return data[resource_off:end]
+
+
+def dsdt_crs_resource_bytes(dsdt):
+    return aml_named_buffer_resource_bytes(dsdt, b"_CRS", "DSDT _CRS")
+
+
+def qword_address_descriptors(resources, label):
+    descriptors = []
+    off = 0
+    while off < len(resources):
+        tag = resources[off]
+        if tag == 0x79:
+            if off + 2 != len(resources):
+                raise RuntimeError(f"{label} end tag has trailing data")
+            break
+        if (tag & 0x80) == 0:
+            off += 1 + (tag & 0x07)
+            continue
+
+        length = u16(resources, off + 1)
+        if off + 3 + length > len(resources):
+            raise RuntimeError(f"{label} large resource length overflow")
+        if tag == 0x8a:
+            desc = resources[off:off + 3 + length]
+            if len(desc) != 46:
+                raise RuntimeError(f"{label} QWordAddress length mismatch")
+            descriptors.append({
+                "resource_type": desc[3],
+                "general_flags": desc[4],
+                "type_flags": desc[5],
+                "granularity": u64(desc, 6),
+                "minimum": u64(desc, 14),
+                "maximum": u64(desc, 22),
+                "translation": u64(desc, 30),
+                "length": u64(desc, 38),
+            })
+        off += 3 + length
+    return descriptors
+
+
+def dsdt_qword_address_descriptors(dsdt):
+    return qword_address_descriptors(dsdt_crs_resource_bytes(dsdt), "DSDT _CRS")
 
 
 def run_named_tests(qemu, tests, label):
@@ -345,6 +491,18 @@ def efi_descriptor_contains(desc, addr, size):
     return addr >= start and addr + size <= end
 
 
+def ia64_sparse_io_offset(port):
+    return ((port & 0xfffc) << 10) | (port & 0xfff)
+
+
+def c_define_integer(source, name):
+    pattern = r"^#define\s+" + re.escape(name) + r"\s+([0-9A-Fa-fxX]+)ULL"
+    match = re.search(pattern, source, re.MULTILINE)
+    if not match:
+        raise RuntimeError(f"missing C integer define {name}")
+    return int(match.group(1), 0)
+
+
 def sdt_name(data):
     return data[:4].decode("ascii")
 
@@ -373,6 +531,41 @@ def test_inputs(root, qemu, firmware):
             missing.append(path)
     if missing:
         raise RuntimeError("missing inputs: " + ", ".join(missing))
+    if LEGACY_IO_BASE & (PCI_IO_SPARSE_SIZE - 1):
+        raise RuntimeError("legacy PCI I/O base must be aligned for sparse I/O")
+    for port in [0x60, 0x1f0, 0x3f6, 0x800, 0x80a, 0xc000, 0xffff]:
+        sparse = ia64_sparse_io_offset(port)
+        if sparse >= PCI_IO_SPARSE_SIZE:
+            raise RuntimeError(f"sparse I/O port 0x{port:x} exceeds aperture")
+        if (LEGACY_IO_BASE | sparse) != LEGACY_IO_BASE + sparse:
+            raise RuntimeError(f"sparse I/O port 0x{port:x} aliases base bits")
+
+    with open(os.path.join(root, "hw/ia64/ia64_iosapic.c"),
+              encoding="utf-8") as f:
+        iosapic_source = f.read()
+    iosapic_rte_bits = {
+        "RTE_DELIVERY_STATUS": IOSAPIC_RTE_DELIVERY_STATUS,
+        "RTE_REMOTE_IRR": IOSAPIC_RTE_REMOTE_IRR,
+        "RTE_TRIGGER_LEVEL": IOSAPIC_RTE_TRIGGER_LEVEL,
+        "RTE_MASKED": IOSAPIC_RTE_MASKED,
+    }
+    for name, expected in iosapic_rte_bits.items():
+        actual = c_define_integer(iosapic_source, name)
+        if actual != expected:
+            raise RuntimeError(
+                f"I/O SAPIC {name} 0x{actual:x} != standard bit 0x{expected:x}"
+            )
+    for required in [
+        "#define RTE_RO_BITS          (RTE_DELIVERY_STATUS | RTE_REMOTE_IRR)",
+        "s->rte[pin] = (s->rte[pin] & ~RTE_RO_BITS) | ro_bits;",
+        "s->rte[pin] |= RTE_REMOTE_IRR;",
+        "s->rte[pin] &= ~RTE_REMOTE_IRR;",
+        "iosapic_update(s, pin);",
+    ]:
+        if required not in iosapic_source:
+            raise RuntimeError(
+                f"I/O SAPIC level-triggered Remote IRR contract missing: {required}"
+            )
 
 
 def test_csv_rows_are_bound_to_execution(root, qemu1, qemu2):
@@ -606,6 +799,14 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         symbols["mConfigTables"][0], symbols["mConfigTables"][1],
         runtime_data_attr,
     )
+    find_efi_descriptor(
+        "PCI MMIO window", EFI_MEMORY_MAPPED_IO,
+        PCI_MMIO_BASE, PCI_MMIO_SIZE, EFI_MEMORY_UC,
+    )
+    find_efi_descriptor(
+        "PCI sparse I/O port window", EFI_MEMORY_MAPPED_IO_PORT_SPACE,
+        LEGACY_IO_BASE, PCI_IO_SPARSE_SIZE, EFI_MEMORY_UC,
+    )
 
     def require_acpi_reclaim(name, addr, size, align=8):
         reclaim_desc = find_efi_descriptor(
@@ -688,6 +889,8 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     require_acpi_reclaim("DSDT", dsdt_addr, symbols["mDsdt"][1])
     if fadt[45] != 4 or u16(fadt, 46) != ACPI_SCI_IRQ:
         raise RuntimeError("FADT IA-64 profile or SCI IRQ mismatch")
+    if u32(fadt, 112) != ACPI_FADT_EXPECTED_FLAGS:
+        raise RuntimeError("FADT fixed feature flags mismatch")
     if fadt[149] != 32 or gas_address(fadt, 148) != ACPI_PM_BASE:
         raise RuntimeError("FADT X_PM1a_EVT_BLK address mismatch")
     if fadt[173] != 16 or gas_address(fadt, 172) != ACPI_PM_BASE + 4:
@@ -704,18 +907,58 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     for token in [b"PCI0", b"PNP0A08", b"PNP0A03", b"_CRS", b"_PRT"]:
         if token not in dsdt:
             raise RuntimeError(f"DSDT PCI namespace missing {token!r}")
+    expected_prt = []
+    for slot in range(5):
+        for pin in range(PCI_INTX_LINES):
+            expected_prt.append([
+                (slot << 16) | 0xffff,
+                pin,
+                0,
+                PCI_INTX_GSI_BASE + ((slot + pin) % PCI_INTX_LINES),
+            ])
+    if dsdt_prt_entries(dsdt) != expected_prt:
+        raise RuntimeError("DSDT _PRT PCI INTx to IOSAPIC GSI routing mismatch")
+    qword_crs = dsdt_qword_address_descriptors(dsdt)
+    io_crs = next((desc for desc in qword_crs if desc["resource_type"] == 1), None)
+    mem_crs = next((desc for desc in qword_crs if desc["resource_type"] == 0), None)
+    if (io_crs is None or io_crs["granularity"] != 0 or
+            io_crs["minimum"] != 0 or
+            io_crs["maximum"] != PCI_IO_SIZE - 1 or
+            io_crs["translation"] != PCI_IO_TRANSLATION_OFFSET or
+            io_crs["length"] != PCI_IO_SIZE):
+        raise RuntimeError("DSDT _CRS PCI I/O translation window mismatch")
+    if (mem_crs is None or mem_crs["granularity"] != 0 or
+            mem_crs["minimum"] != PCI_MMIO_BASE or
+            mem_crs["maximum"] != PCI_MMIO_BASE + PCI_MMIO_SIZE - 1 or
+            mem_crs["translation"] != 0 or
+            mem_crs["length"] != PCI_MMIO_SIZE):
+        raise RuntimeError("DSDT _CRS PCI MMIO identity window mismatch")
 
     ssdt = table_data["mSsdt"]
+    if b"\x5b\x83\x0bCPU0\x00\x00\x00\x00\x00\x00" not in ssdt:
+        raise RuntimeError("SSDT Processor CPU0 declaration missing")
     for token in [b"UAR0", b"PNP0501", b"_CRS"]:
         if token not in ssdt:
             raise RuntimeError(f"SSDT UART namespace missing {token!r}")
+    ssdt_resources = aml_named_buffer_resource_bytes(ssdt, b"_CRS", "SSDT _CRS")
+    ssdt_qword_crs = qword_address_descriptors(ssdt_resources, "SSDT _CRS")
+    uart_crs = next((desc for desc in ssdt_qword_crs
+                     if desc["resource_type"] == 0), None)
+    if (uart_crs is None or uart_crs["general_flags"] != 0x0d or
+            uart_crs["type_flags"] != 0x01 or
+            uart_crs["granularity"] != 0 or
+            uart_crs["minimum"] != UART_BASE or
+            uart_crs["maximum"] != UART_BASE + 7 or
+            uart_crs["translation"] != 0 or
+            uart_crs["length"] != 8):
+        raise RuntimeError("SSDT UART QWordMemory resource mismatch")
     if struct.pack("<Q", UART_BASE) not in ssdt:
         raise RuntimeError("SSDT UART QWordMemory base mismatch")
     if struct.pack("<Q", UART_BASE + 7) not in ssdt:
         raise RuntimeError("SSDT UART QWordMemory limit mismatch")
     if struct.pack("<Q", 8) not in ssdt:
         raise RuntimeError("SSDT UART QWordMemory length mismatch")
-    if b"\x22\x10\x00" not in ssdt:
+    if not ssdt_resources.endswith(b"\x22\x10\x00\x79\x00"):
         raise RuntimeError("SSDT UART IRQ descriptor mismatch")
 
     facs = fadt_children["mFacs"]
@@ -767,6 +1010,9 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         raise RuntimeError("HCDP VGA console descriptor mismatch")
     if u16(hcdp, 102) != VGA_DEVICE_ID or u16(hcdp, 104) != VGA_VENDOR_ID:
         raise RuntimeError("HCDP VGA PCI identity mismatch")
+    if (u64(hcdp, 110) != 0 or u64(hcdp, 118) != LEGACY_IO_BASE or
+            hcdp[126] != 0 or hcdp[127] != HCDP_PCI_TRANSLATE_IOPORT):
+        raise RuntimeError("HCDP VGA PCI translation flags mismatch")
 
     sal = runtime["mSalSystemTable"]
     if sal[:4] != b"SST_" or u32(sal, 4) != len(sal):

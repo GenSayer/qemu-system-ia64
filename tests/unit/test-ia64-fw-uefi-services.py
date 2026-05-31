@@ -303,7 +303,7 @@ def main():
 
     expected_lines = [
         "Memory Map:           low RAM end=0x0000000040000000",
-        "I/O Port Space:       0x000080000FF00000-0x0000800010EFFFFF",
+        "I/O Port Space:       0x0000800010000000-0x0000800013FFFFFF",
         "Memory Map Test:      descriptor boundaries verified",
         "UEFI Time Services:   GetTime/SetTime/GetWakeupTime verified",
         "Loaded Image Paths:   protocol storage verified",
@@ -366,6 +366,58 @@ def main():
         print("not ok 7 - firmware EFI input scan tables")
         return 1
 
+    readelf = subprocess.run(
+        ["ia64-linux-gnu-readelf", "-SW", elf_path],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    runtime_data_match = re.search(
+        r"^([0-9a-fA-F]+)\s+g\s+.*\s__runtime_data_start$",
+        objdump.stdout,
+        re.MULTILINE,
+    )
+    runtime_data_start = (
+        int(runtime_data_match.group(1), 16) if runtime_data_match else 0
+    )
+    sections = {}
+    for line in readelf.stdout.splitlines():
+        match = re.match(
+            r"\s*\[\s*\d+\]\s+(\S+)\s+\S+\s+([0-9a-fA-F]+)\s+",
+            line,
+        )
+        if match:
+            sections[match.group(1)] = int(match.group(2), 16)
+    runtime_data_sections = [
+        ".rodata",
+        ".opd",
+        ".IA_64.unwind_info",
+        ".IA_64.unwind",
+        ".data",
+        ".got",
+        ".bss",
+    ]
+    layout_failed = []
+    if readelf.returncode != 0:
+        layout_failed.append("readelf section table failed")
+    if runtime_data_start == 0:
+        layout_failed.append("missing __runtime_data_start symbol")
+    if sections.get(".text", runtime_data_start) >= runtime_data_start:
+        layout_failed.append(".text is not before runtime data")
+    for section in runtime_data_sections:
+        if sections.get(section, 0) < runtime_data_start:
+            layout_failed.append(
+                f"{section} starts before __runtime_data_start"
+            )
+    if layout_failed:
+        print("not ok 5 - firmware RAM handoff memory map")
+        for msg in layout_failed:
+            print(f"# {msg}")
+        print("not ok 6 - firmware GOP multi-mode table")
+        print("not ok 7 - firmware EFI input scan tables")
+        return 1
+
     print("ok 5 - firmware RAM handoff memory map")
 
     def symbol_size(name):
@@ -387,7 +439,7 @@ def main():
     expected_banner = (
         "Graphics Output:      GOP/UGA stdvga BGRx PixelBitMask "
         "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
-        "1280x1024x32 @ 0x8001000000"
+        "1280x1024x32 @ 0xc2000000"
     )
     expected_setmode = "GOP SetMode Test:"
     if (strings.returncode != 0 or gop_size != 0xb4 or

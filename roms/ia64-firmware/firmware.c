@@ -37,8 +37,14 @@ typedef __SIZE_TYPE__    size_t;
 #define IA64_PSR_CPL_MASK (3ULL << 32)
 #define IA64_PSR_IT     (1ULL << 36)
 
-#define VGA_FB_BASE      0x0000008001000000ULL
-#define VGA_MMIO_BASE    0x0000008002000000ULL
+#define PCI_MMIO_BASE                 0x00000000c1000000ULL
+#define PCI_MMIO_SIZE                 0x0000000010000000ULL
+#define PCI_OHCI_MMIO_BAR             0xc1010000U
+#define PCI_AHCI_MMIO_BAR             0xc1020000U
+#define PCI_VGA_FB_BAR                0xc2000000U
+#define PCI_VGA_MMIO_BAR              0xc3000000U
+#define VGA_FB_BASE                   ((UINT64)PCI_VGA_FB_BAR)
+#define VGA_MMIO_BASE                 ((UINT64)PCI_VGA_MMIO_BAR)
 #define ACPI_RECLAIM_BASE 0x0000000000800000ULL
 #define ACPI_RECLAIM_END 0x0000000000820000ULL
 #define IOSAPIC_BASE     0x0000000080110000ULL
@@ -49,6 +55,10 @@ typedef __SIZE_TYPE__    size_t;
 #define ACPI_PM1_CNT_OFFSET 0x4U
 #define ACPI_PM_TMR_OFFSET 0x8U
 #define ACPI_SCI_IRQ     9U
+#define ACPI_FADT_FLAG_WBINVD        (1U << 0)
+#define ACPI_FADT_FLAG_PWR_BUTTON    (1U << 4)
+#define ACPI_FADT_FLAG_SLP_BUTTON    (1U << 5)
+#define ACPI_FADT_FLAG_TMR_VAL_EXT   (1U << 8)
 #define VGA_MODE_TEXT_WIDTH  640U
 #define VGA_MODE_TEXT_HEIGHT 400U
 #define VGA_MODE_640_WIDTH   640U
@@ -66,8 +76,11 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_LOW_FREE_BASE  0x0000000001100000ULL
 #define FW_LOW_STAGING_BASE 0x0000000003000000ULL
 #define FW_LOW_IMAGE_END  0x0000000005000000ULL
+#define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008000000ULL
 #define FW_LOW_RAM_LIMIT  0x0000000080000000ULL
 #define FW_HANDOFF_ADDR   0x00000000000ff000ULL
+#define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
+#define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
 #define FW_HANDOFF_MAGIC  0x4d41523436414951ULL /* "QIA64RAM" */
 #define FW_HANDOFF_VERSION 2ULL
 #define EFI_MEMORY_UC     0x0000000000000001ULL
@@ -135,14 +148,16 @@ typedef __SIZE_TYPE__    size_t;
 #define VBE_DISPI_ENABLED             0x01U
 #define VBE_DISPI_LFB_ENABLED         0x40U
 
-#define PCI_MMIO_BASE                 0x0000008000000000ULL
-#define PCI_MMIO_SIZE                 (16ULL * 1024ULL * 1024ULL * 1024ULL)
 #define PCI_IO_SIZE                   0x1000000ULL
-#define PCI_VGA_FB_BAR                0x01000000U
-#define PCI_VGA_MMIO_BAR              0x02000000U
-#define LEGACY_IO_BASE                0x00000080000FF00000ULL
+/* Sparse IA-64 port encoding expands the legacy 16-bit I/O port space. */
+#define PCI_IO_SPARSE_SIZE            0x4000000ULL
+#define LEGACY_IO_BASE                0x000000800010000000ULL
 #define LEGACY_IO_LIMIT               (LEGACY_IO_BASE + PCI_IO_SIZE)
-#define LEGACY_IO_END                 (LEGACY_IO_LIMIT - 1)
+#define LEGACY_IO_SPARSE_LIMIT        (LEGACY_IO_BASE + PCI_IO_SPARSE_SIZE)
+#define LEGACY_IO_SPARSE_END          (LEGACY_IO_SPARSE_LIMIT - 1)
+#define PCI_IO_TRANSLATION_OFFSET     ((UINT64)(0ULL - LEGACY_IO_BASE))
+#define PCI_MMIO_END                  (PCI_MMIO_BASE + PCI_MMIO_SIZE - 1U)
+#define PCI_MMIO_TRANSLATION_OFFSET   0ULL
 #define PCI_CONFIG_ECAM_BASE          0x0000007FF0000000ULL
 #define PCI_CONFIG_ECAM_SIZE          0x0000000010000000ULL
 #define IA64_REGION6_BASE             0xC000000000000000ULL
@@ -658,6 +673,36 @@ typedef struct {
     EFI_STATUS          (*Unload)(EFI_HANDLE ImageHandle);
 } EFI_LOADED_IMAGE_PROTOCOL;
 
+/* --- EFI Debug Support Table --------------------------------------------- */
+
+typedef struct {
+    UINT64                  Signature;
+    EFI_PHYSICAL_ADDRESS    EfiSystemTableBase;
+    UINT32                  Crc32;
+    UINT32                  Reserved;
+} EFI_SYSTEM_TABLE_POINTER;
+
+#define EFI_DEBUG_IMAGE_INFO_UPDATE_IN_PROGRESS 0x01U
+#define EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED     0x02U
+#define EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL        0x01U
+
+typedef struct {
+    UINT32                    ImageInfoType;
+    EFI_LOADED_IMAGE_PROTOCOL *LoadedImageProtocolInstance;
+    EFI_HANDLE                ImageHandle;
+} EFI_DEBUG_IMAGE_INFO_NORMAL;
+
+typedef union {
+    UINT32                      *ImageInfoType;
+    EFI_DEBUG_IMAGE_INFO_NORMAL *NormalImage;
+} EFI_DEBUG_IMAGE_INFO;
+
+typedef struct {
+    volatile UINT32       UpdateStatus;
+    UINT32                TableSize;
+    EFI_DEBUG_IMAGE_INFO *EfiDebugImageInfoTable;
+} EFI_DEBUG_IMAGE_INFO_TABLE_HEADER;
+
 /* --- EFI GOP / UGA graphics protocols ------------------------------------- */
 
 typedef enum {
@@ -901,12 +946,12 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[429];
+    UINT8 Aml[439];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[96];
+    UINT8 Aml[109];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -1258,8 +1303,8 @@ FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 92, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 64, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 465, acpi_dsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 132, acpi_ssdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 475, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 145, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
@@ -1280,6 +1325,16 @@ FW_STATIC_ASSERT(sizeof(FW_PCI_ROOT_BRIDGE_RESOURCES) == 140,
                  pci_root_bridge_resources_size);
 FW_STATIC_ASSERT(sizeof(FW_PCI_BAR_RESOURCES) == 48,
                  pci_bar_resources_size);
+FW_STATIC_ASSERT(sizeof(EFI_SYSTEM_TABLE_POINTER) == 24,
+                 efi_system_table_pointer_size);
+FW_STATIC_ASSERT(__builtin_offsetof(EFI_SYSTEM_TABLE_POINTER, Crc32) == 16,
+                 efi_system_table_pointer_crc_offset);
+FW_STATIC_ASSERT(sizeof(EFI_DEBUG_IMAGE_INFO_TABLE_HEADER) == 16,
+                 efi_debug_image_info_table_header_size);
+FW_STATIC_ASSERT(sizeof(EFI_DEBUG_IMAGE_INFO_NORMAL) == 24,
+                 efi_debug_image_info_normal_size);
+FW_STATIC_ASSERT((LEGACY_IO_BASE & (PCI_IO_SPARSE_SIZE - 1)) == 0,
+                 legacy_io_base_sparse_alignment);
 FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, Flags) == 41,
                  acpi_hcdp_uart_flags_offset);
 FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, ConOutIndex) == 42,
@@ -1300,9 +1355,16 @@ FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, Reserved) == 44,
 #define PLATFORM_TABLE_HCDP          3
 #define PLATFORM_TABLE_LOADED_IMAGE  4
 #define PLATFORM_TABLE_DEVICE_PATH   5
-#define PLATFORM_TABLE_INITIAL       6
+#define PLATFORM_TABLE_DEBUG_IMAGE   6
+#define PLATFORM_TABLE_INITIAL       7
 #define PLATFORM_TABLE_MAX           16
+#define LOADED_IMAGE_MAX             8
 static EFI_CONFIGURATION_TABLE mConfigTables[PLATFORM_TABLE_MAX];
+static EFI_SYSTEM_TABLE_POINTER *mSystemTablePointer;
+static UINT64                   mSystemTablePointerBase;
+static EFI_DEBUG_IMAGE_INFO_TABLE_HEADER mDebugImageInfoHeader;
+static EFI_DEBUG_IMAGE_INFO mDebugImageInfoTable[LOADED_IMAGE_MAX + 1U];
+static EFI_DEBUG_IMAGE_INFO_NORMAL mDebugImageInfoNormal[LOADED_IMAGE_MAX + 1U];
 static IA64_SAL_SYSTEM_TABLE   mSalSystemTable;
 static ACPI_FADT               mFadt;
 static ACPI_XSDT               mXsdt;
@@ -1311,11 +1373,11 @@ static ACPI_RSDP               mRsdp;
 static ACPI_FACS               mFacs __attribute__((aligned(64)));
 /*
  * AML body for \_SB.PCI0 with _HID/_CID, _CRS windows, and _PRT entries
- * for the fixed root-bus devices populated by ia64-vpc.
+ * routing the fixed root-bus PCI INTx pins to IOSAPIC GSIs 16..19.
  */
 static ACPI_DSDT               mDsdt = {
     .Aml = {
-    0x10, 0x4c, 0x1a, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x43, 0x1a,
+    0x10, 0x46, 0x1b, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x4d, 0x1a,
     0x50, 0x43, 0x49, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50, 0x4e,
     0x50, 0x30, 0x41, 0x30, 0x38, 0x00, 0x08, 0x5f, 0x43, 0x49, 0x44, 0x0d,
     0x50, 0x4e, 0x50, 0x30, 0x41, 0x30, 0x33, 0x00, 0x08, 0x5f, 0x53, 0x45,
@@ -1325,54 +1387,60 @@ static ACPI_DSDT               mDsdt = {
     0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x8a, 0x2b,
     0x00, 0x01, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x0f, 0x00, 0x80, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0xff, 0x7f, 0xff, 0xff,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x8a, 0x2b, 0x00, 0x00,
     0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x79, 0x00, 0x08, 0x5f, 0x50, 0x52,
-    0x54, 0x12, 0x4b, 0x0e, 0x14, 0x12, 0x08, 0x04, 0x0b, 0xff, 0xff, 0x00,
-    0x00, 0x00, 0x12, 0x08, 0x04, 0x0b, 0xff, 0xff, 0x01, 0x00, 0x01, 0x12,
-    0x0a, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x02, 0x00, 0x0a, 0x02, 0x12, 0x0a,
-    0x04, 0x0b, 0xff, 0xff, 0x0a, 0x03, 0x00, 0x0a, 0x03, 0x12, 0x0a, 0x04,
-    0x0c, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x01, 0x12, 0x0b, 0x04, 0x0c,
-    0xff, 0xff, 0x01, 0x00, 0x01, 0x00, 0x0a, 0x02, 0x12, 0x0c, 0x04, 0x0c,
-    0xff, 0xff, 0x01, 0x00, 0x0a, 0x02, 0x00, 0x0a, 0x03, 0x12, 0x0b, 0x04,
-    0x0c, 0xff, 0xff, 0x01, 0x00, 0x0a, 0x03, 0x00, 0x00, 0x12, 0x0b, 0x04,
-    0x0c, 0xff, 0xff, 0x02, 0x00, 0x00, 0x00, 0x0a, 0x02, 0x12, 0x0b, 0x04,
-    0x0c, 0xff, 0xff, 0x02, 0x00, 0x01, 0x00, 0x0a, 0x03, 0x12, 0x0b, 0x04,
-    0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x02, 0x00, 0x00, 0x12, 0x0b, 0x04,
-    0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x03, 0x00, 0x01, 0x12, 0x0b, 0x04,
-    0x0c, 0xff, 0xff, 0x03, 0x00, 0x00, 0x00, 0x0a, 0x03, 0x12, 0x0a, 0x04,
-    0x0c, 0xff, 0xff, 0x03, 0x00, 0x01, 0x00, 0x00, 0x12, 0x0b, 0x04, 0x0c,
-    0xff, 0xff, 0x03, 0x00, 0x0a, 0x02, 0x00, 0x01, 0x12, 0x0c, 0x04, 0x0c,
-    0xff, 0xff, 0x03, 0x00, 0x0a, 0x03, 0x00, 0x0a, 0x02, 0x12, 0x0a, 0x04,
-    0x0c, 0xff, 0xff, 0x04, 0x00, 0x00, 0x00, 0x00, 0x12, 0x0a, 0x04, 0x0c,
-    0xff, 0xff, 0x04, 0x00, 0x01, 0x00, 0x01, 0x12, 0x0c, 0x04, 0x0c, 0xff,
-    0xff, 0x04, 0x00, 0x0a, 0x02, 0x00, 0x0a, 0x02, 0x12, 0x0c, 0x04, 0x0c,
-    0xff, 0xff, 0x04, 0x00, 0x0a, 0x03, 0x00, 0x0a, 0x03,
+    0x00, 0xc1, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xd0, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x79, 0x00, 0x08, 0x5f, 0x50, 0x52,
+    0x54, 0x12, 0x45, 0x0f, 0x14, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x00,
+    0x00, 0x0a, 0x10, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x01, 0x00, 0x0a,
+    0x11, 0x12, 0x0a, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x02, 0x00, 0x0a, 0x12,
+    0x12, 0x0a, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x03, 0x00, 0x0a, 0x13, 0x12,
+    0x0b, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x11, 0x12,
+    0x0b, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x01, 0x00, 0x0a, 0x12, 0x12,
+    0x0c, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x0a, 0x02, 0x00, 0x0a, 0x13,
+    0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x0a, 0x03, 0x00, 0x0a,
+    0x10, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x00, 0x00, 0x0a,
+    0x12, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x01, 0x00, 0x0a,
+    0x13, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x02, 0x00,
+    0x0a, 0x10, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x03,
+    0x00, 0x0a, 0x11, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x03, 0x00, 0x00,
+    0x00, 0x0a, 0x13, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x03, 0x00, 0x01,
+    0x00, 0x0a, 0x10, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x03, 0x00, 0x0a,
+    0x02, 0x00, 0x0a, 0x11, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x03, 0x00,
+    0x0a, 0x03, 0x00, 0x0a, 0x12, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x04,
+    0x00, 0x00, 0x00, 0x0a, 0x10, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x04,
+    0x00, 0x01, 0x00, 0x0a, 0x11, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x04,
+    0x00, 0x0a, 0x02, 0x00, 0x0a, 0x12, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff,
+    0x04, 0x00, 0x0a, 0x03, 0x00, 0x0a, 0x13,
     },
 };
 static ACPI_SSDT               mSsdt = {
     .Aml = {
         /*
-         * Scope (\_SB) { Device (UAR0) { Name (_HID, "PNP0501")
-         * Name (_UID, Zero) Name (_CRS, ResourceTemplate() {
-         * QWordMemory (..., UART_BASE, UART_BASE + 7, 8)
-         * IRQNoFlags() { 4 } }) } }
+         * Scope (\_SB) {
+         *   Processor (CPU0, 0, 0, 0) {}
+         *   Device (UAR0) { Name (_HID, "PNP0501") Name (_UID, Zero)
+         *     Name (_CRS, ResourceTemplate() {
+         *       QWordMemory (..., UART_BASE, UART_BASE + 7, 8)
+         *       IRQNoFlags() { 4 } }) }
+         * }
          */
-        0x10, 0x4d, 0x05, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
-        0x5b, 0x82, 0x44, 0x05, 'U',  'A',  'R',  '0',
-        0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 'P',  'N',
-        'P',  '0',  '5',  '0',  '1',  0x00, 0x08, 0x5f,
-        0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52,
-        0x53, 0x11, 0x35, 0x0a, 0x33, 0x8a, 0x2b, 0x00,
-        0x00, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x47,
-        0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0xf0, 0x47,
+        0x10, 0x4c, 0x06, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
+        0x5b, 0x83, 0x0b, 'C',  'P',  'U',  '0',  0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x82, 0x46,
+        0x05, 'U',  'A',  'R',  '0',  0x08, 0x5f, 0x48,
+        0x49, 0x44, 0x0d, 'P',  'N',  'P',  '0',  '5',
+        '0',  '1',  0x00, 0x08, 0x5f, 0x55, 0x49, 0x44,
+        0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x36,
+        0x0a, 0x33, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x22, 0x10, 0x00, 0x79, 0x00,
+        0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
+        0x07, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x22, 0x10, 0x00, 0x79, 0x00,
     },
 };
 static ACPI_MCFG               mMcfg;
@@ -1475,6 +1543,22 @@ static UINT64 fw_guest_low_ram_end(void)
     return ram_size;
 }
 
+static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd)
+{
+    UINT64 base;
+
+    if (LowRamEnd <= FW_LOW_IMAGE_END + FW_SYSTEM_TABLE_POINTER_SIZE) {
+        return 0;
+    }
+
+    base = (LowRamEnd - 1U) & ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
+    if (base <= FW_LOW_IMAGE_END ||
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > LowRamEnd) {
+        return 0;
+    }
+    return base;
+}
+
 /* --- Boot/run stub functions ---------------------------------------------- */
 
 static EFI_BOOT_SERVICES    mBootServices;
@@ -1513,12 +1597,14 @@ static BOOLEAN fw_use_default_load_options(BOOLEAN BootPolicy,
                                            BOOLEAN SourceIsBuffer);
 static EFI_STATUS rs_get_boot0000_variable(UINT32 *Attributes,
                                            UINTN *DataSize, VOID *Data);
+static EFI_STATUS rs_convert_pointer_value(UINTN *Address);
 static BOOLEAN ranges_overlap(UINT64 a_base, UINT64 a_size,
                               UINT64 b_base, UINT64 b_size);
 static void fw_poll_timers(void);
 
 typedef struct {
     BOOLEAN in_use;
+    BOOLEAN started;
     EFI_HANDLE handle;
     UINTN (*entry)(EFI_HANDLE, EFI_SYSTEM_TABLE *);
     VOID *device_path;
@@ -1526,7 +1612,6 @@ typedef struct {
     EFI_LOADED_IMAGE_PROTOCOL loaded_image;
 } EFI_LOADED_IMAGE_RECORD;
 
-#define LOADED_IMAGE_MAX 8
 static EFI_LOADED_IMAGE_RECORD mLoadedImages[LOADED_IMAGE_MAX];
 
 typedef struct {
@@ -1614,6 +1699,14 @@ FW_STATIC_ASSERT(sizeof(IA64_FPSWA_RET) == 32, ia64_fpswa_ret_size);
 FW_STATIC_ASSERT(sizeof(IA64_FPSWA_INTERFACE) == 16,
                  ia64_fpswa_interface_size);
 
+/* IA-64 plabel (function descriptor): 2 x 64-bit values */
+typedef struct {
+    UINT64  EntryPoint;
+    UINT64  GP;
+} IA64_PLABEL;
+
+FW_STATIC_ASSERT(sizeof(IA64_PLABEL) == 16, ia64_plabel_size);
+
 typedef struct {
     UINT32 signature;
     UINT32 type;
@@ -1625,6 +1718,7 @@ typedef struct {
     EFI_TPL notify_tpl;
     EFI_EVENT_NOTIFY notify_function;
     VOID *notify_context;
+    IA64_PLABEL notify_plabel;
     BOOLEAN has_group;
     UINT8 group[16];
 } FW_EVENT_RECORD;
@@ -1720,6 +1814,7 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT];
 static EFI_LOADED_IMAGE_PROTOCOL mLoadedImageProto;
 static const UINT8 mLoadedImageProtocolGuid[16];
 static const UINT8 mLoadedImageDevicePathProtocolGuid[16];
+static const UINT8 mDebugImageInfoTableGuid[16];
 static const UINT8 mBlockIoProtocolGuid[16];
 static const UINT8 mDiskIoProtocolGuid[16];
 static const UINT8 mSimpleFileSystemProtocolGuid[16];
@@ -1735,8 +1830,16 @@ static const UINT8 mPciIoProtocolGuid[16];
 static const FW_PCI_IO_DEVICE *fw_pci_io_device_from_handle(
     EFI_HANDLE Handle);
 
+#define IMAGE_SUBSYSTEM_EFI_APPLICATION         10
+#define IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER 11
+#define IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER      12
+
 void *load_pe_image(uint8_t *image_base, UINTN image_size,
-                    VOID **loaded_base, UINTN *loaded_size);
+                    VOID **loaded_base, UINTN *loaded_size,
+                    UINT16 *loaded_subsystem);
+static void pe_image_memory_types(UINT16 Subsystem,
+                                  EFI_MEMORY_TYPE *CodeType,
+                                  EFI_MEMORY_TYPE *DataType);
 EFI_STATUS bs_handle_protocol(EFI_HANDLE Handle, void *Protocol,
                                VOID **Interface);
 EFI_STATUS bs_locate_handle(UINTN SearchType, void *Protocol,
@@ -4801,9 +4904,6 @@ EFI_STATUS bs_get_memory_map(UINTN *MemoryMapSize,
     needed = mMemoryMapEntries * sizeof(EFI_MEMORY_DESCRIPTOR);
     *DescriptorSize = sizeof(EFI_MEMORY_DESCRIPTOR);
     *DescriptorVersion = EFI_MEMORY_DESCRIPTOR_VERSION;
-    if (MapKey) {
-        *MapKey = mMapKey;
-    }
 
     if (MemoryMap == NULL || *MemoryMapSize < needed) {
         *MemoryMapSize = needed;
@@ -4814,6 +4914,9 @@ EFI_STATUS bs_get_memory_map(UINTN *MemoryMapSize,
         MemoryMap[i] = mMemoryMap[i];
     }
     *MemoryMapSize = needed;
+    if (MapKey) {
+        *MapKey = mMapKey;
+    }
     return EFI_SUCCESS;
 }
 
@@ -5710,6 +5813,42 @@ static BOOLEAN fw_event_validate_create(UINT32 Type, UINTN NotifyTpl,
     return 1;
 }
 
+static UINTN fw_event_notify_address(EFI_EVENT_NOTIFY NotifyFunction)
+{
+    union {
+        EFI_EVENT_NOTIFY notify_function;
+        UINTN address;
+    } bits;
+
+    bits.notify_function = NotifyFunction;
+    return bits.address;
+}
+
+static EFI_EVENT_NOTIFY fw_event_notify_from_address(UINTN Address)
+{
+    union {
+        EFI_EVENT_NOTIFY notify_function;
+        UINTN address;
+    } bits;
+
+    bits.address = Address;
+    return bits.notify_function;
+}
+
+static void fw_event_capture_notify(FW_EVENT_RECORD *Event, UINTN NotifyTpl,
+                                    EFI_EVENT_NOTIFY NotifyFunction,
+                                    VOID *NotifyContext)
+{
+    const IA64_PLABEL *plabel =
+        (const IA64_PLABEL *)fw_event_notify_address(NotifyFunction);
+
+    Event->notify_tpl = NotifyTpl;
+    Event->notify_context = NotifyContext;
+    Event->notify_plabel = *plabel;
+    Event->notify_function =
+        fw_event_notify_from_address((UINTN)&Event->notify_plabel);
+}
+
 static BOOLEAN fw_guid_equal(const UINT8 *A, const UINT8 *B)
 {
     UINTN i;
@@ -5822,9 +5961,8 @@ static EFI_STATUS fw_create_event_common(UINT32 Type, UINTN NotifyTpl,
             mEventRecords[i].signature = FW_EVENT_SIGNATURE;
             mEventRecords[i].type = Type;
             if ((Type & (EVT_NOTIFY_WAIT | EVT_NOTIFY_SIGNAL)) != 0) {
-                mEventRecords[i].notify_tpl = NotifyTpl;
-                mEventRecords[i].notify_function = NotifyFunction;
-                mEventRecords[i].notify_context = NotifyContext;
+                fw_event_capture_notify(&mEventRecords[i], NotifyTpl,
+                                        NotifyFunction, NotifyContext);
             }
             if (EventGroup != NULL) {
                 const UINT8 *group = (const UINT8 *)EventGroup;
@@ -6725,6 +6863,129 @@ static void efi_refresh_table_crc32s(void)
     efi_update_table_crc32(&mSystemTable.Hdr);
 }
 
+static BOOLEAN efi_memory_map_has_descriptor(EFI_MEMORY_TYPE Type,
+                                             UINT64 Start, UINT64 End,
+                                             UINT64 Attribute);
+
+static void efi_init_system_table_pointer(void)
+{
+    UINT32 crc;
+
+    if (mSystemTablePointer == NULL) {
+        return;
+    }
+
+    fw_set_mem(mSystemTablePointer, FW_SYSTEM_TABLE_POINTER_SIZE, 0);
+    mSystemTablePointer->Signature = EFI_SYSTEM_TABLE_SIGNATURE;
+    mSystemTablePointer->EfiSystemTableBase = (UINTN)&mSystemTable;
+    mSystemTablePointer->Crc32 = 0;
+    mSystemTablePointer->Reserved = 0;
+    if (bs_calculate_crc32(mSystemTablePointer,
+                           sizeof(*mSystemTablePointer), &crc) ==
+        EFI_SUCCESS) {
+        mSystemTablePointer->Crc32 = crc;
+    }
+}
+
+static void efi_debug_image_info_refresh(void)
+{
+    UINTN slot = 0;
+    UINTN i;
+
+    mDebugImageInfoHeader.UpdateStatus =
+        EFI_DEBUG_IMAGE_INFO_UPDATE_IN_PROGRESS |
+        EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED;
+    fw_set_mem(mDebugImageInfoTable, sizeof(mDebugImageInfoTable), 0);
+    fw_set_mem(mDebugImageInfoNormal, sizeof(mDebugImageInfoNormal), 0);
+
+    mDebugImageInfoNormal[slot].ImageInfoType =
+        EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL;
+    mDebugImageInfoNormal[slot].LoadedImageProtocolInstance =
+        &mLoadedImageProto;
+    mDebugImageInfoNormal[slot].ImageHandle = mImageHandle;
+    mDebugImageInfoTable[slot].NormalImage = &mDebugImageInfoNormal[slot];
+    slot++;
+
+    for (i = 0; i < LOADED_IMAGE_MAX && slot < LOADED_IMAGE_MAX + 1U; i++) {
+        if (!mLoadedImages[i].in_use) {
+            continue;
+        }
+        mDebugImageInfoNormal[slot].ImageInfoType =
+            EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL;
+        mDebugImageInfoNormal[slot].LoadedImageProtocolInstance =
+            &mLoadedImages[i].loaded_image;
+        mDebugImageInfoNormal[slot].ImageHandle = mLoadedImages[i].handle;
+        mDebugImageInfoTable[slot].NormalImage =
+            &mDebugImageInfoNormal[slot];
+        slot++;
+    }
+
+    mDebugImageInfoHeader.UpdateStatus =
+        EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED;
+}
+
+static void efi_init_debug_image_info_table(void)
+{
+    fw_set_mem(&mDebugImageInfoHeader, sizeof(mDebugImageInfoHeader), 0);
+    mDebugImageInfoHeader.TableSize = LOADED_IMAGE_MAX + 1U;
+    mDebugImageInfoHeader.EfiDebugImageInfoTable = mDebugImageInfoTable;
+    efi_debug_image_info_refresh();
+}
+
+static BOOLEAN __attribute__((noinline)) efi_debug_tables_selftest(void)
+{
+    EFI_SYSTEM_TABLE_POINTER pointer_copy;
+    UINT32 crc;
+
+    if (mSystemTablePointer == NULL ||
+        mSystemTablePointerBase == 0 ||
+        (mSystemTablePointerBase &
+         (FW_SYSTEM_TABLE_POINTER_ALIGN - 1U)) != 0 ||
+        !efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                       mSystemTablePointerBase,
+                                       mSystemTablePointerBase +
+                                       FW_SYSTEM_TABLE_POINTER_SIZE,
+                                       EFI_MEMORY_WB)) {
+        return 0;
+    }
+
+    pointer_copy.Signature = mSystemTablePointer->Signature;
+    pointer_copy.EfiSystemTableBase = mSystemTablePointer->EfiSystemTableBase;
+    pointer_copy.Crc32 = mSystemTablePointer->Crc32;
+    pointer_copy.Reserved = mSystemTablePointer->Reserved;
+    if (pointer_copy.Signature != EFI_SYSTEM_TABLE_SIGNATURE ||
+        pointer_copy.EfiSystemTableBase != (UINTN)&mSystemTable ||
+        pointer_copy.Reserved != 0) {
+        return 0;
+    }
+    pointer_copy.Crc32 = 0;
+    if (bs_calculate_crc32(&pointer_copy, sizeof(pointer_copy), &crc) !=
+        EFI_SUCCESS ||
+        crc != mSystemTablePointer->Crc32) {
+        return 0;
+    }
+
+    if (mDebugImageInfoHeader.UpdateStatus !=
+        EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED ||
+        mDebugImageInfoHeader.TableSize != LOADED_IMAGE_MAX + 1U ||
+        mDebugImageInfoHeader.EfiDebugImageInfoTable !=
+        mDebugImageInfoTable ||
+        mDebugImageInfoTable[0].NormalImage != &mDebugImageInfoNormal[0] ||
+        mDebugImageInfoNormal[0].ImageInfoType !=
+        EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL ||
+        mDebugImageInfoNormal[0].LoadedImageProtocolInstance !=
+        &mLoadedImageProto ||
+        mDebugImageInfoNormal[0].ImageHandle != mImageHandle ||
+        !fw_guid_equal(mConfigTables[PLATFORM_TABLE_DEBUG_IMAGE].VendorGuid,
+                       mDebugImageInfoTableGuid) ||
+        mConfigTables[PLATFORM_TABLE_DEBUG_IMAGE].VendorTable !=
+        (UINTN)&mDebugImageInfoHeader) {
+        return 0;
+    }
+
+    return 1;
+}
+
 VOID bs_copy_mem(VOID *Destination, VOID *Source, UINTN Length)
 {
     fw_copy_mem(Destination, Source, Length);
@@ -6744,6 +7005,9 @@ EFI_STATUS bs_load_image(BOOLEAN BootPolicy, EFI_HANDLE ParentImageHandle,
     VOID *entry;
     VOID *loaded_base = NULL;
     UINTN loaded_size = 0;
+    UINT16 loaded_subsystem = IMAGE_SUBSYSTEM_EFI_APPLICATION;
+    EFI_MEMORY_TYPE image_code_type;
+    EFI_MEMORY_TYPE image_data_type;
     EFI_STATUS st;
     BOOLEAN source_pool_allocated = 0;
 
@@ -6770,25 +7034,23 @@ EFI_STATUS bs_load_image(BOOLEAN BootPolicy, EFI_HANDLE ParentImageHandle,
     }
 
     entry = load_pe_image((uint8_t *)SourceBuffer, SourceSize,
-                          &loaded_base, &loaded_size);
+                          &loaded_base, &loaded_size, &loaded_subsystem);
     if (source_pool_allocated) {
         (void)bs_free_pool(SourceBuffer);
     }
     if (entry == NULL) {
         return EFI_LOAD_ERROR;
     }
-    if (!efi_mark_memory_range(EfiLoaderCode, (UINTN)loaded_base,
-                               (UINTN)loaded_base + loaded_size,
-                               EFI_MEMORY_WB)) {
-        return EFI_OUT_OF_RESOURCES;
-    }
-
+    pe_image_memory_types(loaded_subsystem, &image_code_type,
+                          &image_data_type);
     for (i = 0; i < LOADED_IMAGE_MAX; i++) {
         if (!mLoadedImages[i].in_use) {
             EFI_HANDLE device_handle;
 
             mLoadedImages[i].in_use = 1;
-            mLoadedImages[i].entry = (UINTN (*)(EFI_HANDLE, EFI_SYSTEM_TABLE *))entry;
+            mLoadedImages[i].started = 0;
+            mLoadedImages[i].entry =
+                (UINTN (*)(EFI_HANDLE, EFI_SYSTEM_TABLE *))entry;
             mLoadedImages[i].handle = (EFI_HANDLE)&mLoadedImages[i];
             *ImageHandle = mLoadedImages[i].handle;
             mLoadedImages[i].loaded_image = mLoadedImageProto;
@@ -6812,8 +7074,9 @@ EFI_STATUS bs_load_image(BOOLEAN BootPolicy, EFI_HANDLE ParentImageHandle,
                 mLoadedImages[i].loaded_image.LoadOptionsSize = 0;
                 mLoadedImages[i].loaded_image.LoadOptions = NULL;
             }
-            mLoadedImages[i].loaded_image.ImageCodeType = EfiLoaderCode;
-            mLoadedImages[i].loaded_image.ImageDataType = EfiLoaderData;
+            mLoadedImages[i].loaded_image.ImageCodeType = image_code_type;
+            mLoadedImages[i].loaded_image.ImageDataType = image_data_type;
+            efi_debug_image_info_refresh();
             return EFI_SUCCESS;
         }
     }
@@ -6854,6 +7117,7 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
     if (frame == NULL) {
         return EFI_OUT_OF_RESOURCES;
     }
+    rec->started = 1;
     fw_push_image_config_tables(frame, rec);
 
     if (__builtin_setjmp(frame->jump) != 0) {
@@ -6926,6 +7190,17 @@ EFI_STATUS bs_unload_image(EFI_HANDLE ImageHandle)
     if (rec == NULL) {
         return EFI_INVALID_PARAMETER;
     }
+    if (rec->started) {
+        EFI_STATUS st;
+
+        if (rec->loaded_image.Unload == NULL) {
+            return EFI_UNSUPPORTED;
+        }
+        st = rec->loaded_image.Unload(ImageHandle);
+        if (st != EFI_SUCCESS) {
+            return st;
+        }
+    }
     if (rec->loaded_image.ImageBase != NULL && rec->loaded_image.ImageSize != 0) {
         (void)efi_mark_memory_range(
             EfiConventionalMemory,
@@ -6934,9 +7209,11 @@ EFI_STATUS bs_unload_image(EFI_HANDLE ImageHandle)
             EFI_MEMORY_WB);
     }
     rec->in_use = 0;
+    rec->started = 0;
     rec->entry = NULL;
     rec->device_path = NULL;
     fw_set_mem(&rec->loaded_image, sizeof(rec->loaded_image), 0);
+    efi_debug_image_info_refresh();
     return EFI_SUCCESS;
 }
 
@@ -7472,9 +7749,11 @@ static BOOLEAN efi_memory_map_covers_range(EFI_MEMORY_TYPE Type,
 static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
 {
     static EFI_MEMORY_DESCRIPTOR saved_map[MEMORY_MAP_MAX];
+    static EFI_MEMORY_DESCRIPTOR probe_map[MEMORY_MAP_MAX];
     static EFI_POOL_ALLOCATION_RECORD saved_pool[POOL_ALLOCATION_MAX];
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
     UINTN runtime_data_start = (UINTN)&__runtime_data_start;
+    UINT64 ordinary_low_end;
     EFI_MEMORY_DESCRIPTOR before;
     EFI_MEMORY_DESCRIPTOR preserved;
     EFI_MEMORY_DESCRIPTOR ordinary;
@@ -7485,10 +7764,45 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     EFI_PHYSICAL_ADDRESS expected_pool_floor;
     VOID *pool = NULL;
     UINT64 pool_start = 0;
+    UINTN probe_map_size;
+    UINTN probe_key;
+    UINTN descriptor_size;
+    UINT32 descriptor_version;
+    EFI_STATUS st;
     BOOLEAN ok = 1;
 
     fw_copy_mem(saved_map, mMemoryMap, sizeof(saved_map));
     fw_copy_mem(saved_pool, mPoolAllocations, sizeof(saved_pool));
+
+    probe_map_size = 0;
+    probe_key = ~(UINTN)0 - 0x1234U;
+    descriptor_size = 0;
+    descriptor_version = 0;
+    st = bs_get_memory_map(&probe_map_size, NULL, &probe_key,
+                           &descriptor_size, &descriptor_version);
+    if (st != EFI_BUFFER_TOO_SMALL ||
+        probe_map_size != saved_entries * sizeof(EFI_MEMORY_DESCRIPTOR) ||
+        probe_key != ~(UINTN)0 - 0x1234U ||
+        descriptor_size != sizeof(EFI_MEMORY_DESCRIPTOR) ||
+        descriptor_version != EFI_MEMORY_DESCRIPTOR_VERSION) {
+        ok = 0;
+        goto out;
+    }
+
+    probe_map_size = sizeof(probe_map);
+    probe_key = 0;
+    descriptor_size = 0;
+    descriptor_version = 0;
+    st = bs_get_memory_map(&probe_map_size, probe_map, &probe_key,
+                           &descriptor_size, &descriptor_version);
+    if (st != EFI_SUCCESS ||
+        probe_map_size != saved_entries * sizeof(EFI_MEMORY_DESCRIPTOR) ||
+        probe_key != saved_key ||
+        descriptor_size != sizeof(EFI_MEMORY_DESCRIPTOR) ||
+        descriptor_version != EFI_MEMORY_DESCRIPTOR_VERSION) {
+        ok = 0;
+        goto out;
+    }
 
     before.Type = EfiConventionalMemory;
     before.PhysicalStart = FW_LOW_FREE_BASE;
@@ -7504,10 +7818,12 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         ok = 0;
         goto out;
     }
+    ordinary_low_end = mSystemTablePointerBase != 0 ?
+        mSystemTablePointerBase : mGuestLowRamEnd;
     ordinary.Type = EfiConventionalMemory;
     ordinary.PhysicalStart = FW_LOW_IMAGE_END;
     ordinary.VirtualStart = 0;
-    ordinary.NumberOfPages = (mGuestLowRamEnd - FW_LOW_IMAGE_END) >> 12;
+    ordinary.NumberOfPages = (ordinary_low_end - FW_LOW_IMAGE_END) >> 12;
     ordinary.Attribute = EFI_MEMORY_WB;
     ordinary.NumberOfPages = 1;
     ordinary_next = ordinary;
@@ -7517,13 +7833,28 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        FW_LOW_STAGING_BASE,
                                        FW_LOW_IMAGE_END, EFI_MEMORY_WB) ||
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
-                                       FW_LOW_IMAGE_END, mGuestLowRamEnd,
+                                       FW_LOW_IMAGE_END, ordinary_low_end,
                                        EFI_MEMORY_WB) ||
+        (mSystemTablePointerBase != 0 &&
+         (!efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                         mSystemTablePointerBase,
+                                         mSystemTablePointerBase +
+                                         FW_SYSTEM_TABLE_POINTER_SIZE,
+                                         EFI_MEMORY_WB) ||
+          (mSystemTablePointerBase + FW_SYSTEM_TABLE_POINTER_SIZE <
+           mGuestLowRamEnd &&
+           !efi_memory_map_has_descriptor(EfiConventionalMemory,
+                                          mSystemTablePointerBase +
+                                          FW_SYSTEM_TABLE_POINTER_SIZE,
+                                          mGuestLowRamEnd, EFI_MEMORY_WB)))) ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IOSAPIC_BASE,
                                        IOSAPIC_BASE + IOSAPIC_SIZE,
                                        EFI_MEMORY_UC) ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, ACPI_PM_BASE,
                                        ACPI_PM_BASE + ACPI_PM_SIZE,
+                                       EFI_MEMORY_UC) ||
+        !efi_memory_map_has_descriptor(EfiMemoryMappedIO, PCI_MMIO_BASE,
+                                       PCI_MMIO_BASE + PCI_MMIO_SIZE,
                                        EFI_MEMORY_UC) ||
         !efi_memory_map_has_descriptor(EfiACPIReclaimMemory,
                                        ACPI_RECLAIM_BASE, ACPI_RECLAIM_END,
@@ -7575,6 +7906,9 @@ static void efi_init_memory_map(void)
     UINTN index = 0;
 
     mGuestLowRamEnd = low_ram_end;
+    mSystemTablePointerBase = fw_system_table_pointer_base(low_ram_end);
+    mSystemTablePointer =
+        (EFI_SYSTEM_TABLE_POINTER *)(UINTN)mSystemTablePointerBase;
 
     if (mNextPageAddr < firmware_end) {
         mNextPageAddr = firmware_end;
@@ -7594,9 +7928,10 @@ static void efi_init_memory_map(void)
      * Keep the resident firmware image out of loader allocations.  Linux
      * discovers the PAL entry through an EfiPalCode memory descriptor and
      * calls it through a region 7 alias, so expose the actual PAL trampoline
-     * page separately.  The remaining resident firmware contains EFI runtime
-     * plabels, code, GP-relative data, and the runtime services table; keep it
-     * as runtime memory so OSes do not reclaim it after ExitBootServices().
+     * page separately.  The remaining resident firmware contains executable
+     * EFI runtime text followed by non-executable runtime plabels, constants,
+     * unwind records, GP-relative data, and service tables; keep both ranges
+     * as runtime memory so OSes do not reclaim them after ExitBootServices().
      */
     if (pal_start >= 0x00100000 && pal_end <= firmware_end) {
         efi_add_memory_range(&index, EfiBootServicesCode, 0x00100000,
@@ -7642,8 +7977,22 @@ static void efi_init_memory_map(void)
      * The remaining low RAM is ordinary free memory.  AllocatePool() grows
      * typed pool descriptors from these conventional pages as required by EFI.
      */
-    efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_END,
-                         low_ram_end, EFI_MEMORY_WB);
+    if (mSystemTablePointerBase != 0) {
+        efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_END,
+                             mSystemTablePointerBase, EFI_MEMORY_WB);
+        efi_add_memory_range(&index, EfiReservedMemoryType,
+                             mSystemTablePointerBase,
+                             mSystemTablePointerBase +
+                             FW_SYSTEM_TABLE_POINTER_SIZE,
+                             EFI_MEMORY_WB);
+        efi_add_memory_range(&index, EfiConventionalMemory,
+                             mSystemTablePointerBase +
+                             FW_SYSTEM_TABLE_POINTER_SIZE,
+                             low_ram_end, EFI_MEMORY_WB);
+    } else {
+        efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_END,
+                             low_ram_end, EFI_MEMORY_WB);
+    }
 
     /* Keep the high firmware scratch page unavailable to loaders. */
     efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
@@ -7656,20 +8005,16 @@ static void efi_init_memory_map(void)
 
     /* IA-64 exposes legacy PCI I/O through a memory-mapped port window. */
     efi_add_memory_range(&index, EfiMemoryMappedIOPortSpace, LEGACY_IO_BASE,
-                         LEGACY_IO_LIMIT, EFI_MEMORY_UC);
+                         LEGACY_IO_SPARSE_LIMIT, EFI_MEMORY_UC);
 
     /* Firmware SAL uses this ECAM aperture for runtime PCI config services. */
     efi_add_memory_range(&index, EfiMemoryMappedIO, PCI_CONFIG_ECAM_BASE,
                          PCI_CONFIG_ECAM_BASE + PCI_CONFIG_ECAM_SIZE,
                          EFI_MEMORY_UC);
 
-    /* Standard VGA framebuffer BAR: 0x8001000000 - 0x8001FFFFFF */
-    efi_add_memory_range(&index, EfiMemoryMappedIO, VGA_FB_BASE,
-                         VGA_FB_BASE + VGA_BAR_SIZE, EFI_MEMORY_UC);
-
-    /* Standard VGA MMIO BAR: 0x8002000000 - 0x8002000FFF */
-    efi_add_memory_range(&index, EfiMemoryMappedIO, VGA_MMIO_BASE,
-                         VGA_MMIO_BASE + 0x2000, EFI_MEMORY_UC);
+    /* PCI host-bridge memory window, including VGA/AHCI/OHCI BAR space. */
+    efi_add_memory_range(&index, EfiMemoryMappedIO, PCI_MMIO_BASE,
+                         PCI_MMIO_BASE + PCI_MMIO_SIZE, EFI_MEMORY_UC);
 
     mMemoryMapEntries = index;
 }
@@ -7875,7 +8220,10 @@ static void efi_init_platform_tables(void)
     mFadt.Century = 0;
     mFadt.BootFlags = 0;
     mFadt.Reserved0 = 0;
-    mFadt.Flags = 0;
+    mFadt.Flags = ACPI_FADT_FLAG_WBINVD |
+                  ACPI_FADT_FLAG_PWR_BUTTON |
+                  ACPI_FADT_FLAG_SLP_BUTTON |
+                  ACPI_FADT_FLAG_TMR_VAL_EXT;
     mFadt.ResetRegister.SpaceId = 0;
     mFadt.ResetRegister.BitWidth = 0;
     mFadt.ResetRegister.BitOffset = 0;
@@ -8037,8 +8385,7 @@ static void efi_init_platform_tables(void)
     mHcdp.Device[0].Pci.MmioTranslation = 0;
     mHcdp.Device[0].Pci.IoPortTranslation = LEGACY_IO_BASE;
     mHcdp.Device[0].Pci.Flags = 0;
-    mHcdp.Device[0].Pci.Translation =
-        HCDP_PCI_TRANSLATE_MMIO | HCDP_PCI_TRANSLATE_IOPORT;
+    mHcdp.Device[0].Pci.Translation = HCDP_PCI_TRANSLATE_IOPORT;
     mHcdp.Device[0].Vga.Count = 0;
     mHcdp.Hdr.Checksum = table_checksum8(&mHcdp, sizeof(mHcdp));
 
@@ -8087,11 +8434,15 @@ static void efi_init_platform_tables(void)
             mLoadedImageProtocolGuid[i];
         mConfigTables[PLATFORM_TABLE_DEVICE_PATH].VendorGuid[i] =
             mDevicePathProtocolGuid[i];
+        mConfigTables[PLATFORM_TABLE_DEBUG_IMAGE].VendorGuid[i] =
+            mDebugImageInfoTableGuid[i];
     }
     mConfigTables[PLATFORM_TABLE_LOADED_IMAGE].VendorTable =
         (UINTN)&mLoadedImageProto;
     mConfigTables[PLATFORM_TABLE_DEVICE_PATH].VendorTable =
         0;
+    mConfigTables[PLATFORM_TABLE_DEBUG_IMAGE].VendorTable =
+        (UINTN)&mDebugImageInfoHeader;
 
     mSystemTable.NumberOfTableEntries = PLATFORM_TABLE_INITIAL;
     mSystemTable.ConfigurationTable = mConfigTables;
@@ -8145,6 +8496,10 @@ static BOOLEAN acpi_ssdt_has_bytes(const UINT8 *Needle, UINTN NeedleLen)
 static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
 {
     static const UINT8 pci0_name[] = { 'P', 'C', 'I', '0' };
+    static const UINT8 cpu0_processor[] = {
+        0x5b, 0x83, 0x0b, 'C', 'P', 'U', '0',
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
     static const UINT8 uar0_name[] = { 'U', 'A', 'R', '0' };
     static const UINT8 hid_pci_express[] = "PNP0A08";
     static const UINT8 cid_pci[] = "PNP0A03";
@@ -8223,7 +8578,8 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         return 0;
     }
 
-    if (!acpi_ssdt_has_bytes(uar0_name, sizeof(uar0_name)) ||
+    if (!acpi_ssdt_has_bytes(cpu0_processor, sizeof(cpu0_processor)) ||
+        !acpi_ssdt_has_bytes(uar0_name, sizeof(uar0_name)) ||
         !acpi_ssdt_has_bytes(hid_uart, sizeof(hid_uart) - 1) ||
         !acpi_ssdt_has_bytes(crs_name, sizeof(crs_name))) {
         return 0;
@@ -8511,6 +8867,28 @@ static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
         }
     }
 
+    {
+        IA64_PLABEL temp_plabel =
+            *(IA64_PLABEL *)fw_event_notify_address(
+                uefi_event_services_selftest_callback);
+        EFI_EVENT_NOTIFY temp_notify =
+            fw_event_notify_from_address((UINTN)&temp_plabel);
+
+        notify_count = 0;
+        st = bs_create_event(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, temp_notify,
+                             &notify_count, &event);
+        fw_set_mem(&temp_plabel, sizeof(temp_plabel), 0);
+        if (st != EFI_SUCCESS ||
+            bs_signal_event(event) != EFI_SUCCESS ||
+            notify_count != 1) {
+            ok = 0;
+        }
+        if (event != NULL) {
+            (void)bs_close_event(event);
+            event = NULL;
+        }
+    }
+
     st = bs_create_event_ex(EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_CALLBACK,
                             uefi_event_services_selftest_callback,
                             &notify_count, NULL, &event);
@@ -8658,6 +9036,23 @@ static void efi_init_system_table(void)
     mSystemTable.ConfigurationTable = NULL;
 }
 
+static void efi_init_loaded_image_proto(void)
+{
+    mLoadedImageProto.Revision     = EFI_LOADED_IMAGE_PROTOCOL_REVISION;
+    mLoadedImageProto.ParentHandle = NULL;
+    mLoadedImageProto.SystemTable  = &mSystemTable;
+    mLoadedImageProto.DeviceHandle = mBlockIoHandle;
+    mLoadedImageProto.FilePath     = NULL;
+    mLoadedImageProto.Reserved     = NULL;
+    mLoadedImageProto.LoadOptionsSize = 0;
+    mLoadedImageProto.LoadOptions  = NULL;
+    mLoadedImageProto.ImageBase    = NULL;
+    mLoadedImageProto.ImageSize    = 0;
+    mLoadedImageProto.ImageCodeType = 0;
+    mLoadedImageProto.ImageDataType = 0;
+    mLoadedImageProto.Unload       = NULL;
+}
+
 /* --- PE32+ image loader stub ---------------------------------------------- */
 /* The PE/COFF specification for IA-64 uses machine type 0x200.
    The entry point of an IA-64 EFI image is a plabel (function descriptor)
@@ -8666,8 +9061,9 @@ static void efi_init_system_table(void)
 #define IMAGE_FILE_MACHINE_IA64   0x0200
 #define IMAGE_DOS_SIGNATURE       0x5A4D    /* "MZ" */
 #define IMAGE_NT_SIGNATURE        0x00004550  /* "PE\0\0" */
-#define IA64_EFI_IMAGE_FALLBACK_BASE FW_LOW_FREE_BASE
-#define IA64_EFI_IMAGE_ALIGN         0x00010000ULL
+#define IA64_EFI_IMAGE_FALLBACK_BASE         FW_LOW_FREE_BASE
+#define IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE FW_LOW_RUNTIME_IMAGE_BASE
+#define IA64_EFI_IMAGE_ALIGN                 0x00010000ULL
 
 static UINT64 mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
 
@@ -8781,16 +9177,15 @@ typedef struct {
     UINT32  Characteristics;
 } IMAGE_SECTION_HEADER;
 
-/* IA-64 plabel (function descriptor): 2 x 64-bit values */
-typedef struct {
-    UINT64  EntryPoint;  /* Address of function */
-    UINT64  GP;           /* Global pointer value */
-} IA64_PLABEL;
-
 #define IMAGE_REL_BASED_ABSOLUTE       0
 #define IMAGE_REL_BASED_HIGHLOW        3
 #define IMAGE_REL_BASED_IA64_IMM64     9
 #define IMAGE_REL_BASED_DIR64          10
+
+#define IMAGE_SCN_CNT_CODE             0x00000020U
+#define IMAGE_SCN_CNT_INITIALIZED_DATA 0x00000040U
+#define IMAGE_SCN_CNT_UNINITIALIZED_DATA 0x00000080U
+#define IMAGE_SCN_MEM_EXECUTE          0x20000000U
 
 #define IA64_BUNDLE_TEMPLATE_MASK      0x1FULL
 #define IA64_SLOT_MASK                 0x1FFFFFFFFFFULL
@@ -8843,15 +9238,41 @@ static BOOLEAN pe_image_base_is_conventional(UINT64 base, UINT64 size)
     return 0;
 }
 
-static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size)
+static UINT64 pe_image_allocation_floor(BOOLEAN RuntimeImage)
+{
+    /*
+     * IA-64 Windows loaders use the low image window as a descriptor-aligned
+     * staging area.  Runtime images receive virtual-address-change callbacks
+     * after the loader has consumed early low-memory mappings, so place them
+     * in the ordinary low-RAM region above those loader-owned windows.
+     */
+    return RuntimeImage ?
+        IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE :
+        IA64_EFI_IMAGE_FALLBACK_BASE;
+}
+
+static BOOLEAN pe_image_base_available(UINT64 base, UINT64 size,
+                                       BOOLEAN RuntimeImage)
+{
+    if (base < pe_image_allocation_floor(RuntimeImage)) {
+        return 0;
+    }
+
+    return pe_image_base_is_conventional(base, size) &&
+           !pe_image_base_in_use(base, size);
+}
+
+static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
+                                   BOOLEAN RuntimeImage)
 {
     UINT64 base;
     UINT64 aligned_size = pe_align_up(size, IA64_EFI_IMAGE_ALIGN);
+    UINT64 floor = pe_image_allocation_floor(RuntimeImage);
     UINTN i;
 
     if (preferred_base != 0 &&
-        pe_image_base_is_conventional(preferred_base, aligned_size) &&
-        !pe_image_base_in_use(preferred_base, aligned_size)) {
+        pe_image_base_available(preferred_base, aligned_size,
+                                RuntimeImage)) {
         return preferred_base;
     }
 
@@ -8866,6 +9287,9 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size)
 
         desc_start = pe_align_up(desc->PhysicalStart, IA64_EFI_IMAGE_ALIGN);
         desc_end = desc->PhysicalStart + (desc->NumberOfPages << 12);
+        if (desc_start < floor) {
+            desc_start = pe_align_up(floor, IA64_EFI_IMAGE_ALIGN);
+        }
         if (desc_start < mNextPeImageBase) {
             desc_start = pe_align_up(mNextPeImageBase,
                                      IA64_EFI_IMAGE_ALIGN);
@@ -8882,7 +9306,8 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size)
         }
     }
 
-    base = pe_align_up(mNextPeImageBase, IA64_EFI_IMAGE_ALIGN);
+    base = mNextPeImageBase < floor ? floor : mNextPeImageBase;
+    base = pe_align_up(base, IA64_EFI_IMAGE_ALIGN);
     while (pe_image_base_in_use(base, aligned_size)) {
         base += aligned_size;
     }
@@ -8947,7 +9372,25 @@ static UINT64 pe_ia64_movl_set_imm64(UINT64 x_slot, UINT64 imm64)
     return x_slot;
 }
 
-static BOOLEAN pe_apply_ia64_imm64_reloc(UINT8 *reloc_addr, INT64 delta)
+static BOOLEAN pe_read_ia64_imm64_reloc(UINT8 *reloc_addr, UINT64 *Imm64)
+{
+    UINT64 *bundle = (UINT64 *)((UINTN)reloc_addr & ~(UINTN)0xFULL);
+    UINT64 low = bundle[0];
+    UINT64 high = bundle[1];
+    UINT64 template = low & IA64_BUNDLE_TEMPLATE_MASK;
+    UINT64 slot1 = pe_ia64_bundle_slot(low, high, 1);
+    UINT64 slot2 = pe_ia64_bundle_slot(low, high, 2);
+
+    if ((template != 4 && template != 5) ||
+        ((slot2 >> 37) & 0xFULL) != 6) {
+        return 0;
+    }
+
+    *Imm64 = pe_ia64_movl_imm64(slot1, slot2);
+    return 1;
+}
+
+static BOOLEAN pe_write_ia64_imm64_reloc(UINT8 *reloc_addr, UINT64 Imm64)
 {
     UINT64 *bundle = (UINT64 *)((UINTN)reloc_addr & ~(UINTN)0xFULL);
     UINT64 low = bundle[0];
@@ -8956,34 +9399,375 @@ static BOOLEAN pe_apply_ia64_imm64_reloc(UINT8 *reloc_addr, INT64 delta)
     UINT64 slot0 = pe_ia64_bundle_slot(low, high, 0);
     UINT64 slot1 = pe_ia64_bundle_slot(low, high, 1);
     UINT64 slot2 = pe_ia64_bundle_slot(low, high, 2);
-    UINT64 imm64;
 
     if ((template != 4 && template != 5) ||
         ((slot2 >> 37) & 0xFULL) != 6) {
         return 0;
     }
 
-    imm64 = pe_ia64_movl_imm64(slot1, slot2);
-    imm64 += (UINT64)delta;
-    slot1 = (imm64 >> 22) & IA64_SLOT_MASK;
-    slot2 = pe_ia64_movl_set_imm64(slot2, imm64);
+    slot1 = (Imm64 >> 22) & IA64_SLOT_MASK;
+    slot2 = pe_ia64_movl_set_imm64(slot2, Imm64);
     pe_ia64_store_bundle(bundle, template, slot0, slot1, slot2);
     return 1;
 }
 
+static BOOLEAN pe_apply_ia64_imm64_reloc(UINT8 *reloc_addr, INT64 delta)
+{
+    UINT64 imm64;
+
+    if (!pe_read_ia64_imm64_reloc(reloc_addr, &imm64)) {
+        return 0;
+    }
+    return pe_write_ia64_imm64_reloc(reloc_addr, imm64 + (UINT64)delta);
+}
+
+static void pe_image_memory_types(UINT16 Subsystem,
+                                  EFI_MEMORY_TYPE *CodeType,
+                                  EFI_MEMORY_TYPE *DataType)
+{
+    switch (Subsystem) {
+    case IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER:
+        *CodeType = EfiBootServicesCode;
+        *DataType = EfiBootServicesData;
+        break;
+    case IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER:
+        *CodeType = EfiRuntimeServicesCode;
+        *DataType = EfiRuntimeServicesData;
+        break;
+    case IMAGE_SUBSYSTEM_EFI_APPLICATION:
+    default:
+        *CodeType = EfiLoaderCode;
+        *DataType = EfiLoaderData;
+        break;
+    }
+}
+
+static BOOLEAN pe_section_is_code(const IMAGE_SECTION_HEADER *Section)
+{
+    UINT32 characteristics = Section->Characteristics;
+
+    return (characteristics &
+            (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE)) != 0;
+}
+
+static BOOLEAN pe_section_is_data(const IMAGE_SECTION_HEADER *Section)
+{
+    if (pe_section_is_code(Section)) {
+        return 0;
+    }
+    return 1;
+}
+
+static UINT64 pe_section_memory_size(const IMAGE_SECTION_HEADER *Section)
+{
+    UINT64 size = Section->VirtualSize;
+
+    if (size < Section->SizeOfRawData) {
+        size = Section->SizeOfRawData;
+    }
+    return size;
+}
+
+static BOOLEAN pe_mark_image_section(UINT64 ImageBase, UINT64 ImageEnd,
+                                     const IMAGE_SECTION_HEADER *Section,
+                                     EFI_MEMORY_TYPE Type)
+{
+    UINT64 section_size = pe_section_memory_size(Section);
+    UINT64 section_start;
+    UINT64 section_end;
+
+    if (section_size == 0 || Section->VirtualAddress >= ImageEnd - ImageBase) {
+        return 1;
+    }
+    section_start = ImageBase + Section->VirtualAddress;
+    section_end = section_start + section_size;
+    if (section_end < section_start) {
+        return 0;
+    }
+    if (section_end > ImageEnd) {
+        section_end = ImageEnd;
+    }
+    return efi_mark_memory_range(Type, section_start, section_end,
+                                 efi_memory_attribute(Type, EFI_MEMORY_WB));
+}
+
+static BOOLEAN pe_mark_loaded_image_memory(UINT64 ImageBase,
+                                           UINT32 SizeOfImage,
+                                           const IMAGE_SECTION_HEADER *Sections,
+                                           UINT16 NumberOfSections,
+                                           EFI_MEMORY_TYPE CodeType,
+                                           EFI_MEMORY_TYPE DataType)
+{
+    UINT64 image_end = ImageBase + SizeOfImage;
+    UINT16 i;
+
+    if (SizeOfImage == 0 || image_end < ImageBase) {
+        return 0;
+    }
+
+    /*
+     * UEFI requires the code and data portions of loaded images to use their
+     * corresponding memory types.  Start with data so headers, BSS-only
+     * holes, plabels, and mixed pages stay writable; then mark executable
+     * sections as code and restore data sections as data.
+     */
+    if (!efi_mark_memory_range(DataType, ImageBase, image_end,
+                               efi_memory_attribute(DataType,
+                                                    EFI_MEMORY_WB))) {
+        return 0;
+    }
+    for (i = 0; i < NumberOfSections; i++) {
+        if (pe_section_is_code(&Sections[i]) &&
+            !pe_mark_image_section(ImageBase, image_end, &Sections[i],
+                                   CodeType)) {
+            return 0;
+        }
+    }
+    for (i = 0; i < NumberOfSections; i++) {
+        if (pe_section_is_data(&Sections[i]) &&
+            !pe_mark_image_section(ImageBase, image_end, &Sections[i],
+                                   DataType)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static BOOLEAN pe_rva_range_valid(UINT32 Rva, UINT32 Size, UINT32 ImageSize)
+{
+    return Rva <= ImageSize && Size <= ImageSize - Rva;
+}
+
+static BOOLEAN pe_convert_runtime_address(UINT64 *Address)
+{
+    UINTN value = (UINTN)*Address;
+    EFI_STATUS st = rs_convert_pointer_value(&value);
+
+    if (st != EFI_SUCCESS) {
+        return 0;
+    }
+    *Address = value;
+    return 1;
+}
+
+static BOOLEAN pe_apply_relocations(UINT64 ImageBase, UINT32 SizeOfImage,
+                                    UINT32 RelocRva, UINT32 RelocSize,
+                                    INT64 LoadDelta, BOOLEAN RuntimeVirtual)
+{
+    UINT8 *reloc_data;
+    UINT32 offset = 0;
+
+    if (RelocRva == 0 || RelocSize == 0) {
+        return 1;
+    }
+    if (!pe_rva_range_valid(RelocRva, RelocSize, SizeOfImage)) {
+        return 0;
+    }
+
+    reloc_data = (UINT8 *)(UINTN)(ImageBase + RelocRva);
+    while (offset + 8 <= RelocSize) {
+        UINT32 page_rva = *(UINT32 *)(reloc_data + offset);
+        UINT32 block_size = *(UINT32 *)(reloc_data + offset + 4);
+        UINT32 count;
+        UINT32 jj;
+
+        if (block_size < 8 || offset + block_size > RelocSize) {
+            break;
+        }
+
+        count = (block_size - 8) / 2;
+        for (jj = 0; jj < count; jj++) {
+            UINT16 entry = *(UINT16 *)(reloc_data + offset + 8 + jj * 2);
+            UINT8 type = entry >> 12;
+            UINT16 rva = entry & 0xFFF;
+            UINT64 reloc_off = (UINT64)page_rva + rva;
+
+            if (type == IMAGE_REL_BASED_ABSOLUTE) {
+                continue;
+            }
+            if (reloc_off >= SizeOfImage) {
+                continue;
+            }
+
+            if (type == IMAGE_REL_BASED_HIGHLOW &&
+                reloc_off + sizeof(UINT32) <= SizeOfImage) {
+                UINT32 *patch = (UINT32 *)(UINTN)(ImageBase + reloc_off);
+
+                if (RuntimeVirtual) {
+                    UINT64 value = *patch;
+
+                    if (!pe_convert_runtime_address(&value) ||
+                        value > 0xffffffffULL) {
+                        return 0;
+                    }
+                    *patch = (UINT32)value;
+                } else {
+                    *patch = (UINT32)((int32_t)*patch + LoadDelta);
+                }
+            } else if (type == IMAGE_REL_BASED_DIR64 &&
+                       reloc_off + sizeof(UINT64) <= SizeOfImage) {
+                UINT64 *patch = (UINT64 *)(UINTN)(ImageBase + reloc_off);
+
+                if (RuntimeVirtual) {
+                    UINT64 value = *patch;
+
+                    if (!pe_convert_runtime_address(&value)) {
+                        return 0;
+                    }
+                    *patch = value;
+                } else {
+                    *patch = (UINT64)((int64_t)*patch + LoadDelta);
+                }
+            } else if (type == IMAGE_REL_BASED_IA64_IMM64) {
+                UINT8 *reloc_addr = (UINT8 *)(UINTN)(ImageBase + reloc_off);
+
+                if (RuntimeVirtual) {
+                    UINT64 value;
+
+                    if (!pe_read_ia64_imm64_reloc(reloc_addr, &value) ||
+                        !pe_convert_runtime_address(&value) ||
+                        !pe_write_ia64_imm64_reloc(reloc_addr, value)) {
+                        return 0;
+                    }
+                } else if (!pe_apply_ia64_imm64_reloc(reloc_addr,
+                                                       LoadDelta)) {
+                    return 0;
+                }
+            }
+        }
+
+        offset += block_size;
+    }
+
+    return 1;
+}
+
+static BOOLEAN pe_loaded_image_reloc_info(UINT64 ImageBase, UINTN ImageSize,
+                                          UINT16 *Subsystem,
+                                          UINT32 *SizeOfImage,
+                                          UINT32 *RelocRva,
+                                          UINT32 *RelocSize)
+{
+    IMAGE_DOS_HEADER *dos_hdr;
+    IMAGE_FILE_HEADER *file_hdr;
+    UINT32 *nt_sig;
+    UINT16 magic;
+    UINT32 *data_dir = NULL;
+    UINT32 number_of_rva_and_sizes = 0;
+
+    if (ImageSize < sizeof(IMAGE_DOS_HEADER)) {
+        return 0;
+    }
+    dos_hdr = (IMAGE_DOS_HEADER *)(UINTN)ImageBase;
+    if (dos_hdr->e_magic != IMAGE_DOS_SIGNATURE ||
+        dos_hdr->e_lfanew >= ImageSize - sizeof(UINT32)) {
+        return 0;
+    }
+
+    nt_sig = (UINT32 *)(UINTN)(ImageBase + dos_hdr->e_lfanew);
+    if (*nt_sig != IMAGE_NT_SIGNATURE ||
+        dos_hdr->e_lfanew + sizeof(UINT32) + sizeof(IMAGE_FILE_HEADER) >=
+        ImageSize) {
+        return 0;
+    }
+    file_hdr = (IMAGE_FILE_HEADER *)((UINT8 *)nt_sig + sizeof(UINT32));
+    if (file_hdr->Machine != IMAGE_FILE_MACHINE_IA64) {
+        return 0;
+    }
+    magic = *(UINT16 *)((UINT8 *)file_hdr + sizeof(IMAGE_FILE_HEADER));
+
+    if (magic == 0x010B) {
+        IMAGE_OPTIONAL_HEADER32 *opt32 = (IMAGE_OPTIONAL_HEADER32 *)
+            ((UINT8 *)file_hdr + sizeof(IMAGE_FILE_HEADER));
+
+        *Subsystem = opt32->Subsystem;
+        *SizeOfImage = opt32->SizeOfImage;
+        number_of_rva_and_sizes = *(UINT32 *)((UINT8 *)opt32 + 108);
+        data_dir = (UINT32 *)((UINT8 *)opt32 + 112);
+    } else if (magic == 0x020B) {
+        IMAGE_OPTIONAL_HEADER64 *opt64 = (IMAGE_OPTIONAL_HEADER64 *)
+            ((UINT8 *)file_hdr + sizeof(IMAGE_FILE_HEADER));
+
+        *Subsystem = opt64->Subsystem;
+        *SizeOfImage = opt64->SizeOfImage;
+        number_of_rva_and_sizes = opt64->NumberOfRvaAndSizes;
+        data_dir = (UINT32 *)((UINT8 *)opt64 + 112);
+    } else {
+        return 0;
+    }
+
+    if (*SizeOfImage == 0 || *SizeOfImage > ImageSize ||
+        number_of_rva_and_sizes < 6 || data_dir == NULL) {
+        return 0;
+    }
+    *RelocRva = data_dir[10];
+    *RelocSize = data_dir[11];
+    return 1;
+}
+
+static EFI_STATUS pe_relocate_loaded_runtime_image(UINT64 ImageBase,
+                                                   UINTN ImageSize)
+{
+    UINT16 subsystem = IMAGE_SUBSYSTEM_EFI_APPLICATION;
+    UINT32 size_of_image = 0;
+    UINT32 reloc_rva = 0;
+    UINT32 reloc_size = 0;
+
+    if (!pe_loaded_image_reloc_info(ImageBase, ImageSize, &subsystem,
+                                    &size_of_image, &reloc_rva,
+                                    &reloc_size)) {
+        return EFI_LOAD_ERROR;
+    }
+    if (subsystem != IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER) {
+        return EFI_SUCCESS;
+    }
+    return pe_apply_relocations(ImageBase, size_of_image, reloc_rva,
+                                reloc_size, 0, 1) ?
+        EFI_SUCCESS : EFI_NOT_FOUND;
+}
+
+static EFI_STATUS pe_relocate_runtime_images(void)
+{
+    UINTN i;
+
+    for (i = 0; i < LOADED_IMAGE_MAX; i++) {
+        EFI_LOADED_IMAGE_RECORD *rec = &mLoadedImages[i];
+        EFI_STATUS st;
+
+        if (!rec->in_use ||
+            rec->loaded_image.ImageCodeType != EfiRuntimeServicesCode ||
+            rec->loaded_image.ImageBase == NULL ||
+            rec->loaded_image.ImageSize == 0) {
+            continue;
+        }
+
+        st = pe_relocate_loaded_runtime_image(
+            (UINT64)(UINTN)rec->loaded_image.ImageBase,
+            rec->loaded_image.ImageSize);
+        if (st != EFI_SUCCESS) {
+            return st;
+        }
+    }
+    return EFI_SUCCESS;
+}
+
 void *load_pe_image(uint8_t *image_base, UINTN image_size,
-                    VOID **loaded_base, UINTN *loaded_size)
+                    VOID **loaded_base, UINTN *loaded_size,
+                    UINT16 *loaded_subsystem)
 {
     IMAGE_DOS_HEADER *dos_hdr;
     IMAGE_FILE_HEADER *file_hdr;
     IMAGE_SECTION_HEADER *sections;
     UINT64 image_base_addr;
     UINT64 linked_image_base_addr;
+    EFI_MEMORY_TYPE code_type;
+    EFI_MEMORY_TYPE data_type;
     UINT32 *data_dir = NULL;
     UINT32 number_of_rva_and_sizes = 0;
     UINT32 entry_rva;
     UINT32 size_of_image = 0;
     UINT32 size_of_headers = 0;
+    UINT16 subsystem = IMAGE_SUBSYSTEM_EFI_APPLICATION;
     UINT16 machine;
     UINT16 magic;
     UINTN i;
@@ -9019,8 +9803,11 @@ void *load_pe_image(uint8_t *image_base, UINTN image_size,
         entry_rva = opt32->AddressOfEntryPoint;
         linked_image_base_addr = opt32->ImageBase;
         size_of_image = opt32->SizeOfImage;
+        subsystem = opt32->Subsystem;
         image_base_addr = pe_choose_image_base(linked_image_base_addr,
-                                               size_of_image);
+                                               size_of_image,
+                                               subsystem ==
+                                               IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER);
         size_of_headers = opt32->SizeOfHeaders;
         /*
          * IA-64 EFI images can use PE32 magic while keeping 64-bit
@@ -9035,8 +9822,11 @@ void *load_pe_image(uint8_t *image_base, UINTN image_size,
         entry_rva = opt64->AddressOfEntryPoint;
         linked_image_base_addr = opt64->ImageBase;
         size_of_image = opt64->SizeOfImage;
+        subsystem = opt64->Subsystem;
         image_base_addr = pe_choose_image_base(linked_image_base_addr,
-                                               size_of_image);
+                                               size_of_image,
+                                               subsystem ==
+                                               IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER);
         size_of_headers = opt64->SizeOfHeaders;
         number_of_rva_and_sizes = opt64->NumberOfRvaAndSizes;
         data_dir = (UINT32 *)((uint8_t *)opt64 + 112);
@@ -9051,6 +9841,9 @@ void *load_pe_image(uint8_t *image_base, UINTN image_size,
     }
     if (loaded_size != NULL) {
         *loaded_size = size_of_image;
+    }
+    if (loaded_subsystem != NULL) {
+        *loaded_subsystem = subsystem;
     }
 
     /* Locate sections and copy raw data to target addresses */
@@ -9100,72 +9893,22 @@ void *load_pe_image(uint8_t *image_base, UINTN image_size,
      * DIR64 data entries and IMM64 relocations for movl instructions.
      */
     if (number_of_rva_and_sizes >= 6 && data_dir != NULL) {
-            UINT32 reloc_rva = data_dir[10];
-            UINT32 reloc_size = data_dir[11];
-            if (reloc_rva != 0 && reloc_size != 0) {
-                int64_t delta = (int64_t)(image_base_addr - linked_image_base_addr);
-                UINT8 *reloc_data = NULL;
-                UINTN k;
+        UINT32 reloc_rva = data_dir[10];
+        UINT32 reloc_size = data_dir[11];
+        INT64 delta = (INT64)(image_base_addr - linked_image_base_addr);
 
-                /* Map the RVA to a section */
-                for (k = 0; k < file_hdr->NumberOfSections; k++) {
-                    if (reloc_rva >= sections[k].VirtualAddress &&
-                        reloc_rva < sections[k].VirtualAddress +
-                        (sections[k].SizeOfRawData > sections[k].VirtualSize
-                         ? sections[k].SizeOfRawData
-                         : sections[k].VirtualSize)) {
-                        reloc_data = (uint8_t *)(UINTN)(
-                            image_base_addr + reloc_rva);
-                        break;
-                    }
-                }
+        if (delta != 0 &&
+            !pe_apply_relocations(image_base_addr, size_of_image,
+                                  reloc_rva, reloc_size, delta, 0)) {
+            return NULL;
+        }
+    }
 
-                if (delta != 0 && reloc_data != NULL) {
-                    UINT32 offset = 0;
-                    while (offset + 8 <= reloc_size) {
-                        UINT32 page_rva = *(UINT32 *)(reloc_data + offset);
-                        UINT32 block_size = *(UINT32 *)(reloc_data + offset + 4);
-                        UINT32 count;
-                        UINT32 jj;
-
-                        if (block_size < 8 || offset + block_size > reloc_size) {
-                            break;
-                        }
-
-                        count = (block_size - 8) / 2;
-                        for (jj = 0; jj < count; jj++) {
-                            UINT16 entry = *(UINT16 *)(reloc_data + offset + 8
-                                                       + jj * 2);
-                            UINT8 type = entry >> 12;
-                            UINT16 rva = entry & 0xFFF;
-                            UINT64 reloc_off = (UINT64)page_rva + rva;
-
-                            if (type == IMAGE_REL_BASED_ABSOLUTE ||
-                                reloc_off >= size_of_image) {
-                                continue;
-                            }
-
-                            if (type == IMAGE_REL_BASED_HIGHLOW &&
-                                reloc_off + sizeof(UINT32) <= size_of_image) {
-                                UINT32 *patch = (UINT32 *)(UINTN)(
-                                    image_base_addr + reloc_off);
-                                *patch = (UINT32)((int32_t)*patch + delta);
-                            } else if (type == IMAGE_REL_BASED_DIR64 &&
-                                       reloc_off + sizeof(UINT64) <= size_of_image) {
-                                UINT64 *patch = (UINT64 *)(UINTN)(
-                                    image_base_addr + reloc_off);
-                                *patch = (UINT64)((int64_t)*patch + delta);
-                            } else if (type == IMAGE_REL_BASED_IA64_IMM64) {
-                                pe_apply_ia64_imm64_reloc(
-                                    (UINT8 *)(UINTN)(image_base_addr + reloc_off),
-                                    delta);
-                            }
-                        }
-
-                        offset += block_size;
-                    }
-                }
-            }
+    pe_image_memory_types(subsystem, &code_type, &data_type);
+    if (!pe_mark_loaded_image_memory(image_base_addr, size_of_image, sections,
+                                     file_hdr->NumberOfSections, code_type,
+                                     data_type)) {
+        return NULL;
     }
 
     /* IA-64 function pointers are plabels, so return the descriptor itself. */
@@ -9192,8 +9935,8 @@ typedef struct {
 } IDE_CONFIG;
 
 static IDE_CONFIG gIde = {
-    .data_base  = 0x80000FF001F0ULL,
-    .ctrl_base  = 0x80000FF003F6ULL,
+    .data_base  = LEGACY_IO_BASE + 0x1F0U,
+    .ctrl_base  = LEGACY_IO_BASE + 0x3F6U,
     .bmdma_base = 0,
     .has_bmdma  = 0,
 };
@@ -11876,8 +12619,284 @@ static BOOLEAN __attribute__((noinline)) optical_raw_device_path_selftest(void)
                sizeof(mRawBlockDevicePath);
 }
 
+static EFI_HANDLE mLoadedImageUnloadSelftestHandle;
+static UINTN mLoadedImageUnloadSelftestCalls;
+
+static EFI_STATUS loaded_image_unload_selftest_handler(EFI_HANDLE ImageHandle)
+{
+    if (ImageHandle != mLoadedImageUnloadSelftestHandle) {
+        return EFI_INVALID_PARAMETER;
+    }
+    mLoadedImageUnloadSelftestCalls++;
+    return EFI_SUCCESS;
+}
+
+static BOOLEAN loaded_image_unload_selftest(void)
+{
+    EFI_LOADED_IMAGE_RECORD *rec = NULL;
+    UINTN i;
+
+    for (i = 0; i < LOADED_IMAGE_MAX; i++) {
+        if (!mLoadedImages[i].in_use) {
+            rec = &mLoadedImages[i];
+            break;
+        }
+    }
+    if (rec == NULL) {
+        return 0;
+    }
+
+    fw_set_mem(rec, sizeof(*rec), 0);
+    rec->in_use = 1;
+    rec->started = 1;
+    rec->handle = (EFI_HANDLE)rec;
+    mLoadedImageUnloadSelftestHandle = rec->handle;
+    mLoadedImageUnloadSelftestCalls = 0;
+    if (bs_unload_image(rec->handle) != EFI_UNSUPPORTED ||
+        !rec->in_use) {
+        fw_set_mem(rec, sizeof(*rec), 0);
+        return 0;
+    }
+
+    rec->loaded_image.Unload = loaded_image_unload_selftest_handler;
+    if (bs_unload_image(rec->handle) != EFI_SUCCESS ||
+        rec->in_use ||
+        mLoadedImageUnloadSelftestCalls != 1) {
+        fw_set_mem(rec, sizeof(*rec), 0);
+        return 0;
+    }
+
+    fw_set_mem(rec, sizeof(*rec), 0);
+    rec->in_use = 1;
+    rec->started = 0;
+    rec->handle = (EFI_HANDLE)rec;
+    if (bs_unload_image(rec->handle) != EFI_SUCCESS ||
+        rec->in_use) {
+        fw_set_mem(rec, sizeof(*rec), 0);
+        return 0;
+    }
+
+    return 1;
+}
+
+static BOOLEAN __attribute__((noinline)) pe_section_memory_type_selftest(void)
+{
+    static EFI_MEMORY_DESCRIPTOR saved_map[MEMORY_MAP_MAX];
+    IMAGE_SECTION_HEADER sections[4];
+    UINTN saved_entries = mMemoryMapEntries;
+    UINTN saved_key = mMapKey;
+    UINT64 base = 0x05000000ULL;
+    UINT64 data_attr = efi_memory_attribute(EfiRuntimeServicesData,
+                                            EFI_MEMORY_WB);
+    UINT64 code_attr = efi_memory_attribute(EfiRuntimeServicesCode,
+                                            EFI_MEMORY_WB);
+    BOOLEAN ok;
+
+    fw_copy_mem(saved_map, mMemoryMap, sizeof(saved_map));
+    fw_set_mem(mMemoryMap, sizeof(mMemoryMap), 0);
+    mMemoryMapEntries = 0;
+    efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
+                         base, base + 0x5000U, EFI_MEMORY_WB);
+
+    fw_set_mem(sections, sizeof(sections), 0);
+    sections[0].VirtualAddress = 0x1000;
+    sections[0].VirtualSize = 0x1000;
+    sections[0].Characteristics =
+        IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE;
+    sections[1].VirtualAddress = 0x2000;
+    sections[1].VirtualSize = 0x1000;
+    sections[1].Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA;
+    sections[2].VirtualAddress = 0x3000;
+    sections[2].VirtualSize = 0x800;
+    sections[2].Characteristics =
+        IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE;
+    sections[3].VirtualAddress = 0x3800;
+    sections[3].VirtualSize = 0x800;
+    sections[3].Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA;
+
+    ok = pe_mark_loaded_image_memory(base, 0x5000, sections,
+                                     FW_ARRAY_SIZE(sections),
+                                     EfiRuntimeServicesCode,
+                                     EfiRuntimeServicesData) &&
+         efi_memory_map_has_descriptor(EfiRuntimeServicesData,
+                                       base, base + 0x1000U, data_attr) &&
+         efi_memory_map_has_descriptor(EfiRuntimeServicesCode,
+                                       base + 0x1000U, base + 0x2000U,
+                                       code_attr) &&
+         efi_memory_map_has_descriptor(EfiRuntimeServicesData,
+                                       base + 0x2000U, base + 0x5000U,
+                                       data_attr);
+
+    fw_copy_mem(mMemoryMap, saved_map, sizeof(saved_map));
+    mMemoryMapEntries = saved_entries;
+    mMapKey = saved_key;
+    return ok;
+}
+
+static BOOLEAN __attribute__((noinline)) pe_runtime_relocation_selftest(void)
+{
+    static UINT8 image[0x6000] __attribute__((aligned(4096)));
+    static EFI_MEMORY_DESCRIPTOR saved_virtual_map[MEMORY_MAP_MAX];
+    UINTN saved_virtual_entries = mVirtualAddressMapEntries;
+    BOOLEAN saved_in_progress = mVirtualAddressMapInProgress;
+    BOOLEAN saved_applied = mVirtualAddressMapApplied;
+    UINT64 base = (UINT64)(UINTN)image;
+    UINT64 virt = 0xe0000000d0000000ULL;
+    IMAGE_DOS_HEADER *dos;
+    UINT32 *nt_sig;
+    IMAGE_FILE_HEADER *file_hdr;
+    IMAGE_OPTIONAL_HEADER64 *opt64;
+    UINT32 *data_dir;
+    UINT32 *reloc_block;
+    UINT16 *reloc_entry;
+    UINT64 *patch;
+    BOOLEAN ok;
+
+    fw_copy_mem(saved_virtual_map, mVirtualAddressMap,
+                sizeof(saved_virtual_map));
+    fw_set_mem(image, sizeof(image), 0);
+
+    dos = (IMAGE_DOS_HEADER *)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x80;
+    nt_sig = (UINT32 *)(image + dos->e_lfanew);
+    *nt_sig = IMAGE_NT_SIGNATURE;
+    file_hdr = (IMAGE_FILE_HEADER *)(nt_sig + 1);
+    file_hdr->Machine = IMAGE_FILE_MACHINE_IA64;
+    file_hdr->SizeOfOptionalHeader = 112 + 16 * 8;
+    opt64 = (IMAGE_OPTIONAL_HEADER64 *)((UINT8 *)file_hdr +
+                                        sizeof(*file_hdr));
+    opt64->Magic = 0x020B;
+    opt64->ImageBase = base;
+    opt64->SizeOfImage = sizeof(image);
+    opt64->Subsystem = IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER;
+    opt64->NumberOfRvaAndSizes = 16;
+    data_dir = (UINT32 *)((UINT8 *)opt64 + 112);
+    data_dir[10] = 0x4000;
+    data_dir[11] = 12;
+
+    patch = (UINT64 *)(image + 0x3000);
+    *patch = base + 0x2000;
+    reloc_block = (UINT32 *)(image + 0x4000);
+    reloc_block[0] = 0x3000;
+    reloc_block[1] = 12;
+    reloc_entry = (UINT16 *)(reloc_block + 2);
+    reloc_entry[0] = (IMAGE_REL_BASED_DIR64 << 12);
+
+    fw_set_mem(mVirtualAddressMap, sizeof(mVirtualAddressMap), 0);
+    mVirtualAddressMap[0].Type = EfiRuntimeServicesData;
+    mVirtualAddressMap[0].PhysicalStart = base;
+    mVirtualAddressMap[0].VirtualStart = virt;
+    mVirtualAddressMap[0].NumberOfPages = sizeof(image) >> 12;
+    mVirtualAddressMap[0].Attribute =
+        efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB);
+    mVirtualAddressMapEntries = 1;
+    mVirtualAddressMapInProgress = 1;
+    mVirtualAddressMapApplied = 0;
+
+    ok = pe_relocate_loaded_runtime_image(base, sizeof(image)) ==
+         EFI_SUCCESS && *patch == virt + 0x2000;
+
+    fw_copy_mem(mVirtualAddressMap, saved_virtual_map,
+                sizeof(saved_virtual_map));
+    mVirtualAddressMapEntries = saved_virtual_entries;
+    mVirtualAddressMapInProgress = saved_in_progress;
+    mVirtualAddressMapApplied = saved_applied;
+    return ok;
+}
+
+static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
+{
+    static EFI_MEMORY_DESCRIPTOR saved_map[MEMORY_MAP_MAX];
+    static EFI_LOADED_IMAGE_RECORD saved_loaded[LOADED_IMAGE_MAX];
+    UINTN saved_entries = mMemoryMapEntries;
+    UINTN saved_key = mMapKey;
+    UINT64 saved_next_pe_image_base = mNextPeImageBase;
+    UINT64 base;
+    BOOLEAN ok = 1;
+
+    fw_copy_mem(saved_map, mMemoryMap, sizeof(saved_map));
+    fw_copy_mem(saved_loaded, mLoadedImages, sizeof(saved_loaded));
+    fw_set_mem(mMemoryMap, sizeof(mMemoryMap), 0);
+    fw_set_mem(mLoadedImages, sizeof(mLoadedImages), 0);
+    mMemoryMapEntries = 0;
+    mMapKey = 0;
+    efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
+                         FW_LOW_FREE_BASE, FW_LOW_IMAGE_END + 0x40000ULL,
+                         EFI_MEMORY_WB);
+
+    mNextPeImageBase = FW_LOW_FREE_BASE;
+    base = pe_choose_image_base(FW_LOW_STAGING_BASE, 0x10000, 0);
+    if (base != FW_LOW_STAGING_BASE) {
+        ok = 0;
+        goto out;
+    }
+
+    mNextPeImageBase = FW_LOW_FREE_BASE;
+    base = pe_choose_image_base(FW_LOW_STAGING_BASE, 0x10000, 1);
+    if (base != IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE ||
+        mNextPeImageBase !=
+        IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x10000ULL) {
+        ok = 0;
+        goto out;
+    }
+
+    mLoadedImages[0].in_use = 1;
+    mLoadedImages[0].loaded_image.ImageBase =
+        (VOID *)(UINTN)(IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x10000ULL);
+    mLoadedImages[0].loaded_image.ImageSize = 0x10000;
+    base = pe_choose_image_base(IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE +
+                                0x10000ULL, 0x10000, 1);
+    if (base != IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x20000ULL ||
+        mNextPeImageBase !=
+        IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x30000ULL) {
+        ok = 0;
+    }
+
+out:
+    fw_copy_mem(mMemoryMap, saved_map, sizeof(saved_map));
+    fw_copy_mem(mLoadedImages, saved_loaded, sizeof(saved_loaded));
+    mMemoryMapEntries = saved_entries;
+    mMapKey = saved_key;
+    mNextPeImageBase = saved_next_pe_image_base;
+    return ok;
+}
+
 static BOOLEAN __attribute__((noinline)) load_image_options_selftest(void)
 {
+    EFI_MEMORY_TYPE code_type;
+    EFI_MEMORY_TYPE data_type;
+
+    pe_image_memory_types(IMAGE_SUBSYSTEM_EFI_APPLICATION, &code_type,
+                          &data_type);
+    if (code_type != EfiLoaderCode || data_type != EfiLoaderData) {
+        return 0;
+    }
+    pe_image_memory_types(IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER,
+                          &code_type, &data_type);
+    if (code_type != EfiBootServicesCode ||
+        data_type != EfiBootServicesData) {
+        return 0;
+    }
+    pe_image_memory_types(IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER,
+                          &code_type, &data_type);
+    if (code_type != EfiRuntimeServicesCode ||
+        data_type != EfiRuntimeServicesData) {
+        return 0;
+    }
+    if (!loaded_image_unload_selftest()) {
+        return 0;
+    }
+    if (!pe_section_memory_type_selftest()) {
+        return 0;
+    }
+    if (!pe_image_base_allocation_selftest()) {
+        return 0;
+    }
+    if (!pe_runtime_relocation_selftest()) {
+        return 0;
+    }
+
     return fw_use_default_load_options(1, NULL, 0) &&
            !fw_use_default_load_options(1, NULL, 1) &&
            !fw_use_default_load_options(1, mImageHandle, 0) &&
@@ -14598,6 +15617,11 @@ static const UINT8 mLoadedImageDevicePathProtocolGuid[16] = {
     0x99, 0x20, 0x2d, 0x3b, 0x36, 0xd7, 0x50, 0xdf
 };
 
+static const UINT8 mDebugImageInfoTableGuid[16] = {
+    0x77, 0x2e, 0x15, 0x49, 0xda, 0x1a, 0x64, 0x47,
+    0xb7, 0xa2, 0x7a, 0xfe, 0xfe, 0xd9, 0x5e, 0x8b
+};
+
 /* --- NVRAM Variable Store (in-memory) ------------------------------------- */
 
 #define NVRAM_VAR_MAX 16
@@ -14814,7 +15838,7 @@ static const FW_PCI_ROOT_BRIDGE_RESOURCES mPciRootBridgeResources = {
         .AddressSpaceGranularity = 32,
         .AddressRangeMinimum = 0,
         .AddressRangeMaximum = PCI_IO_SIZE - 1,
-        .AddressTranslationOffset = LEGACY_IO_BASE,
+        .AddressTranslationOffset = PCI_IO_TRANSLATION_OFFSET,
         .AddressLength = PCI_IO_SIZE,
     },
     .Mem = {
@@ -14824,9 +15848,9 @@ static const FW_PCI_ROOT_BRIDGE_RESOURCES mPciRootBridgeResources = {
         .GeneralFlags = 0,
         .TypeSpecificFlags = 0,
         .AddressSpaceGranularity = 64,
-        .AddressRangeMinimum = 0,
-        .AddressRangeMaximum = PCI_MMIO_SIZE - 1,
-        .AddressTranslationOffset = PCI_MMIO_BASE,
+        .AddressRangeMinimum = PCI_MMIO_BASE,
+        .AddressRangeMaximum = PCI_MMIO_END,
+        .AddressTranslationOffset = PCI_MMIO_TRANSLATION_OFFSET,
         .AddressLength = PCI_MMIO_SIZE,
     },
     .End = {
@@ -15363,12 +16387,12 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     {
         &mPciAhciHandle, &mPciAhciIoProto, &mPciAhciDevicePath,
         0, 1, 0, FW_PCI_AHCI_ATTRIBUTES, 0x29228086U,
-        5, 0x00020000U, 0x1000, "AHCI", 1,
+        5, PCI_AHCI_MMIO_BAR, 0x1000, "AHCI", 1,
     },
     {
         &mPciOhciHandle, &mPciOhciIoProto, &mPciOhciDevicePath,
         0, 2, 0, FW_PCI_OHCI_ATTRIBUTES, 0x003f106bU,
-        0, 0x00010000U, 0x100, "OHCI", 1,
+        0, PCI_OHCI_MMIO_BAR, 0x100, "OHCI", 1,
     },
     {
         &mPciUhciHandle, &mPciUhciIoProto, &mPciUhciDevicePath,
@@ -15378,7 +16402,7 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     {
         &mGraphicsHandle, &mPciVgaIoProto, &mGraphicsDevicePath,
         0, 4, 0, FW_PCI_VGA_ATTRIBUTES, 0x11111234U,
-        0, 0x01000008U, 0x1000000, "VGA", 0,
+        0, PCI_VGA_FB_BAR | 0x8U, 0x1000000, "VGA", 0,
     },
 };
 
@@ -16073,9 +17097,9 @@ static BOOLEAN __attribute__((noinline)) pci_root_bridge_io_selftest(void)
     return res->Bus.ResourceType == 2 &&
            res->Bus.AddressLength == 256 &&
            res->Io.ResourceType == 1 &&
-           res->Io.AddressTranslationOffset == LEGACY_IO_BASE &&
+           res->Io.AddressTranslationOffset == PCI_IO_TRANSLATION_OFFSET &&
            res->Mem.ResourceType == 0 &&
-           res->Mem.AddressTranslationOffset == PCI_MMIO_BASE &&
+           res->Mem.AddressTranslationOffset == PCI_MMIO_TRANSLATION_OFFSET &&
            res->End.Descriptor == 0x79;
 }
 
@@ -17393,6 +18417,11 @@ EFI_STATUS rs_set_virtual_address_map(
     mVirtualAddressMapInProgress = 1;
     fw_signal_event_group(gEfiEventGroupVirtualAddressChangeGuid);
     fw_signal_event_type(EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE);
+    if (pe_relocate_runtime_images() != EFI_SUCCESS) {
+        mVirtualAddressMapInProgress = 0;
+        mVirtualAddressMapEntries = 0;
+        return EFI_NOT_FOUND;
+    }
     if (rs_convert_runtime_tables() != EFI_SUCCESS) {
         mVirtualAddressMapInProgress = 0;
         mVirtualAddressMapEntries = 0;
@@ -18433,7 +19462,7 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     uart_puts("I/O Port Space:       0x");
     uart_put_hex64(LEGACY_IO_BASE);
     uart_puts("-0x");
-    uart_put_hex64(LEGACY_IO_END);
+    uart_put_hex64(LEGACY_IO_SPARSE_END);
     uart_puts("\r\n");
     uart_puts("Memory Map Test:      ");
     uart_puts(uefi_memory_map_selftest() ?
@@ -18452,6 +19481,10 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     efi_init_static_handles();
     efi_init_system_table();
     efi_init_platform_tables();
+    efi_init_loaded_image_proto();
+    efi_init_debug_image_info_table();
+    efi_refresh_table_crc32s();
+    efi_init_system_table_pointer();
 
     /* Install Block I/O protocol */
     ide_probe_primary_devices();
@@ -18579,27 +19612,7 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     efi_conout_ascii("QEMU IA-64 EFI firmware\r\n");
     efi_conout_ascii("GOP/UGA stdvga text console ready\r\n\r\n");
 
-    /* Set up the Loaded Image Protocol so guest loaders can find the boot disk. */
-    {
-        mBootServices.HandleProtocol = bs_handle_protocol;
-        mBootServices.LocateHandle = bs_locate_handle;
-        mBootServices.InstallProtocolInterface = bs_install_protocol;
-
-        /* Build Loaded Image Protocol */
-        mLoadedImageProto.Revision     = EFI_LOADED_IMAGE_PROTOCOL_REVISION;
-        mLoadedImageProto.ParentHandle = NULL;
-        mLoadedImageProto.SystemTable  = &mSystemTable;
-        mLoadedImageProto.DeviceHandle = mBlockIoHandle;
-        mLoadedImageProto.FilePath     = &mEndDevicePath;
-        mLoadedImageProto.Reserved     = NULL;
-        mLoadedImageProto.LoadOptionsSize = 0;
-        mLoadedImageProto.LoadOptions  = NULL;
-        mLoadedImageProto.ImageBase    = NULL;
-        mLoadedImageProto.ImageSize    = 0;
-        mLoadedImageProto.ImageCodeType = 0;
-        mLoadedImageProto.ImageDataType = 0;
-        mLoadedImageProto.Unload       = NULL;
-    }
+    mLoadedImageProto.FilePath = &mEndDevicePath;
 
     mRuntimeServices.GetTime = (UINTN)rs_get_time;
     mRuntimeServices.SetTime = (UINTN)rs_set_time;
@@ -18615,9 +19628,15 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     mRuntimeServices.ResetSystem = (UINTN)rs_reset_system;
     mRuntimeServices.QueryVariableInfo = (UINTN)rs_query_variable_info;
 
+    efi_init_debug_image_info_table();
     efi_refresh_table_crc32s();
+    efi_init_system_table_pointer();
 
     uart_puts("EFI System Table:     ready\r\n");
+    uart_puts("EFI Debug Tables:     ");
+    uart_puts(efi_debug_tables_selftest() ?
+              "system pointer/image info verified\r\n" :
+              "verification failed\r\n");
     uart_puts("Console Out:          Serial 16550 + VGA text\r\n");
     uart_puts("Console Out Test:     ");
     uart_puts(uefi_conout_selftest() ? "text output contracts verified\r\n" :
@@ -18641,7 +19660,7 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
               "verification failed\r\n");
     uart_puts("Graphics Output:      GOP/UGA stdvga BGRx PixelBitMask "
               "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
-              "1280x1024x32 @ 0x8001000000\r\n");
+              "1280x1024x32 @ 0xc2000000\r\n");
     uart_puts("GOP SetMode Test:     ");
     uart_puts(graphics_gop_set_mode_selftest() ?
               "visible framebuffer cleared\r\n" :
