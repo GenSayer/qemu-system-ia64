@@ -257,16 +257,28 @@ def fetchadd4_acq(r1, r3, inc, qp=0):
     )
 
 
-def st8_post_imm(r3, r2, imm, qp=0):
+def store_post_imm(x6a, r3, r2, imm, qp=0):
     return (
         op(5)
-        | bitfield(0x33, 30, 6)
+        | bitfield(x6a, 30, 6)
         | bitfield(r3, 20, 7)
         | bitfield(r2, 13, 7)
         | bitfield(imm & 0x7f, 6, 7)
         | bitfield((imm >> 7) & 1, 36, 1)
         | bitfield(qp, 0, 6)
     )
+
+
+def st8_post_imm(r3, r2, imm, qp=0):
+    return store_post_imm(0x33, r3, r2, imm, qp)
+
+
+def st1_post_imm(r3, r2, imm, qp=0):
+    return store_post_imm(0x30, r3, r2, imm, qp)
+
+
+def st1_rel_post_imm(r3, r2, imm, qp=0):
+    return store_post_imm(0x34, r3, r2, imm, qp)
 
 
 def stf_spill(r3, f2, qp=0):
@@ -1294,7 +1306,8 @@ def run_program(qemu, bundles, entry=0x10, delay=0.5, data=()):
     )
     try:
         time.sleep(delay)
-        proc.stdin.write("info registers\nquit\n")
+        # Stop first so direct TB chaining cannot leave live CPU state cached.
+        proc.stdin.write("stop\ninfo registers\nquit\n")
         proc.stdin.flush()
         output, _ = proc.communicate(timeout=4)
     except Exception:
@@ -2044,6 +2057,66 @@ def test_mov_i_application_register_and_cloop(qemu):
     )
 
 
+def test_self_cloop_store_post_increment(qemu):
+    require_registers(
+        qemu,
+        "self br.cloop store post-increment",
+        [
+            (0x10, 0x00, nop_m(), adds(14, 5000, 0), mov_i_grar(65, 14)),
+            (0x20, 0x00, nop_m(), addl(15, 0x200, 0), adds(16, 0x5A, 0)),
+            (0x30, 0x11, st1_post_imm(15, 16, 1), nop_i(),
+             br_cloop(0x30, 0x30)),
+            (0x40, 0x00, nop_m(), addl(19, 0x200, 0), adds(20, -1, 15)),
+            (0x50, 0x08, ld8(18, 19), ld1(21, 20), nop_i()),
+            (0x60, 0x11, nop_m(), mov_i_argr(2, 65),
+             br_cond(0x60, 0x60)),
+        ],
+        {
+            "ip": 0x60,
+            "r2": 0,
+            "r15": 0x200 + 5001,
+            "r18": 0x5A5A5A5A5A5A5A5A,
+            "r21": 0x5A,
+        },
+    )
+
+
+def test_self_cloop_zero_st1_release(qemu):
+    count = 70000
+    start = 0x200
+
+    require_registers(
+        qemu,
+        "self br.cloop st1.rel zero post-increment",
+        [
+            (0x10, 0x00, nop_m(), addl(14, count, 0), mov_i_grar(65, 14)),
+            (0x20, 0x00, nop_m(), addl(15, start, 0), nop_i()),
+            (0x30, 0x11, st1_rel_post_imm(15, 0, 1), nop_i(),
+             br_cloop(0x30, 0x30)),
+            (0x40, 0x00, nop_m(), addl(19, start, 0),
+             addl(20, start + count, 0)),
+            (0x50, 0x08, ld1(18, 19), ld1(21, 20),
+             addl(22, start + count + 1, 0)),
+            (0x60, 0x08, ld1(23, 22), nop_m(), nop_i()),
+            (0x70, 0x11, nop_m(), mov_i_argr(2, 65),
+             br_cond(0x70, 0x70)),
+        ],
+        {
+            "ip": 0x70,
+            "r2": 0,
+            "r15": start + count + 1,
+            "r18": 0,
+            "r21": 0,
+            "r23": 0xEE,
+        },
+        data=[
+            (start, 0xFF, 1),
+            (start + count, 0xDD, 1),
+            (start + count + 1, 0xEE, 1),
+        ],
+    )
+
+
 def test_float_spill_fill(qemu):
     require_registers(
         qemu,
@@ -2058,7 +2131,7 @@ def test_float_spill_fill(qemu):
             (0x70, 0x08, ld8(4, 17), ld8(5, 18), nop_i()),
             (0x80, 0x11, nop_m(), nop_i(), br_cond(0x80, 0x80)),
         ],
-        {"ip": 0x80, "r2": 0x35, "r4": 0, "r5": 0x35},
+        {"ip": 0x80, "r2": 0x35, "r4": 0x1003e, "r5": 0x35},
     )
 
 
@@ -2124,7 +2197,7 @@ def test_stf_spill_nta_post_increment(qemu):
             (0x50, 0x09, stf_spill_nta(18, 2), nop_m(), nop_i()),
             (0x60, 0x11, nop_m(), nop_i(), br_cond(0x60, 0x60)),
         ],
-        {"ip": 0x60, "r3": 0, "r16": 0x140, "r18": 0x150},
+        {"ip": 0x60, "r3": 0x1003e, "r16": 0x140, "r18": 0x150},
     )
 
 
@@ -2484,6 +2557,8 @@ def main():
         ("predicate rotating immediate", test_predicate_rot_immediate),
         ("mov.m application register", test_mov_m_application_register),
         ("mov.i application register and br.cloop", test_mov_i_application_register_and_cloop),
+        ("self br.cloop store post-increment", test_self_cloop_store_post_increment),
+        ("self br.cloop st1.rel zero post-increment", test_self_cloop_zero_st1_release),
         ("stf.spill and ldf.fill", test_float_spill_fill),
         ("f0 immutable", test_float_f0_immutable),
         ("ldf.fill post-increment", test_ldf_fill_post_increment),

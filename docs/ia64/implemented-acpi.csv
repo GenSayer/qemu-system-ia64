@@ -10,7 +10,7 @@ Table,MADT/APIC,feature,interrupt controller table,publishes one Local SAPIC and
 Table,MCFG,feature,PCI ECAM table,publishes PCI segment 0 buses 0..255 at ECAM base,segment 0; bus 0-255,ECAM base and bus range,roms/ia64-firmware/firmware.c:7044
 Table,SRAT,feature,NUMA affinity table,publishes one memory affinity and one processor affinity for proximity domain 0,enabled entries,memory extent and CPU affinity,roms/ia64-firmware/firmware.c:7044
 Table,SLIT,feature,NUMA distance table,publishes one locality distance matrix,distance 10,single locality matrix,roms/ia64-firmware/firmware.c:7044
-Table,HCDP,feature,console table,publishes primary UART console and VGA output descriptors,UART 115200 8n1 IRQ4 primary; VGA PCI 0:4.0 non-primary; I/O-port translation only,UART/VGA descriptor flags and PCI translation fields,roms/ia64-firmware/firmware.c:7044
+Table,HCDP,feature,console table,publishes UART and VGA console descriptors with selectable primary console,2 entries; VGA PCI 0:4.0 primary by default; UART 115200 8n1 IRQ4 primary when firmware-console=serial; I/O-port translation only,entry count plus UART/VGA descriptor flags and PCI translation fields,roms/ia64-firmware/firmware.c:7044
 MMIO,ACPI PM block,feature,platform maps PM region,"QEMU device exposes PM1 event, PM1 control, PM timer and internal GPE backing","base 0x80112000 size 0x2000; offsets 0,4,8",PM1 evt/cnt/timer independent access,hw/ia64/ia64_vpc.c:58
 Interrupt,SCI,feature,ACPI PM event changes SCI line,SCI is routed through IOSAPIC IRQ 9,IRQ 9,assert/deassert SCI,hw/ia64/ia64_vpc.c:58
 MMIO,PIB INTA,feature,read from LSAPIC PIB INTA offset,returns 0 for interrupt acknowledge read,size 1,valid read vs other offsets,hw/ia64/ia64_vpc.c:58

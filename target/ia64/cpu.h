@@ -30,12 +30,20 @@
 #define IA64_PMD_COUNT   64
 #define IA64_PKR_COUNT   16
 #define IA64_MSR_COUNT   1024
+#define IA64_TR_COUNT    8
 #define IA64_TLB_MAX     256
 #define IA64_RSE_FRAME_MAX 128
 #define IA64_EXCP_FRAME_MAX 8
 
+#define IA64_REGION_BITS 3
 #define IA64_IMPL_PA_BITS 50
+/*
+ * This CPU model exposes 64-bit virtual addressing: VA{60:0} plus the
+ * three region bits VA{63:61}.
+ */
 #define IA64_IMPL_VA_MSB 60
+#define IA64_IMPL_VA_BITS (IA64_IMPL_VA_MSB + 1 + IA64_REGION_BITS)
+#define IA64_PAL_IMPL_VA_MSB (IA64_IMPL_VA_BITS - 1)
 #define IA64_IMPL_RID_BITS 24
 #define IA64_IMPL_KEY_BITS 24
 
@@ -78,7 +86,7 @@
     (IA64_PSR_DA | IA64_PSR_DD | IA64_PSR_ED | IA64_PSR_IA)
 
 #define IA64_REGION_SHIFT 61
-#define IA64_REGION_MASK  7ULL
+#define IA64_REGION_MASK  ((1ULL << IA64_REGION_BITS) - 1)
 #define IA64_BUNDLE_SIZE  16ULL
 #define IA64_IP_BUNDLE_MASK (~(IA64_BUNDLE_SIZE - 1))
 #define IA64_REGION7_PHYS_MASK ((1ULL << IA64_REGION_SHIFT) - 1)
@@ -147,6 +155,37 @@ static inline bool ia64_psr_cpl0(uint64_t psr)
 static inline uint64_t ia64_ip_bundle_addr(uint64_t ip)
 {
     return ip & IA64_IP_BUNDLE_MASK;
+}
+
+static inline bool ia64_va_is_implemented(uint64_t va)
+{
+    if (IA64_IMPL_VA_MSB >= 60) {
+        return true;
+    }
+
+    {
+        uint64_t count = 60 - IA64_IMPL_VA_MSB;
+        uint64_t mask = (1ULL << count) - 1;
+        uint64_t unimplemented = (va >> (IA64_IMPL_VA_MSB + 1)) & mask;
+        uint64_t expected = (va & (1ULL << IA64_IMPL_VA_MSB)) ? mask : 0;
+
+        return unimplemented == expected;
+    }
+}
+
+static inline uint64_t ia64_va_canonicalize(uint64_t va)
+{
+    uint64_t region = va & (IA64_REGION_MASK << IA64_REGION_SHIFT);
+    uint64_t implemented_mask = (1ULL << (IA64_IMPL_VA_MSB + 1)) - 1;
+    uint64_t payload = va & implemented_mask;
+
+    if (IA64_IMPL_VA_MSB < 60 &&
+        (payload & (1ULL << IA64_IMPL_VA_MSB))) {
+        payload |= ((1ULL << (60 - IA64_IMPL_VA_MSB)) - 1) <<
+                   (IA64_IMPL_VA_MSB + 1);
+    }
+
+    return region | payload;
 }
 
 static inline uint8_t ia64_psr_cpl(uint64_t psr)
@@ -232,6 +271,10 @@ static inline bool ia64_region6_local_sapic_pa(uint64_t va, uint64_t *pa)
 #define IA64_ITIR_PS_SHIFT   2
 #define IA64_ITIR_KEY_MASK   (0xffffffULL << 8)
 #define IA64_ITIR_KEY_SHIFT  8
+
+/* ---- General exception codes ---- */
+#define IA64_GENEX_UNIMPL_DATA_ADDR 43
+#define IA64_GENEX_UNIMPL_INST_ADDR 69
 
 /* ---- Protection Key Register fields ---- */
 #define IA64_PKR_VALID       (1ULL << 0)
@@ -347,6 +390,7 @@ typedef struct IA64AlatEntry {
 } IA64AlatEntry;
 
 typedef struct IA64ExceptionFrame {
+    uint32_t exception;
     uint64_t gr[IA64_GR_COUNT - 32];
     uint64_t nat[2];
     uint64_t ipsr;
@@ -411,6 +455,8 @@ typedef enum IA64Exception {
     IA64_EXCP_INST_KEY_MISS = 20,
     IA64_EXCP_DATA_KEY_MISS = 21,
     IA64_EXCP_KEY_PERMISSION = 22,
+    IA64_EXCP_UNIMPL_DATA_ADDR = 23,
+    IA64_EXCP_UNIMPL_INST_ADDR = 24,
     IA64_EXCP_MAX,
 } IA64Exception;
 
@@ -571,7 +617,6 @@ typedef struct CPUArchState {
 #define ar_pfs    ar[64]
 #define ar_lc     ar[65]
 #define ar_ec     ar[66]
-
     /* Current Frame Marker (derived from pfs bits) */
     uint8_t cfm_sof;
     uint8_t cfm_sol;
@@ -585,6 +630,7 @@ typedef struct CPUArchState {
     uint16_t      tlb_inst_count;
     uint16_t      tlb_data_replace;
     uint16_t      tlb_inst_replace;
+    bool          itlb_tb_flush_pending;
 
     /* pending external interrupt */
     uint8_t pending_extint;
@@ -630,6 +676,7 @@ typedef struct CPUArchState {
 
     /* ALAT (Advanced Load Address Table) */
     IA64AlatEntry alat[IA64_ALAT_ENTRIES];
+    uint32_t alat_active_count;
 
     /* ITC (Interval Timer Counter) timebase */
     int64_t itc_delta;
@@ -777,6 +824,19 @@ static inline bool ia64_data_nested_tlb_active(const CPUIA64State *env)
     return !(env->psr & IA64_PSR_IC) && !env->psr_ic_inflight;
 }
 
+static inline bool
+ia64_vhpt_walk_miss_reports_data_tlb(const CPUIA64State *env,
+                                     bool vhpt_enabled)
+{
+    /*
+     * A data-TLB miss encountered by the VHPT walker is converted into a
+     * VHPT Translation fault only for a serialized PSR.ic=1 state.  While
+     * PSR.ic is in-flight, data-reference faults use the Data TLB vector
+     * with ISR.ni set by interruption delivery.
+     */
+    return vhpt_enabled && env->psr_ic_inflight;
+}
+
 static inline bool ia64_sal_boot_virtual_pa(const CPUIA64State *env,
                                             uint64_t va, uint64_t *pa)
 {
@@ -896,8 +956,17 @@ int  ia64_sapic_accept(CPUIA64State *env);
 void ia64_sapic_eoi(CPUIA64State *env);
 int  ia64_sapic_get_ivr(CPUIA64State *env);
 void ia64_itm_update(CPUIA64State *env, uint64_t itm_value);
+void ia64_itc_sync(CPUIA64State *env);
+void ia64_itc_advance_pending_itm(CPUIA64State *env);
+void ia64_itc_check_timer(CPUIA64State *env);
+void ia64_itc_enter_halt(CPUIA64State *env);
 
 #define IA64_ITC_NS_PER_TICK 5
+
+static inline bool ia64_external_interrupt_vector_valid(uint8_t vector)
+{
+    return vector == 0 || vector == 2 || vector >= 16;
+}
 
 static inline int64_t ia64_itc_clock_ns(void)
 {
@@ -906,9 +975,8 @@ static inline int64_t ia64_itc_clock_ns(void)
 
 static inline uint64_t ia64_itc_read(CPUIA64State *env)
 {
-    int64_t elapsed = ia64_itc_clock_ns() - env->itc_delta;
-
-    return env->ar_itc + (uint64_t)(elapsed / IA64_ITC_NS_PER_TICK);
+    ia64_itc_advance_pending_itm(env);
+    return env->ar_itc;
 }
 
 static inline void ia64_itc_write(CPUIA64State *env, uint64_t value)

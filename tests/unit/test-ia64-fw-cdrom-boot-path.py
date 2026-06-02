@@ -169,7 +169,7 @@ def main():
         returncode, output = run_qemu(qemu, firmware, disk, target_disk)
 
     required = [
-        "IDE controller:       PCI BAR primary data=0x000080000FF00800",
+        "IDE controller:       PCI BAR primary data=0x0000800010000800",
         "IDE device:           ATAPI primary master",
         "IDE device:           ATA primary slave",
         "Block I/O: El Torito FAT image mapped",

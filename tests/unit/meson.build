@@ -375,4 +375,22 @@ if 'ia64-softmmu' in target_dirs
        protocol: 'tap',
        timeout: 30,
        suite: ['unit', 'ia64'])
+
+  test('test-ia64-fw-icount',
+       python,
+       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
+       args: [
+         files('test-ia64-os-boot-smoke.py'),
+         meson.project_build_root() / 'qemu-system-ia64',
+         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
+       ],
+       env: [
+         'IA64_BOOT_SMOKE_EXTRA_ARGS=-icount shift=3',
+         'IA64_BOOT_SMOKE_MEMORY=128M',
+         'IA64_BOOT_SMOKE_SECONDS=15',
+         'IA64_BOOT_SMOKE_SIGNATURES=Firmware ready. Attempting disk boot...',
+       ],
+       protocol: 'tap',
+       timeout: 30,
+       suite: ['unit', 'ia64'])
 endif

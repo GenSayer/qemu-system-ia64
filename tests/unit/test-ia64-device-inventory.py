@@ -59,13 +59,13 @@ def main():
 
     required = {
         "CMD646 IDE": r"IDE controller: PCI device 1095:0646",
-        "CMD646 IDE INTx": r"IDE controller: PCI device 1095:0646[\s\S]*?IRQ 0, pin A",
+        "CMD646 IDE INTx": r"IDE controller: PCI device 1095:0646[\s\S]*?IRQ 16, pin A",
         "ICH9 AHCI": r"SATA controller: PCI device 8086:2922",
-        "ICH9 AHCI INTx": r"SATA controller: PCI device 8086:2922[\s\S]*?IRQ 1, pin A",
+        "ICH9 AHCI INTx": r"SATA controller: PCI device 8086:2922[\s\S]*?IRQ 17, pin A",
         "OHCI USB": r"USB controller: PCI device 106b:003f",
-        "OHCI USB INTx": r"USB controller: PCI device 106b:003f[\s\S]*?IRQ 2, pin A",
+        "OHCI USB INTx": r"USB controller: PCI device 106b:003f[\s\S]*?IRQ 18, pin A",
         "UHCI USB": r"USB controller: PCI device 8086:7020",
-        "UHCI USB INTx": r"USB controller: PCI device 8086:7020[\s\S]*?IRQ 2, pin D",
+        "UHCI USB INTx": r"USB controller: PCI device 8086:7020[\s\S]*?IRQ 18, pin D",
         "VGA": r"VGA controller: PCI device 1234:1111",
         "SAL PCI config aperture": r"ia64-pci-config",
         "SAL PCI config IDE read": r"7ff0000000:\s+0x06461095",
@@ -76,15 +76,15 @@ def main():
         "SAL PCI config IDE bus-master BAR": r"7ff0000020:\s+0x0000c001",
         "SAL PCI config AHCI read": r"7ff0008000:\s+0x29228086",
         "SAL PCI config AHCI BARs": (
-            r"7ff0008020:\s+0x0000c101\s+0x00020000"
+            r"7ff0008020:\s+0x0000c101\s+0xc1020000"
         ),
         "SAL PCI config OHCI read": r"7ff0010000:\s+0x003f106b",
-        "SAL PCI config OHCI BAR": r"7ff0010010:\s+0x00010000",
+        "SAL PCI config OHCI BAR": r"7ff0010010:\s+0xc1010000",
         "SAL PCI config UHCI read": r"7ff0018000:\s+0x70208086",
         "SAL PCI config UHCI BAR": r"7ff0018020:\s+0x0000c121",
         "SAL PCI config VGA read": r"7ff0020000:\s+0x11111234",
         "SAL PCI config VGA BARs": (
-            r"7ff0020010:\s+0x01000008\s+0x00000000\s+0x02000000"
+            r"7ff0020010:\s+0xc2000008\s+0x00000000\s+0xc3000000"
         ),
     }
     missing = [

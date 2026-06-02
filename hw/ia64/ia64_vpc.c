@@ -30,6 +30,7 @@
 #include "hw/ia64/ia64_iosapic.h"
 #include "system/address-spaces.h"
 #include "system/rtc.h"
+#include "system/runstate.h"
 #include "system/system.h"
 #include "system/reset.h"
 #include "target/ia64/cpu-qom.h"
@@ -62,7 +63,9 @@
 #define IA64_WIN_LOADER_SCRATCH_END  0x00000000c0000000ULL
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION      2ULL
+#define IA64_FW_HANDOFF_VERSION      3ULL
+#define IA64_FW_CONSOLE_SERIAL       0ULL
+#define IA64_FW_CONSOLE_VGA          1ULL
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
@@ -81,8 +84,10 @@ static MemoryRegion *ia64_vpc_lsapic_mmio;
 static MemoryRegion ia64_vpc_acpi_pm;
 static ACPIREGS ia64_vpc_acpi_regs;
 static qemu_irq ia64_vpc_acpi_sci_irq;
+static Notifier ia64_vpc_powerdown_notifier;
 static qemu_irq ia64_vpc_isa_irqs[ISA_NUM_IRQS];
 static bool ia64_vpc_i8042_enabled = true;
+static uint64_t ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
 
 static uint16_t ia64_lduw(const uint8_t *p)
 {
@@ -108,6 +113,32 @@ static void ia64_vpc_set_i8042(Object *obj, bool value, Error **errp)
     (void)errp;
 
     ia64_vpc_i8042_enabled = value;
+}
+
+static char *ia64_vpc_get_firmware_console(Object *obj, Error **errp)
+{
+    (void)obj;
+    (void)errp;
+
+    return g_strdup(ia64_vpc_firmware_console == IA64_FW_CONSOLE_VGA ?
+                    "vga" : "serial");
+}
+
+static void ia64_vpc_set_firmware_console(Object *obj, const char *value,
+                                          Error **errp)
+{
+    (void)obj;
+
+    if (g_strcmp0(value, "serial") == 0) {
+        ia64_vpc_firmware_console = IA64_FW_CONSOLE_SERIAL;
+        return;
+    }
+    if (g_strcmp0(value, "vga") == 0) {
+        ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
+        return;
+    }
+
+    error_setg(errp, "firmware-console must be 'serial' or 'vga'");
 }
 
 static void ia64_vpc_acpi_update_sci(ACPIREGS *ar)
@@ -137,6 +168,14 @@ static void ia64_vpc_init_acpi_pm(MachineState *machine, DeviceState *iosapic)
      * backing storage for that internal zero-valued contribution.
      */
     acpi_gpe_init(&ia64_vpc_acpi_regs, 2);
+}
+
+static void ia64_vpc_powerdown_req(Notifier *n, void *opaque)
+{
+    (void)n;
+    (void)opaque;
+
+    acpi_pm1_evt_power_down(&ia64_vpc_acpi_regs);
 }
 
 static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
@@ -248,7 +287,7 @@ static void ia64_vpc_map_windows_loader_scratch(MachineState *machine)
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
 {
-    uint8_t handoff[80] = { 0 };
+    uint8_t handoff[88] = { 0 };
     struct tm tm;
 
     stq_le_p(handoff, IA64_FW_HANDOFF_MAGIC);
@@ -262,6 +301,7 @@ static void ia64_vpc_write_firmware_handoff(MachineState *machine)
     stq_le_p(handoff + 56, tm.tm_hour);
     stq_le_p(handoff + 64, tm.tm_min);
     stq_le_p(handoff + 72, tm.tm_sec);
+    stq_le_p(handoff + 80, ia64_vpc_firmware_console);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
 }
 
@@ -759,6 +799,9 @@ static void ia64_vpc_init(MachineState *machine)
     ia64_vpc_configure_vga(ia64_vpc_vga_dev);
     ia64_vpc_map_vga_fixed_windows(ia64_vpc_vga_dev);
 
+    ia64_vpc_powerdown_notifier.notify = ia64_vpc_powerdown_req;
+    qemu_register_powerdown_notifier(&ia64_vpc_powerdown_notifier);
+
     qemu_register_reset(ia64_vpc_reset, NULL);
     ia64_vpc_pci_fixup_reset = object_new(TYPE_IA64_PCI_FIXUP_RESET);
     qemu_register_resettable(ia64_vpc_pci_fixup_reset);
@@ -787,6 +830,11 @@ static void ia64_vpc_machine_init(MachineClass *mc)
                                    ia64_vpc_set_i8042);
     object_class_property_set_description(oc, "i8042",
         "Set on/off to enable/disable the i8042 PS/2 controller");
+    object_class_property_add_str(oc, "firmware-console",
+                                  ia64_vpc_get_firmware_console,
+                                  ia64_vpc_set_firmware_console);
+    object_class_property_set_description(oc, "firmware-console",
+        "Set firmware HCDP primary console to 'serial' or 'vga'");
 }
 
 DEFINE_MACHINE("ia64-vpc", ia64_vpc_machine_init)

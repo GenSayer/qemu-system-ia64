@@ -8,6 +8,7 @@
 
 import os
 import select
+import shlex
 import subprocess
 import sys
 import time
@@ -44,6 +45,7 @@ def main():
     boot_seconds = parse_float_env("IA64_BOOT_SMOKE_SECONDS", 2.0)
     input_delay = parse_float_env("IA64_BOOT_SMOKE_INPUT_DELAY", 0.0)
     boot_input = decode_input(os.getenv("IA64_BOOT_SMOKE_INPUT", ""))
+    extra_args = shlex.split(os.getenv("IA64_BOOT_SMOKE_EXTRA_ARGS", ""))
 
     print("TAP version 13")
     print("1..1")
@@ -70,6 +72,7 @@ def main():
         "-monitor",
         "none",
     ]
+    args += extra_args
     if memory:
         args += ["-m", memory]
     if disk:

@@ -64,6 +64,7 @@ UART_BASE = 0x47F0000000
 UART_BAUD = 115200
 HCDP_UART_IRQ = 4
 HCDP_UART_PRIMARY_CONSOLE = 1 << 2
+HCDP_DEVICE_PRIMARY_CONSOLE = 1
 HCDP_PCI_TRANSLATE_IOPORT = 1 << 1
 VGA_VENDOR_ID = 0x1234
 VGA_DEVICE_ID = 0x1111
@@ -397,7 +398,7 @@ def symbol_bytes(elf_path, symbols, name):
     return bytes(data[:size])
 
 
-def qemu_physical_bytes(qemu, firmware, ranges):
+def qemu_physical_bytes(qemu, firmware, ranges, machine="ia64-vpc"):
     commands = []
     for addr, size in ranges.values():
         commands.append(f"xp /{size}xb 0x{addr:x}")
@@ -406,7 +407,7 @@ def qemu_physical_bytes(qemu, firmware, ranges):
     proc = subprocess.Popen(
         [
             qemu,
-            "-machine", "ia64-vpc",
+            "-machine", machine,
             "-smp", "1",
             "-bios", firmware,
             "-display", "none",
@@ -712,8 +713,10 @@ def test_sal_efi_firmware_boot_contract(qemu, firmware):
         "Memory Map Test:      descriptor boundaries verified",
         "Console Out Test:     text output contracts verified",
         "Console In:           Serial/PS2 WaitForKey ready",
+        "Console In Buffer:    WaitForKey preserves keystrokes",
         "UEFI Event Services:  contract checks verified",
         "Protocol Notify:      LocateProtocol registration verified",
+        "Protocol Database:    NULL interface markers verified",
         "PCI Root Bridge Test: config/resources verified",
         "PCI I/O Protocol:    controllers verified",
         "FPSWA Protocol:       published (visibility fallback)",
@@ -805,7 +808,16 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     )
     find_efi_descriptor(
         "PCI sparse I/O port window", EFI_MEMORY_MAPPED_IO_PORT_SPACE,
-        LEGACY_IO_BASE, PCI_IO_SPARSE_SIZE, EFI_MEMORY_UC,
+        LEGACY_IO_BASE + EFI_PAGE_SIZE,
+        PCI_IO_SPARSE_SIZE - EFI_PAGE_SIZE, EFI_MEMORY_UC,
+    )
+    find_efi_descriptor(
+        "runtime reset I/O port page", EFI_MEMORY_MAPPED_IO_PORT_SPACE,
+        LEGACY_IO_BASE, EFI_PAGE_SIZE, EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
+    )
+    find_efi_descriptor(
+        "runtime ACPI PM window", EFI_MEMORY_MAPPED_IO,
+        ACPI_PM_BASE, 0x2000, EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
     )
 
     def require_acpi_reclaim(name, addr, size, align=8):
@@ -998,14 +1010,14 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         raise RuntimeError("SLIT one-locality distance mismatch")
 
     hcdp = table_data["mHcdp"]
-    if u32(hcdp, 36) != 1:
+    if u32(hcdp, 36) != 2:
         raise RuntimeError("HCDP entry count mismatch")
     if hcdp[40] != 0 or hcdp[41] != 8 or hcdp[43] != 1:
         raise RuntimeError("HCDP UART 8n1 descriptor mismatch")
     if u32(hcdp, 48) != UART_BAUD or u32(hcdp, 72) != HCDP_UART_IRQ:
         raise RuntimeError("HCDP UART baud/IRQ mismatch")
-    if hcdp[81] != HCDP_UART_PRIMARY_CONSOLE or hcdp[89] != 0:
-        raise RuntimeError("HCDP primary console flags mismatch")
+    if hcdp[81] != 0 or hcdp[89] != HCDP_DEVICE_PRIMARY_CONSOLE:
+        raise RuntimeError("HCDP default VGA primary console flags mismatch")
     if hcdp[88] != 10 or hcdp[90] != 41:
         raise RuntimeError("HCDP VGA console descriptor mismatch")
     if u16(hcdp, 102) != VGA_DEVICE_ID or u16(hcdp, 104) != VGA_VENDOR_ID:
@@ -1013,6 +1025,14 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     if (u64(hcdp, 110) != 0 or u64(hcdp, 118) != LEGACY_IO_BASE or
             hcdp[126] != 0 or hcdp[127] != HCDP_PCI_TRANSLATE_IOPORT):
         raise RuntimeError("HCDP VGA PCI translation flags mismatch")
+    serial_hcdp = qemu_physical_bytes(
+        qemu, firmware,
+        {"mHcdp": (table_addrs["mHcdp"], symbols["mHcdp"][1])},
+        machine="ia64-vpc,firmware-console=serial",
+    )["mHcdp"]
+    if (serial_hcdp[81] != HCDP_UART_PRIMARY_CONSOLE or
+            serial_hcdp[89] != 0):
+        raise RuntimeError("HCDP serial console override flags mismatch")
 
     sal = runtime["mSalSystemTable"]
     if sal[:4] != b"SST_" or u32(sal, 4) != len(sal):
