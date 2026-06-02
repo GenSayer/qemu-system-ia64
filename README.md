@@ -44,6 +44,8 @@ The firmware build requires an IA-64 ELF cross toolchain named
 
 Use `-serial stdio` to see the serial output.
 
+<img width="1828" height="1080" alt="Debian is starting on qemu-system-ia64, showing its linux version" src="https://github.com/user-attachments/assets/be2b618b-9e89-4168-ba8c-f8ece5d8bc6a" />
+
 ## Tests
 
 Useful smoke checks after building:
