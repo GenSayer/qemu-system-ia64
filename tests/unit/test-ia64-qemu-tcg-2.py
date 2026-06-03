@@ -112,7 +112,7 @@ IA64_REGION_BITS = 3
 IA64_IMPL_PA_BITS = 50
 IA64_IMPL_VA_MSB = 60
 IA64_IMPL_VA_BITS = IA64_IMPL_VA_MSB + 1 + IA64_REGION_BITS
-IA64_PAL_IMPL_VA_MSB = IA64_IMPL_VA_BITS - 1
+IA64_PAL_IMPL_VA_MSB = IA64_IMPL_VA_MSB
 IA64_FIRMWARE_IVT_BASE = 0x10000
 PAL_PROC_ENTRY = 0x100060
 
@@ -143,6 +143,7 @@ PAL_MC_DYNAMIC_STATE = 0x0018
 PAL_MC_ERROR_INFO = 0x0019
 PAL_MC_RESUME = 0x001A
 PAL_MC_REGISTER_MEM = 0x001B
+PAL_HALT = 0x001C
 PAL_HALT_LIGHT = 0x001D
 PAL_COPY_INFO = 0x001E
 PAL_CACHE_LINE_INIT = 0x001F
@@ -216,6 +217,7 @@ PAL_PERF_BUFFER = 0x3000
 PAL_HALT_INFO_BUFFER = 0x3800
 PAL_HALT_LIGHT_INFO = ((1 << 61) | (1 << 60) | (1000 << 32) |
                        (1 << 16) | 1)
+PAL_HALT_STATE1_INFO = ((1 << 60) | (1000 << 32) | (1 << 16) | 1)
 PAL_SELF_TEST_STATE_TESTED = 1 << 2
 IA64_ITC_TICKS_PER_MILLISECOND = 200000
 
@@ -2077,7 +2079,7 @@ def pshl_fixed(size, r1, value_reg, count, qp=0):
         | bitfield(zb, 33, 1)
         | bitfield(1, 30, 2)
         | bitfield(1, 28, 2)
-        | bitfield(count, 20, 5)
+        | bitfield(31 - count, 20, 5)
         | bitfield(value_reg, 13, 7)
         | bitfield(r1, 6, 7)
         | bitfield(qp, 0, 6)
@@ -10047,6 +10049,36 @@ test_pal_halt_light_wakes_on_due_itm = require_registers(
         "r31": 0x5a,
     }, entry=0x10)
 
+test_pal_halt_wakes_on_due_itm = require_registers(
+    "pal_halt_wakes_on_due_itm", [
+        (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
+         nop_i()),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
+         nop_i()),
+        (0x30, *movl_mlx(4, 0x200000)),
+        (0x40, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x50, *movl_mlx(28, PAL_HALT)),
+        (0x60, 0x00, nop_m(), addl(29, 1, 0), addl(30, 0, 0)),
+        (0x70, *movl_mlx(19, (1 << 13) | (1 << 14))),
+        (0x80, 0x10, mov_gr_psr_full(19), addl(31, 0, 0),
+         br_call(0, 0x80, PAL_PROC_ENTRY)),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_cond(0x90, 0x90)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(),
+         nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+        (0x3000, 0x10, nop_m(), adds(31, 0x5a, 0),
+         br_cond(0x3000, 0x3000)),
+    ], {
+        "ip": 0x3000,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r9": 0,
+        "r31": 0x5a,
+    }, entry=0x10)
+
 test_masked_itv_discards_due_timer = require_registers(
     "masked_itv_discards_due_timer", [
         (0x10, *movl_mlx(3, IA64_VECTOR_MASKED | 0xef)),
@@ -13050,6 +13082,21 @@ test_pshl_decode = require_registers("pshl_decode", [
     "r31": 0,
 }, entry=0x10)
 
+test_pshl_fixed_complement_count_decode = require_registers(
+    "pshl_fixed_complement_count_decode", [
+        (0x10, *movl_mlx(8, 0x0000000000000080)),
+        (0x20, *movl_mlx(9, 0x0000000000000080)),
+        (0x30, 0x01, nop_m(), pshl4_fixed(8, 8, 24),
+         pshl2_fixed(9, 9, 8)),
+        (0x40, 0x10, nop_m(), nop_i(),
+         br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "r8": 0x0000000080000000,
+        "r9": 0x0000000000008000,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_simd_helper_nat_propagates = require_registers("simd_helper_nat_propagates", [
     (0x10, 0x00, mov_m_imm_ar(36, 1), addl(4, 0x200, 0),
      nop_i()),
@@ -13811,7 +13858,20 @@ test_pal_halt_info = require_registers("pal_halt_info", [
     (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
 ], {"ip": 0xc0, "r28": PAL_HALT_INFO, "r8": 0,
     "r9": 0, "r10": 0, "r11": 0,
-    "r20": PAL_HALT_LIGHT_INFO, "r21": 0, "r22": 0}, entry=0x10)
+    "r20": PAL_HALT_LIGHT_INFO, "r21": PAL_HALT_STATE1_INFO, "r22": 0},
+    entry=0x10)
+
+test_pal_halt_invalid_state = require_registers("pal_halt_invalid_state",
+    pal_call_program(PAL_HALT, [(29, 0), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_HALT,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_halt_reserved_arg = require_registers("pal_halt_reserved_arg",
+    pal_call_program(PAL_HALT, [(29, 1), (30, 0), (31, 1)]),
+    {"ip": 0x60, "r28": PAL_HALT,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
 
 test_pal_halt_info_bad_buffer = require_registers(
     "pal_halt_info_bad_buffer",
@@ -15060,6 +15120,7 @@ TEST_NAMES = {
     "sapic_same_class_higher_vector_preempts":
         test_sapic_same_class_higher_vector_preempts,
     "pal_halt_light_wakes_on_due_itm": test_pal_halt_light_wakes_on_due_itm,
+    "pal_halt_wakes_on_due_itm": test_pal_halt_wakes_on_due_itm,
     "masked_itv_discards_due_timer": test_masked_itv_discards_due_timer,
     "invalid_itv_vector_is_ignored": test_invalid_itv_vector_is_ignored,
     "past_itm_does_not_fire": test_past_itm_does_not_fire,
@@ -15253,6 +15314,8 @@ TEST_NAMES = {
     "mpyshl4_decode": test_mpyshl4_decode,
     "pshr_decode": test_pshr_decode,
     "pshl_decode": test_pshl_decode,
+    "pshl_fixed_complement_count_decode":
+        test_pshl_fixed_complement_count_decode,
     "simd_helper_nat_propagates": test_simd_helper_nat_propagates,
     "pshr_nat_propagates": test_pshr_nat_propagates,
     "pshl_nat_propagates": test_pshl_nat_propagates,
@@ -15413,6 +15476,8 @@ TEST_NAMES = {
     "pal_copy_pal_bad_alignment": test_pal_copy_pal_bad_alignment,
     "pal_copy_pal_bad_processor": test_pal_copy_pal_bad_processor,
     "pal_halt_info": test_pal_halt_info,
+    "pal_halt_invalid_state": test_pal_halt_invalid_state,
+    "pal_halt_reserved_arg": test_pal_halt_reserved_arg,
     "pal_halt_info_bad_buffer": test_pal_halt_info_bad_buffer,
     "pal_halt_info_reserved_arg": test_pal_halt_info_reserved_arg,
     "pal_mc_drain": test_pal_mc_drain,

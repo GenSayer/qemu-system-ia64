@@ -103,6 +103,9 @@ def main():
         "mDiskBlockIoProto",
         "mDiskIoProto",
         "mDiskBlockDevicePath",
+        "mBootImageCatalogSectorCount",
+        "mBootImageFatBlocks",
+        "el_torito_partition_selftest",
         "ide_probe_primary_devices",
         "mWindowsSetupOsOptions",
         "mWindowsSetupLoaderDevicePath",
@@ -169,6 +172,17 @@ def main():
         "mFpswaProto",
         "mFpswaLoadedImageProto",
         "mFpswaLoadedImageActive",
+        "mTcgProtocolGuid",
+        "mTcgProto",
+        "mTcgCapability",
+        "tcg_status_check",
+        "tcg_hash_all",
+        "tcg_log_event",
+        "tcg_pass_through_to_tpm",
+        "tcg_hash_log_extend_event",
+        "tcg_protocol_selftest",
+        "fw_sha1_hash",
+        "fw_sha1_transform",
         "bs_register_protocol_notify",
         "fw_protocol_notify_next_handle",
         "protocol_notify_selftest",
@@ -177,6 +191,12 @@ def main():
         "mProtocolNotifyRecords",
         "mProtocolNotifyLog",
         "uefi_memory_map_selftest",
+        "mSmbiosEntryPoint",
+        "mSmbiosTable",
+        "mSmbiosTableLength",
+        "mSmbiosStructureCount",
+        "mSmbiosMaxStructureSize",
+        "smbios_table_integrity_selftest",
     ]
     missing = [sym for sym in required_symbols if sym not in objdump.stdout]
     if missing:
@@ -313,6 +333,8 @@ def main():
         "Memory Map Test:      descriptor boundaries verified",
         "UEFI Time Services:   GetTime/SetTime/GetWakeupTime verified",
         "Loaded Image Paths:   protocol storage verified",
+        "SMBIOS Table:         published",
+        "SMBIOS Table Checks:  entry point verified",
     ]
     missing_lines = [line for line in expected_lines if line not in console]
     if missing_lines:

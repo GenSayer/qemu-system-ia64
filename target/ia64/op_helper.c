@@ -419,6 +419,7 @@ static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr)
 #define PAL_MC_ERROR_INFO   0x0019
 #define PAL_MC_RESUME       0x001A
 #define PAL_MC_REGISTER_MEM 0x001B
+#define PAL_HALT            0x001C
 #define PAL_HALT_LIGHT      0x001D
 #define PAL_COPY_INFO       0x001E
 #define PAL_CACHE_LINE_INIT 0x001F
@@ -450,6 +451,10 @@ static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr)
 #define PAL_HALT_STATE_COUNT       8
 #define PAL_HALT_STATE_IMPLEMENTED (1ULL << 60)
 #define PAL_HALT_STATE_COHERENT    (1ULL << 61)
+#define PAL_HALT_IO_TYPE_NONE      0
+#define PAL_HALT_IO_TYPE_LOAD      1
+#define PAL_HALT_IO_TYPE_STORE     2
+#define PAL_HALT_IO_PHYS_ADDR_MASK (~(1ULL << 63))
 #define IA64_L0_CACHE_LINE_SIZE    64ULL
 #define IA64_L1_CACHE_LINE_SIZE    128ULL
 #define IA64_L2_CACHE_LINE_SIZE    128ULL
@@ -2035,6 +2040,99 @@ static bool pal_halt_light(CPUIA64State *env)
     return true;
 }
 
+static bool pal_halt_valid_io_size(uint64_t io_size)
+{
+    return io_size == 1 || io_size == 2 || io_size == 4 || io_size == 8;
+}
+
+static bool pal_halt_io_transaction(uint64_t io_detail_ptr,
+                                    uint64_t *load_return)
+{
+    uint64_t info;
+    uint64_t io_type;
+    uint64_t io_size;
+    uint64_t addr;
+    uint64_t data;
+    uint64_t phys_addr;
+
+    *load_return = 0;
+    if (io_detail_ptr == 0) {
+        return true;
+    }
+    if ((io_detail_ptr & 7) != 0) {
+        return false;
+    }
+
+    cpu_physical_memory_read(io_detail_ptr, &info, sizeof(info));
+    info = le64_to_cpu(info);
+    io_type = info & 0xff;
+    io_size = (info >> 8) & 0xff;
+    if (io_type == PAL_HALT_IO_TYPE_NONE) {
+        return io_size == 0;
+    }
+    if ((io_type != PAL_HALT_IO_TYPE_LOAD &&
+         io_type != PAL_HALT_IO_TYPE_STORE) ||
+        !pal_halt_valid_io_size(io_size)) {
+        return false;
+    }
+
+    cpu_physical_memory_read(io_detail_ptr + 8, &addr, sizeof(addr));
+    addr = le64_to_cpu(addr);
+    phys_addr = addr & PAL_HALT_IO_PHYS_ADDR_MASK;
+    if ((phys_addr & (io_size - 1)) != 0) {
+        return false;
+    }
+
+    if (io_type == PAL_HALT_IO_TYPE_LOAD) {
+        uint8_t buf[8] = { 0 };
+        uint64_t value = 0;
+        int i;
+
+        cpu_physical_memory_read(phys_addr, buf, io_size);
+        for (i = 0; i < io_size; i++) {
+            value |= (uint64_t)buf[i] << (i * 8);
+        }
+        *load_return = value;
+    } else {
+        uint8_t buf[8];
+        uint64_t store_value;
+        int i;
+
+        cpu_physical_memory_read(io_detail_ptr + 16, &data, sizeof(data));
+        store_value = le64_to_cpu(data);
+        for (i = 0; i < io_size; i++) {
+            buf[i] = store_value >> (i * 8);
+        }
+        cpu_physical_memory_write(phys_addr, buf, io_size);
+    }
+    return true;
+}
+
+static bool pal_halt(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+    uint64_t halt_state = env->gr[29];
+    uint64_t io_detail_ptr = env->gr[30];
+    uint64_t load_return = 0;
+
+    if (halt_state != 1 || env->gr[31] != 0 ||
+        !pal_halt_io_transaction(io_detail_ptr, &load_return)) {
+        env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+        env->gr[9] = 0;
+        env->gr[10] = 0;
+        env->gr[11] = 0;
+        return false;
+    }
+
+    env->gr[8] = PAL_STATUS_SUCCESS;
+    env->gr[9] = load_return;
+    env->gr[10] = 0;
+    env->gr[11] = 0;
+    cs->halted = 1;
+    ia64_itc_enter_halt(env);
+    return true;
+}
+
 static void pal_prefetch_vis(CPUIA64State *env)
 {
     if (pal_reserved_args_are_zero(env)) {
@@ -2223,6 +2321,8 @@ static void pal_halt_info(CPUIA64State *env)
     }
 
     power_states[0] = PAL_HALT_STATE_IMPLEMENTED | PAL_HALT_STATE_COHERENT |
+                      (1000ULL << 32) | (1ULL << 16) | 1ULL;
+    power_states[1] = PAL_HALT_STATE_IMPLEMENTED |
                       (1000ULL << 32) | (1ULL << 16) | 1ULL;
 
     for (i = 0; i < PAL_HALT_STATE_COUNT; i++) {
@@ -2958,6 +3058,11 @@ uint32_t helper_pal_dispatch(CPUIA64State *env)
         break;
     case PAL_MC_REGISTER_MEM:
         pal_mc_register_mem(env);
+        break;
+    case PAL_HALT:
+        if (pal_halt(env)) {
+            flags |= IA64_PAL_DISPATCH_HALTED;
+        }
         break;
     case PAL_MEM_FOR_TEST:
         pal_mem_for_test(env);

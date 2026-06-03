@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 #
 # IA-64 firmware El Torito CD-ROM boot-path test.
-# Verifies that the CD-ROM media device path describes the EFI System
-# Partition itself, not the remainder of the optical medium.
+# Verifies that the firmware maps El Torito no-emulation FAT images with the
+# correct logical size for both EFI Platform ID entries and older FAT images.
 
 import os
 import select
@@ -41,11 +41,10 @@ def make_fat_image(sectors):
     return image
 
 
-def make_el_torito_iso(path):
+def make_el_torito_iso(path, platform_id, catalog_sector_count, fat_sectors):
     iso_sectors = 512
     boot_lba = 64
     catalog_lba = 19
-    fat_sectors = 64
     image = bytearray(iso_sectors * ISO_SECTOR_SIZE)
 
     pvd = memoryview(image)[16 * ISO_SECTOR_SIZE:(17 * ISO_SECTOR_SIZE)]
@@ -70,10 +69,11 @@ def make_el_torito_iso(path):
     catalog = memoryview(image)[catalog_lba * ISO_SECTOR_SIZE:
                                 (catalog_lba + 1) * ISO_SECTOR_SIZE]
     catalog[0] = 1
+    catalog[1] = platform_id
     catalog[0x1E] = 0x55
     catalog[0x1F] = 0xAA
     catalog[0x20] = 0x88
-    struct.pack_into("<H", catalog, 0x26, 1)
+    struct.pack_into("<H", catalog, 0x26, catalog_sector_count)
     struct.pack_into("<I", catalog, 0x28, boot_lba)
 
     fat = make_fat_image(fat_sectors)
@@ -152,7 +152,7 @@ def main():
     firmware = sys.argv[2]
 
     print("TAP version 13")
-    print("1..1")
+    print("1..2")
 
     if not os.path.exists(qemu):
         print(f"not ok 1 - qemu exists ({qemu})")
@@ -161,18 +161,17 @@ def main():
         print(f"not ok 1 - firmware exists ({firmware})")
         return 1
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        disk = os.path.join(tmpdir, "eltorito.iso")
-        target_disk = os.path.join(tmpdir, "target.raw")
-        make_el_torito_iso(disk)
-        make_blank_disk(target_disk)
-        returncode, output = run_qemu(qemu, firmware, disk, target_disk)
+    scenarios = [
+        ("legacy BPB-sized no-emulation FAT image", 0x00, 4, 64),
+        ("EFI sector-count no-emulation FAT image", 0xef, 1, 64),
+    ]
 
     required = [
         "IDE controller:       PCI BAR primary data=0x0000800010000800",
         "IDE device:           ATAPI primary master",
         "IDE device:           ATA primary slave",
         "Block I/O: El Torito FAT image mapped",
+        "El Torito Mapping:    partition verified",
         "Windows Setup Boot Option: CD boot path verified",
         "Optical Raw Device Path: whole-media ATAPI path verified",
         "Console Out Test:     text output contracts verified",
@@ -183,21 +182,33 @@ def main():
         "Block I/O: locating \\EFI\\BOOT\\BOOTIA64.EFI...",
         "Block I/O: BOOTIA64.EFI not found",
     ]
-    missing = [sig for sig in required if sig not in output]
-    if returncode is not None:
-        print("not ok 1 - qemu exited during El Torito CD-ROM boot-path test")
-        for line in output.splitlines():
-            print(f"# {line}")
-        return 1
-    if missing:
-        print("not ok 1 - El Torito CD-ROM boot-path signatures")
-        for sig in missing:
-            print(f"# missing signature: {sig}")
-        for line in output.splitlines():
-            print(f"# {line}")
-        return 1
 
-    print("ok 1 - IA-64 firmware publishes exact El Torito partition size")
+    for index, (name, platform_id, catalog_count, fat_sectors) in enumerate(
+        scenarios, 1
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            disk = os.path.join(tmpdir, "eltorito.iso")
+            target_disk = os.path.join(tmpdir, "target.raw")
+            make_el_torito_iso(disk, platform_id, catalog_count, fat_sectors)
+            make_blank_disk(target_disk)
+            returncode, output = run_qemu(qemu, firmware, disk, target_disk)
+
+        missing = [sig for sig in required if sig not in output]
+        if returncode is not None:
+            print(f"not ok {index} - qemu exited during {name}")
+            for line in output.splitlines():
+                print(f"# {line}")
+            return 1
+        if missing:
+            print(f"not ok {index} - El Torito signatures for {name}")
+            for sig in missing:
+                print(f"# missing signature: {sig}")
+            for line in output.splitlines():
+                print(f"# {line}")
+            return 1
+
+        print(f"ok {index} - IA-64 firmware maps {name}")
+
     return 0
 
 

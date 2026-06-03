@@ -2560,7 +2560,7 @@ static Ia64Instruction ia64_decode_insn(Ia64SlotUnit unit, uint64_t raw,
                            unit, raw, address, slot);
         insn.r1 = ia64_bits(raw, 6, 7);
         insn.r2 = ia64_bits(raw, 13, 7);
-        insn.imm = ia64_bits(raw, 20, 5);
+        insn.imm = 31 - ia64_bits(raw, 20, 5);
         return insn;
     }
 

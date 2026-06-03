@@ -691,6 +691,83 @@ typedef struct {
     EFI_STATUS          (*Unload)(EFI_HANDLE ImageHandle);
 } EFI_LOADED_IMAGE_PROTOCOL;
 
+/* --- TCG EFI protocol ----------------------------------------------------- */
+
+#define EFI_TCG_PROTOCOL_GUID { 0xf541796d, 0xa62e, 0x4954, \
+    { 0xa7, 0x75, 0x95, 0x84, 0xf6, 0x1b, 0x9c, 0xdd } }
+
+#define TPM_ALG_SHA             0x00000004U
+#define TCG_SHA1_DIGEST_SIZE    20U
+
+typedef UINT32 TCG_ALGORITHM_ID;
+typedef UINT32 TCG_PCRINDEX;
+typedef UINT32 TCG_EVENTTYPE;
+
+typedef struct {
+    UINT8 Major;
+    UINT8 Minor;
+    UINT8 RevMajor;
+    UINT8 RevMinor;
+} TCG_VERSION;
+
+typedef struct {
+    UINT8 Size;
+    TCG_VERSION StructureVersion;
+    TCG_VERSION ProtocolSpecVersion;
+    UINT8 HashAlgorithmBitmap;
+    BOOLEAN TPMPresentFlag;
+    BOOLEAN TPMDeactivatedFlag;
+} TCG_EFI_BOOT_SERVICE_CAPABILITY;
+
+typedef struct {
+    UINT8 Digest[TCG_SHA1_DIGEST_SIZE];
+} TCG_DIGEST;
+
+typedef struct {
+    TCG_PCRINDEX PCRIndex;
+    TCG_EVENTTYPE EventType;
+    TCG_DIGEST Digest;
+    UINT32 EventSize;
+} TCG_PCR_EVENT_HDR;
+
+typedef struct {
+    TCG_PCRINDEX PCRIndex;
+    TCG_EVENTTYPE EventType;
+    TCG_DIGEST Digest;
+    UINT32 EventSize;
+    UINT8 Event[1];
+} TCG_PCR_EVENT;
+
+typedef struct _EFI_TCG_PROTOCOL EFI_TCG_PROTOCOL;
+
+struct _EFI_TCG_PROTOCOL {
+    EFI_STATUS (*StatusCheck)(EFI_TCG_PROTOCOL *This,
+                              TCG_EFI_BOOT_SERVICE_CAPABILITY *ProtocolCapability,
+                              UINT32 *TCGFeatureFlags,
+                              EFI_PHYSICAL_ADDRESS *EventLogLocation,
+                              EFI_PHYSICAL_ADDRESS *EventLogLastEntry);
+    EFI_STATUS (*HashAll)(EFI_TCG_PROTOCOL *This, UINT8 *HashData,
+                          UINT64 HashDataLen,
+                          TCG_ALGORITHM_ID AlgorithmId,
+                          UINT64 *HashedDataLen,
+                          UINT8 **HashedDataResult);
+    EFI_STATUS (*LogEvent)(EFI_TCG_PROTOCOL *This,
+                           TCG_PCR_EVENT *TCGLogData,
+                           UINT32 *EventNumber, UINT32 Flags);
+    EFI_STATUS (*PassThroughToTpm)(EFI_TCG_PROTOCOL *This,
+                                   UINT32 TpmInputParameterBlockSize,
+                                   UINT8 *TpmInputParameterBlock,
+                                   UINT32 TpmOutputParameterBlockSize,
+                                   UINT8 *TpmOutputParameterBlock);
+    EFI_STATUS (*HashLogExtendEvent)(EFI_TCG_PROTOCOL *This,
+                                     EFI_PHYSICAL_ADDRESS HashData,
+                                     UINT64 HashDataLen,
+                                     TCG_ALGORITHM_ID AlgorithmId,
+                                     TCG_PCR_EVENT *TCGLogData,
+                                     UINT32 *EventNumber,
+                                     EFI_PHYSICAL_ADDRESS *EventLogLastEntry);
+};
+
 /* --- EFI Debug Support Table --------------------------------------------- */
 
 typedef struct {
@@ -1102,6 +1179,171 @@ typedef struct {
     HCDP_DEVICE_DESCRIPTOR Device[1];
 } __attribute__((packed)) ACPI_HCDP;
 
+/* SMBIOS 2.7 structures published through the UEFI configuration table. */
+typedef struct {
+    UINT8  AnchorString[4];
+    UINT8  Checksum;
+    UINT8  Length;
+    UINT8  MajorVersion;
+    UINT8  MinorVersion;
+    UINT16 MaxStructureSize;
+    UINT8  EntryPointRevision;
+    UINT8  FormattedArea[5];
+    UINT8  IntermediateAnchorString[5];
+    UINT8  IntermediateChecksum;
+    UINT16 StructureTableLength;
+    UINT32 StructureTableAddress;
+    UINT16 NumberOfStructures;
+    UINT8  BcdRevision;
+} __attribute__((packed)) SMBIOS_ENTRY_POINT_21;
+
+typedef struct {
+    UINT8  Type;
+    UINT8  Length;
+    UINT16 Handle;
+} __attribute__((packed)) SMBIOS_STRUCTURE_HEADER;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT8  Vendor;
+    UINT8  BiosVersion;
+    UINT16 BiosStartingAddressSegment;
+    UINT8  BiosReleaseDate;
+    UINT8  BiosRomSize;
+    UINT64 BiosCharacteristics;
+    UINT8  BiosCharacteristicsExtensionBytes[2];
+    UINT8  SystemBiosMajorRelease;
+    UINT8  SystemBiosMinorRelease;
+    UINT8  EmbeddedControllerMajorRelease;
+    UINT8  EmbeddedControllerMinorRelease;
+} __attribute__((packed)) SMBIOS_TYPE0_BIOS_INFORMATION;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT8  Manufacturer;
+    UINT8  ProductName;
+    UINT8  Version;
+    UINT8  SerialNumber;
+    UINT8  Uuid[16];
+    UINT8  WakeUpType;
+    UINT8  SkuNumber;
+    UINT8  Family;
+} __attribute__((packed)) SMBIOS_TYPE1_SYSTEM_INFORMATION;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT8  Manufacturer;
+    UINT8  Product;
+    UINT8  Version;
+    UINT8  SerialNumber;
+    UINT8  AssetTag;
+    UINT8  FeatureFlags;
+    UINT8  LocationInChassis;
+    UINT16 ChassisHandle;
+    UINT8  BoardType;
+    UINT8  ContainedObjectHandleCount;
+} __attribute__((packed)) SMBIOS_TYPE2_BASEBOARD_INFORMATION;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT8  Manufacturer;
+    UINT8  ChassisType;
+    UINT8  Version;
+    UINT8  SerialNumber;
+    UINT8  AssetTag;
+    UINT8  BootUpState;
+    UINT8  PowerSupplyState;
+    UINT8  ThermalState;
+    UINT8  SecurityStatus;
+    UINT32 OemDefined;
+    UINT8  Height;
+    UINT8  NumberOfPowerCords;
+    UINT8  ContainedElementCount;
+    UINT8  ContainedElementRecordLength;
+    UINT8  SkuNumber;
+} __attribute__((packed)) SMBIOS_TYPE3_SYSTEM_ENCLOSURE;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT8  SocketDesignation;
+    UINT8  ProcessorType;
+    UINT8  ProcessorFamily;
+    UINT8  ProcessorManufacturer;
+    UINT32 ProcessorId[2];
+    UINT8  ProcessorVersion;
+    UINT8  Voltage;
+    UINT16 ExternalClock;
+    UINT16 MaxSpeed;
+    UINT16 CurrentSpeed;
+    UINT8  Status;
+    UINT8  ProcessorUpgrade;
+    UINT16 L1CacheHandle;
+    UINT16 L2CacheHandle;
+    UINT16 L3CacheHandle;
+    UINT8  SerialNumber;
+    UINT8  AssetTag;
+    UINT8  PartNumber;
+    UINT8  CoreCount;
+    UINT8  CoreEnabled;
+    UINT8  ThreadCount;
+    UINT16 ProcessorCharacteristics;
+    UINT16 ProcessorFamily2;
+} __attribute__((packed)) SMBIOS_TYPE4_PROCESSOR_INFORMATION;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT8  Location;
+    UINT8  Use;
+    UINT8  ErrorCorrection;
+    UINT32 MaximumCapacity;
+    UINT16 MemoryErrorInformationHandle;
+    UINT16 NumberOfMemoryDevices;
+    UINT64 ExtendedMaximumCapacity;
+} __attribute__((packed)) SMBIOS_TYPE16_PHYSICAL_MEMORY_ARRAY;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT16 PhysicalMemoryArrayHandle;
+    UINT16 MemoryErrorInformationHandle;
+    UINT16 TotalWidth;
+    UINT16 DataWidth;
+    UINT16 Size;
+    UINT8  FormFactor;
+    UINT8  DeviceSet;
+    UINT8  DeviceLocator;
+    UINT8  BankLocator;
+    UINT8  MemoryType;
+    UINT16 TypeDetail;
+    UINT16 Speed;
+    UINT8  Manufacturer;
+    UINT8  SerialNumber;
+    UINT8  AssetTag;
+    UINT8  PartNumber;
+    UINT8  Attributes;
+    UINT32 ExtendedSize;
+    UINT16 ConfiguredMemoryClockSpeed;
+} __attribute__((packed)) SMBIOS_TYPE17_MEMORY_DEVICE;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT32 StartingAddress;
+    UINT32 EndingAddress;
+    UINT16 MemoryArrayHandle;
+    UINT8  PartitionWidth;
+    UINT64 ExtendedStartingAddress;
+    UINT64 ExtendedEndingAddress;
+} __attribute__((packed)) SMBIOS_TYPE19_MEMORY_ARRAY_MAPPED_ADDRESS;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+    UINT8  Reserved[6];
+    UINT8  BootStatus;
+} __attribute__((packed)) SMBIOS_TYPE32_SYSTEM_BOOT_INFORMATION;
+
+typedef struct {
+    SMBIOS_STRUCTURE_HEADER Hdr;
+} __attribute__((packed)) SMBIOS_TYPE127_END_OF_TABLE;
+
 typedef struct _EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL
     EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL;
 
@@ -1351,6 +1593,12 @@ FW_STATIC_ASSERT(sizeof(EFI_DEBUG_IMAGE_INFO_TABLE_HEADER) == 16,
                  efi_debug_image_info_table_header_size);
 FW_STATIC_ASSERT(sizeof(EFI_DEBUG_IMAGE_INFO_NORMAL) == 24,
                  efi_debug_image_info_normal_size);
+FW_STATIC_ASSERT(sizeof(TCG_VERSION) == 4, tcg_version_size);
+FW_STATIC_ASSERT(sizeof(TCG_DIGEST) == 20, tcg_digest_size);
+FW_STATIC_ASSERT(sizeof(TCG_EFI_BOOT_SERVICE_CAPABILITY) == 12,
+                 tcg_capability_size);
+FW_STATIC_ASSERT(__builtin_offsetof(TCG_PCR_EVENT, Event) == 32,
+                 tcg_pcr_event_payload_offset);
 FW_STATIC_ASSERT((LEGACY_IO_BASE & (PCI_IO_SPARSE_SIZE - 1)) == 0,
                  legacy_io_base_sparse_alignment);
 FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, Flags) == 41,
@@ -1359,6 +1607,30 @@ FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, ConOutIndex) == 42,
                  acpi_hcdp_uart_conout_index_offset);
 FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, Reserved) == 44,
                  acpi_hcdp_uart_reserved_offset);
+FW_STATIC_ASSERT(sizeof(SMBIOS_ENTRY_POINT_21) == 31,
+                 smbios_entry_point_21_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_STRUCTURE_HEADER) == 4,
+                 smbios_structure_header_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE0_BIOS_INFORMATION) == 24,
+                 smbios_type0_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE1_SYSTEM_INFORMATION) == 27,
+                 smbios_type1_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE2_BASEBOARD_INFORMATION) == 15,
+                 smbios_type2_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE3_SYSTEM_ENCLOSURE) == 22,
+                 smbios_type3_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE4_PROCESSOR_INFORMATION) == 42,
+                 smbios_type4_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE16_PHYSICAL_MEMORY_ARRAY) == 23,
+                 smbios_type16_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE17_MEMORY_DEVICE) == 34,
+                 smbios_type17_v27_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE19_MEMORY_ARRAY_MAPPED_ADDRESS) == 31,
+                 smbios_type19_v27_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE32_SYSTEM_BOOT_INFORMATION) == 11,
+                 smbios_type32_size);
+FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE127_END_OF_TABLE) == 4,
+                 smbios_type127_size);
 
 #define HCDP_UART_FLAG_PRIMARY_CONSOLE  (1u << 2)
 #define HCDP_DEVICE_FLAG_PRIMARY_CONSOLE 1u
@@ -1371,18 +1643,25 @@ FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, Reserved) == 44,
 #define PLATFORM_TABLE_ACPI10        1
 #define PLATFORM_TABLE_SAL           2
 #define PLATFORM_TABLE_HCDP          3
-#define PLATFORM_TABLE_LOADED_IMAGE  4
-#define PLATFORM_TABLE_DEVICE_PATH   5
-#define PLATFORM_TABLE_DEBUG_IMAGE   6
-#define PLATFORM_TABLE_INITIAL       7
+#define PLATFORM_TABLE_SMBIOS        4
+#define PLATFORM_TABLE_LOADED_IMAGE  5
+#define PLATFORM_TABLE_DEVICE_PATH   6
+#define PLATFORM_TABLE_DEBUG_IMAGE   7
+#define PLATFORM_TABLE_INITIAL       8
 #define PLATFORM_TABLE_MAX           16
 #define LOADED_IMAGE_MAX             8
+#define SMBIOS_TABLE_MAX_SIZE        1024U
 static EFI_CONFIGURATION_TABLE mConfigTables[PLATFORM_TABLE_MAX];
 static EFI_SYSTEM_TABLE_POINTER *mSystemTablePointer;
 static UINT64                   mSystemTablePointerBase;
 static EFI_DEBUG_IMAGE_INFO_TABLE_HEADER mDebugImageInfoHeader;
 static EFI_DEBUG_IMAGE_INFO mDebugImageInfoTable[LOADED_IMAGE_MAX + 1U];
 static EFI_DEBUG_IMAGE_INFO_NORMAL mDebugImageInfoNormal[LOADED_IMAGE_MAX + 1U];
+static SMBIOS_ENTRY_POINT_21   mSmbiosEntryPoint;
+static UINT8                   mSmbiosTable[SMBIOS_TABLE_MAX_SIZE];
+static UINT16                  mSmbiosTableLength;
+static UINT16                  mSmbiosStructureCount;
+static UINT16                  mSmbiosMaxStructureSize;
 static IA64_SAL_SYSTEM_TABLE   mSalSystemTable;
 static ACPI_FADT               mFadt;
 static ACPI_XSDT               mXsdt;
@@ -1498,6 +1777,10 @@ static const UINT8 gEfiHcdpTableGuid[16] = {
     0x8d, 0x93, 0x51, 0xf9, 0x0b, 0x62, 0xef, 0x42,
     0x82, 0x79, 0xa8, 0x4b, 0x79, 0x61, 0x78, 0x98
 };
+static const UINT8 gEfiSmbiosTableGuid[16] = {
+    0x31, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11,
+    0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d
+};
 static const UINT8 gEfiEventGroupExitBootServicesGuid[16] = {
     0x55, 0xf0, 0xab, 0x27, 0xb8, 0xb1, 0x26, 0x4c,
     0x80, 0x48, 0x74, 0x8f, 0x37, 0xba, 0xa2, 0xdf
@@ -1602,6 +1885,16 @@ static EFI_GRAPHICS_OUTPUT_PROTOCOL mGopProto;
 static EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE mGopMode;
 static EFI_GRAPHICS_OUTPUT_MODE_INFORMATION mGopModeInfo[5];
 static EFI_UGA_DRAW_PROTOCOL mUgaDrawProto;
+static EFI_TCG_PROTOCOL mTcgProto;
+static TCG_EFI_BOOT_SERVICE_CAPABILITY mTcgCapability = {
+    sizeof(TCG_EFI_BOOT_SERVICE_CAPABILITY),
+    { 1, 2, 0, 0 },
+    { 1, 2, 0, 0 },
+    1,
+    0,
+    0
+};
+
 static UINT32 mGraphicsWidth;
 static UINT32 mGraphicsHeight;
 static UINT32 mGraphicsStride;
@@ -1832,6 +2125,7 @@ typedef struct FW_PCI_IO_DEVICE {
 #define FW_HANDLE_PCI_AHCI    ((EFI_HANDLE)(UINTN)0x7101)
 #define FW_HANDLE_PCI_OHCI    ((EFI_HANDLE)(UINTN)0x7102)
 #define FW_HANDLE_PCI_UHCI    ((EFI_HANDLE)(UINTN)0x7103)
+#define FW_HANDLE_TCG         ((EFI_HANDLE)(UINTN)0x8000)
 
 static EFI_HANDLE mBlockIoHandle;
 static EFI_HANDLE mRawBlockIoHandle;
@@ -1845,6 +2139,7 @@ static EFI_HANDLE mPciIdeHandle;
 static EFI_HANDLE mPciAhciHandle;
 static EFI_HANDLE mPciOhciHandle;
 static EFI_HANDLE mPciUhciHandle;
+static EFI_HANDLE mTcgHandle;
 #define FW_PCI_IO_DEVICE_COUNT 5U
 static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT];
 static EFI_LOADED_IMAGE_PROTOCOL mLoadedImageProto;
@@ -1866,6 +2161,7 @@ static const UINT8 mUgaDrawProtocolGuid[16];
 static const UINT8 mFpswaProtocolGuid[16];
 static const UINT8 mPciRootBridgeIoProtocolGuid[16];
 static const UINT8 mPciIoProtocolGuid[16];
+static const UINT8 mTcgProtocolGuid[16];
 static const FW_PCI_IO_DEVICE *fw_pci_io_device_from_handle(
     EFI_HANDLE Handle);
 
@@ -1894,6 +2190,8 @@ EFI_STATUS bs_uninstall_protocol(EFI_HANDLE Handle, void *Protocol,
                                  VOID *Interface);
 static EFI_STATUS fpswa_unload_image(EFI_HANDLE ImageHandle);
 static BOOLEAN fpswa_install_protocols(void);
+static BOOLEAN tcg_install_protocol(void);
+static BOOLEAN tcg_protocol_selftest(void);
 EFI_STATUS bs_disconnect_controller(EFI_HANDLE ControllerHandle,
                                     EFI_HANDLE DriverImageHandle,
                                     EFI_HANDLE ChildHandle);
@@ -2787,73 +3085,92 @@ static SAL_RETURN_VALUE sal_proc_entry(UINT64 Index, UINT64 Arg1, UINT64 Arg2,
                                        UINT64 Arg6, UINT64 Arg7)
 {
     UINT64 FunctionId = (UINT32)Index;
+    SAL_RETURN_VALUE ret;
 
     if (!sal_runtime_state_valid()) {
-        return sal_return(SAL_STATUS_ERROR, 0, 0, 0);
+        ret = sal_return(SAL_STATUS_ERROR, 0, 0, 0);
+        goto out;
     }
 
     if (FunctionId == SAL_SET_VECTORS) {
-        return sal_set_vectors(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_set_vectors(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_GET_STATE_INFO_SIZE) {
-        return sal_get_state_info_size(Arg1, Arg2, Arg3, Arg4,
-                                       Arg5, Arg6, Arg7);
+        ret = sal_get_state_info_size(Arg1, Arg2, Arg3, Arg4,
+                                      Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_GET_STATE_INFO) {
-        return sal_get_state_info(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_get_state_info(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_CLEAR_STATE_INFO) {
-        return sal_clear_state_info(Arg1, Arg2, Arg3, Arg4,
-                                    Arg5, Arg6, Arg7);
+        ret = sal_clear_state_info(Arg1, Arg2, Arg3, Arg4,
+                                   Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_MC_RENDEZ) {
-        return sal_mc_rendez(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_mc_rendez(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_MC_SET_PARAMS) {
-        return sal_mc_set_params(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_mc_set_params(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_REGISTER_PHYSICAL_ADDR) {
-        return sal_register_physical_addr(Arg1, Arg2, Arg3, Arg4,
-                                          Arg5, Arg6, Arg7);
+        ret = sal_register_physical_addr(Arg1, Arg2, Arg3, Arg4,
+                                         Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_CACHE_FLUSH) {
-        return sal_cache_flush(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_cache_flush(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_CACHE_INIT) {
-        return sal_cache_init(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_cache_init(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_PCI_CONFIG_READ) {
-        return sal_pci_config_read(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_pci_config_read(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_PCI_CONFIG_WRITE) {
-        return sal_pci_config_write(Arg1, Arg2, Arg3, Arg4,
-                                    Arg5, Arg6, Arg7);
+        ret = sal_pci_config_write(Arg1, Arg2, Arg3, Arg4,
+                                   Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_FREQ_BASE) {
-        return sal_freq_base(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_freq_base(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_PHYSICAL_ID_INFO) {
-        return sal_physical_id_info(Arg1, Arg2, Arg3, Arg4,
-                                    Arg5, Arg6, Arg7);
+        ret = sal_physical_id_info(Arg1, Arg2, Arg3, Arg4,
+                                   Arg5, Arg6, Arg7);
+        goto out;
     }
 
     if (FunctionId == SAL_UPDATE_PAL) {
-        return sal_update_pal(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        ret = sal_update_pal(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
     }
 
-    return sal_return(SAL_STATUS_NOT_IMPLEMENTED, 0, 0, 0);
+    ret = sal_return(SAL_STATUS_NOT_IMPLEMENTED, 0, 0, 0);
+
+out:
+    return ret;
 }
 
 static BOOLEAN __attribute__((noinline)) sal_proc_dispatch_selftest(void)
@@ -5042,7 +5359,7 @@ EFI_STATUS bs_allocate_pages(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
     }
     if (!efi_mark_memory_range(MemoryType, addr, addr + size,
                                efi_memory_attribute(MemoryType,
-                                                    EFI_MEMORY_WB))) {
+                                                   EFI_MEMORY_WB))) {
         (void)efi_forget_page_allocation(addr, Pages);
         return EFI_OUT_OF_RESOURCES;
     }
@@ -7249,6 +7566,428 @@ static void efi_refresh_table_crc32s(void)
     efi_update_table_crc32(&mSystemTable.Hdr);
 }
 
+typedef struct {
+    UINT32 h[5];
+    UINT64 length_bits;
+    UINT8 block[64];
+    UINTN block_len;
+} FW_SHA1_CONTEXT;
+
+static UINT32 fw_rotl32(UINT32 Value, UINTN Shift)
+{
+    return (Value << Shift) | (Value >> (32U - Shift));
+}
+
+static UINT32 fw_sha1_read_be32(const UINT8 *Data)
+{
+    return ((UINT32)Data[0] << 24) |
+           ((UINT32)Data[1] << 16) |
+           ((UINT32)Data[2] << 8) |
+           (UINT32)Data[3];
+}
+
+static void fw_sha1_write_be32(UINT8 *Data, UINT32 Value)
+{
+    Data[0] = (UINT8)(Value >> 24);
+    Data[1] = (UINT8)(Value >> 16);
+    Data[2] = (UINT8)(Value >> 8);
+    Data[3] = (UINT8)Value;
+}
+
+static void fw_sha1_write_be64(UINT8 *Data, UINT64 Value)
+{
+    UINTN i;
+
+    for (i = 0; i < 8; i++) {
+        Data[i] = (UINT8)(Value >> ((7U - i) * 8U));
+    }
+}
+
+static void fw_sha1_transform(FW_SHA1_CONTEXT *Ctx, const UINT8 Block[64])
+{
+    UINT32 w[80];
+    UINT32 a;
+    UINT32 b;
+    UINT32 c;
+    UINT32 d;
+    UINT32 e;
+    UINTN i;
+
+    for (i = 0; i < 16; i++) {
+        w[i] = fw_sha1_read_be32(Block + i * 4U);
+    }
+    for (i = 16; i < 80; i++) {
+        w[i] = fw_rotl32(w[i - 3U] ^ w[i - 8U] ^
+                         w[i - 14U] ^ w[i - 16U], 1);
+    }
+
+    a = Ctx->h[0];
+    b = Ctx->h[1];
+    c = Ctx->h[2];
+    d = Ctx->h[3];
+    e = Ctx->h[4];
+
+    for (i = 0; i < 80; i++) {
+        UINT32 f;
+        UINT32 k;
+        UINT32 temp;
+
+        if (i < 20) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5a827999U;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ed9eba1U;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8f1bbcdcU;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xca62c1d6U;
+        }
+
+        temp = fw_rotl32(a, 5) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = fw_rotl32(b, 30);
+        b = a;
+        a = temp;
+    }
+
+    Ctx->h[0] += a;
+    Ctx->h[1] += b;
+    Ctx->h[2] += c;
+    Ctx->h[3] += d;
+    Ctx->h[4] += e;
+}
+
+static void fw_sha1_init(FW_SHA1_CONTEXT *Ctx)
+{
+    Ctx->h[0] = 0x67452301U;
+    Ctx->h[1] = 0xefcdab89U;
+    Ctx->h[2] = 0x98badcfeU;
+    Ctx->h[3] = 0x10325476U;
+    Ctx->h[4] = 0xc3d2e1f0U;
+    Ctx->length_bits = 0;
+    Ctx->block_len = 0;
+}
+
+static void fw_sha1_update(FW_SHA1_CONTEXT *Ctx, const UINT8 *Data,
+                           UINTN DataLen)
+{
+    Ctx->length_bits += (UINT64)DataLen * 8ULL;
+    while (DataLen > 0) {
+        UINTN chunk = sizeof(Ctx->block) - Ctx->block_len;
+
+        if (chunk > DataLen) {
+            chunk = DataLen;
+        }
+        fw_copy_mem(Ctx->block + Ctx->block_len, Data, chunk);
+        Ctx->block_len += chunk;
+        Data += chunk;
+        DataLen -= chunk;
+        if (Ctx->block_len == sizeof(Ctx->block)) {
+            fw_sha1_transform(Ctx, Ctx->block);
+            Ctx->block_len = 0;
+        }
+    }
+}
+
+static void fw_sha1_final(FW_SHA1_CONTEXT *Ctx,
+                          UINT8 Digest[TCG_SHA1_DIGEST_SIZE])
+{
+    UINT64 length_bits = Ctx->length_bits;
+    UINTN i;
+
+    Ctx->block[Ctx->block_len++] = 0x80;
+    if (Ctx->block_len > 56U) {
+        while (Ctx->block_len < sizeof(Ctx->block)) {
+            Ctx->block[Ctx->block_len++] = 0;
+        }
+        fw_sha1_transform(Ctx, Ctx->block);
+        Ctx->block_len = 0;
+    }
+    while (Ctx->block_len < 56U) {
+        Ctx->block[Ctx->block_len++] = 0;
+    }
+    fw_sha1_write_be64(Ctx->block + 56, length_bits);
+    fw_sha1_transform(Ctx, Ctx->block);
+
+    for (i = 0; i < FW_ARRAY_SIZE(Ctx->h); i++) {
+        fw_sha1_write_be32(Digest + i * 4U, Ctx->h[i]);
+    }
+}
+
+static void fw_sha1_hash(const UINT8 *Data, UINTN DataLen,
+                         UINT8 Digest[TCG_SHA1_DIGEST_SIZE])
+{
+    FW_SHA1_CONTEXT ctx;
+
+    fw_sha1_init(&ctx);
+    fw_sha1_update(&ctx, Data, DataLen);
+    fw_sha1_final(&ctx, Digest);
+}
+
+static BOOLEAN tcg_digest_matches(const UINT8 *Digest, const UINT8 *Expected)
+{
+    UINTN i;
+
+    for (i = 0; i < TCG_SHA1_DIGEST_SIZE; i++) {
+        if (Digest[i] != Expected[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static BOOLEAN tcg_sha1_selftest(void)
+{
+    static const UINT8 expected_empty[TCG_SHA1_DIGEST_SIZE] = {
+        0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d,
+        0x32, 0x55, 0xbf, 0xef, 0x95, 0x60, 0x18, 0x90,
+        0xaf, 0xd8, 0x07, 0x09
+    };
+    static const UINT8 expected_abc[TCG_SHA1_DIGEST_SIZE] = {
+        0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a,
+        0xba, 0x3e, 0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c,
+        0x9c, 0xd0, 0xd8, 0x9d
+    };
+    static const UINT8 abc[] = { 'a', 'b', 'c' };
+    UINT8 digest[TCG_SHA1_DIGEST_SIZE];
+
+    fw_sha1_hash(NULL, 0, digest);
+    if (!tcg_digest_matches(digest, expected_empty)) {
+        return 0;
+    }
+    fw_sha1_hash(abc, sizeof(abc), digest);
+    if (!tcg_digest_matches(digest, expected_abc)) {
+        return 0;
+    }
+    return 1;
+}
+
+static EFI_STATUS tcg_status_check(
+    EFI_TCG_PROTOCOL *This,
+    TCG_EFI_BOOT_SERVICE_CAPABILITY *ProtocolCapability,
+    UINT32 *TCGFeatureFlags,
+    EFI_PHYSICAL_ADDRESS *EventLogLocation,
+    EFI_PHYSICAL_ADDRESS *EventLogLastEntry)
+{
+    if (This == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (ProtocolCapability != NULL) {
+        *ProtocolCapability = mTcgCapability;
+    }
+    if (TCGFeatureFlags != NULL) {
+        *TCGFeatureFlags = 0;
+    }
+    if (EventLogLocation != NULL) {
+        *EventLogLocation = 0;
+    }
+    if (EventLogLastEntry != NULL) {
+        *EventLogLastEntry = 0;
+    }
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS tcg_hash_all(EFI_TCG_PROTOCOL *This, UINT8 *HashData,
+                               UINT64 HashDataLen,
+                               TCG_ALGORITHM_ID AlgorithmId,
+                               UINT64 *HashedDataLen,
+                               UINT8 **HashedDataResult)
+{
+    UINT8 *result;
+
+    if (This == NULL || HashedDataLen == NULL ||
+        HashedDataResult == NULL ||
+        (HashData == NULL && HashDataLen != 0) ||
+        (UINTN)HashDataLen != HashDataLen) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (AlgorithmId != TPM_ALG_SHA) {
+        return EFI_UNSUPPORTED;
+    }
+    if (*HashedDataLen != 0 && *HashedDataLen < TCG_SHA1_DIGEST_SIZE) {
+        *HashedDataLen = TCG_SHA1_DIGEST_SIZE;
+        return EFI_BUFFER_TOO_SMALL;
+    }
+    if (*HashedDataLen == 0 || *HashedDataResult == NULL) {
+        *HashedDataLen = TCG_SHA1_DIGEST_SIZE;
+        if (bs_allocate_pool(EfiBootServicesData, TCG_SHA1_DIGEST_SIZE,
+                             (VOID **)HashedDataResult) != EFI_SUCCESS) {
+            *HashedDataResult = NULL;
+            return EFI_OUT_OF_RESOURCES;
+        }
+    }
+
+    result = *HashedDataResult;
+    *HashedDataLen = TCG_SHA1_DIGEST_SIZE;
+    fw_sha1_hash(HashData, (UINTN)HashDataLen, result);
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS tcg_log_event(EFI_TCG_PROTOCOL *This,
+                                TCG_PCR_EVENT *TCGLogData,
+                                UINT32 *EventNumber, UINT32 Flags)
+{
+    (void)EventNumber;
+    (void)Flags;
+
+    if (This == NULL || TCGLogData == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    return EFI_DEVICE_ERROR;
+}
+
+static EFI_STATUS tcg_pass_through_to_tpm(
+    EFI_TCG_PROTOCOL *This,
+    UINT32 TpmInputParameterBlockSize,
+    UINT8 *TpmInputParameterBlock,
+    UINT32 TpmOutputParameterBlockSize,
+    UINT8 *TpmOutputParameterBlock)
+{
+    if (This == NULL ||
+        TpmInputParameterBlock == NULL ||
+        TpmOutputParameterBlock == NULL ||
+        TpmInputParameterBlockSize == 0 ||
+        TpmOutputParameterBlockSize == 0) {
+        return EFI_INVALID_PARAMETER;
+    }
+    return EFI_DEVICE_ERROR;
+}
+
+static EFI_STATUS tcg_hash_log_extend_event(
+    EFI_TCG_PROTOCOL *This,
+    EFI_PHYSICAL_ADDRESS HashData,
+    UINT64 HashDataLen,
+    TCG_ALGORITHM_ID AlgorithmId,
+    TCG_PCR_EVENT *TCGLogData,
+    UINT32 *EventNumber,
+    EFI_PHYSICAL_ADDRESS *EventLogLastEntry)
+{
+    (void)EventNumber;
+
+    if (This == NULL || TCGLogData == NULL || EventLogLastEntry == NULL ||
+        (HashData == 0 && HashDataLen != 0)) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (AlgorithmId != TPM_ALG_SHA) {
+        return EFI_UNSUPPORTED;
+    }
+    *EventLogLastEntry = 0;
+    return EFI_DEVICE_ERROR;
+}
+
+static void efi_init_tcg_protocol(void)
+{
+    mTcgProto.StatusCheck = tcg_status_check;
+    mTcgProto.HashAll = tcg_hash_all;
+    mTcgProto.LogEvent = tcg_log_event;
+    mTcgProto.PassThroughToTpm = tcg_pass_through_to_tpm;
+    mTcgProto.HashLogExtendEvent = tcg_hash_log_extend_event;
+}
+
+static BOOLEAN tcg_install_protocol(void)
+{
+    EFI_HANDLE handle = mTcgHandle;
+
+    efi_init_tcg_protocol();
+    return bs_install_protocol(&handle, (void *)mTcgProtocolGuid, 0,
+                               &mTcgProto) == EFI_SUCCESS;
+}
+
+static BOOLEAN __attribute__((noinline)) tcg_protocol_selftest(void)
+{
+    static const UINT8 abc[] = { 'a', 'b', 'c' };
+    static const UINT8 expected_abc[TCG_SHA1_DIGEST_SIZE] = {
+        0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a,
+        0xba, 0x3e, 0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c,
+        0x9c, 0xd0, 0xd8, 0x9d
+    };
+    TCG_EFI_BOOT_SERVICE_CAPABILITY capability;
+    EFI_PHYSICAL_ADDRESS event_log = 1;
+    EFI_PHYSICAL_ADDRESS last_event = 1;
+    EFI_PHYSICAL_ADDRESS last_extended = 1;
+    UINT8 digest_storage[TCG_SHA1_DIGEST_SIZE];
+    UINT8 tpm_in[1] = { 0 };
+    UINT8 tpm_out[1] = { 0 };
+    UINT8 *digest = digest_storage;
+    UINT64 digest_len = sizeof(digest_storage);
+    UINT32 flags = 1;
+    UINT32 event_number = 0;
+    TCG_PCR_EVENT event;
+    VOID *interface = NULL;
+
+    if (!tcg_sha1_selftest()) {
+        return 0;
+    }
+    if (mTcgCapability.Size != sizeof(mTcgCapability) ||
+        mTcgCapability.StructureVersion.Major != 1 ||
+        mTcgCapability.StructureVersion.Minor != 2 ||
+        mTcgCapability.ProtocolSpecVersion.Major != 1 ||
+        mTcgCapability.ProtocolSpecVersion.Minor != 2 ||
+        mTcgCapability.HashAlgorithmBitmap != 1 ||
+        mTcgCapability.TPMPresentFlag != 0 ||
+        mTcgCapability.TPMDeactivatedFlag != 0) {
+        return 0;
+    }
+    if (bs_locate_protocol((void *)mTcgProtocolGuid, NULL, &interface) !=
+        EFI_SUCCESS || interface != &mTcgProto) {
+        return 0;
+    }
+    if (mTcgProto.StatusCheck(&mTcgProto, &capability, &flags,
+                              &event_log, &last_event) != EFI_SUCCESS ||
+        capability.TPMPresentFlag != 0 ||
+        capability.HashAlgorithmBitmap != 1 ||
+        flags != 0 || event_log != 0 || last_event != 0) {
+        return 0;
+    }
+    if (mTcgProto.HashAll(&mTcgProto, (UINT8 *)abc, sizeof(abc), TPM_ALG_SHA,
+                          &digest_len, &digest) != EFI_SUCCESS ||
+        digest != digest_storage ||
+        digest_len != TCG_SHA1_DIGEST_SIZE ||
+        !tcg_digest_matches(digest_storage, expected_abc)) {
+        return 0;
+    }
+    digest_len = TCG_SHA1_DIGEST_SIZE - 1U;
+    digest = digest_storage;
+    if (mTcgProto.HashAll(&mTcgProto, (UINT8 *)abc, sizeof(abc), TPM_ALG_SHA,
+                          &digest_len, &digest) != EFI_BUFFER_TOO_SMALL ||
+        digest_len != TCG_SHA1_DIGEST_SIZE) {
+        return 0;
+    }
+    digest_len = 0;
+    digest = NULL;
+    if (mTcgProto.HashAll(&mTcgProto, NULL, 0, TPM_ALG_SHA,
+                          &digest_len, &digest) != EFI_SUCCESS ||
+        digest == NULL ||
+        digest_len != TCG_SHA1_DIGEST_SIZE) {
+        return 0;
+    }
+    (void)bs_free_pool(digest);
+
+    fw_set_mem(&event, sizeof(event), 0);
+    if (mTcgProto.LogEvent(&mTcgProto, &event, &event_number, 0) !=
+        EFI_DEVICE_ERROR) {
+        return 0;
+    }
+    if (mTcgProto.PassThroughToTpm(&mTcgProto, sizeof(tpm_in), tpm_in,
+                                   sizeof(tpm_out), tpm_out) !=
+        EFI_DEVICE_ERROR) {
+        return 0;
+    }
+    if (mTcgProto.HashLogExtendEvent(&mTcgProto,
+                                     (EFI_PHYSICAL_ADDRESS)(UINTN)abc,
+                                     sizeof(abc), TPM_ALG_SHA, &event,
+                                     &event_number, &last_extended) !=
+        EFI_DEVICE_ERROR ||
+        last_extended != 0) {
+        return 0;
+    }
+    return 1;
+}
+
 static BOOLEAN efi_memory_map_has_descriptor(EFI_MEMORY_TYPE Type,
                                              UINT64 Start, UINT64 End,
                                              UINT64 Attribute);
@@ -7939,18 +8678,32 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
 static void efi_add_memory_range(UINTN *Index, EFI_MEMORY_TYPE Type,
                                  UINT64 Start, UINT64 End, UINT64 Attribute)
 {
-    EFI_MEMORY_DESCRIPTOR *desc;
+    EFI_MEMORY_DESCRIPTOR desc;
+    UINTN pos;
+    UINTN i;
 
     if (End <= Start || *Index >= MEMORY_MAP_MAX) {
         return;
     }
 
-    desc = &mMemoryMap[*Index];
-    desc->Type = Type;
-    desc->PhysicalStart = Start;
-    desc->VirtualStart = 0;
-    desc->NumberOfPages = (End - Start) / 4096U;
-    desc->Attribute = Attribute;
+    desc.Type = Type;
+    desc.Pad = 0;
+    desc.PhysicalStart = Start;
+    desc.VirtualStart = 0;
+    desc.NumberOfPages = (End - Start) / 4096U;
+    desc.Attribute = Attribute;
+
+    pos = *Index;
+    for (i = 0; i < *Index; i++) {
+        if (Start < mMemoryMap[i].PhysicalStart) {
+            pos = i;
+            break;
+        }
+    }
+    for (i = *Index; i > pos; i--) {
+        mMemoryMap[i] = mMemoryMap[i - 1U];
+    }
+    mMemoryMap[pos] = desc;
     (*Index)++;
 }
 
@@ -8136,6 +8889,18 @@ static BOOLEAN efi_memory_map_has_descriptor(EFI_MEMORY_TYPE Type,
     return 0;
 }
 
+static BOOLEAN efi_memory_map_is_sorted(void)
+{
+    UINTN i;
+
+    for (i = 1; i < mMemoryMapEntries; i++) {
+        if (mMemoryMap[i - 1U].PhysicalStart > mMemoryMap[i].PhysicalStart) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static BOOLEAN efi_memory_map_covers_range(EFI_MEMORY_TYPE Type,
                                            UINT64 Start, UINT64 End,
                                            UINT64 Attribute)
@@ -8268,15 +9033,12 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        EFI_MEMORY_UC) ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIOPortSpace,
                                        LEGACY_IO_BASE,
-                                       LEGACY_IO_BASE + EFI_PAGE_SIZE,
-                                       EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) ||
-        !efi_memory_map_has_descriptor(EfiMemoryMappedIOPortSpace,
-                                       LEGACY_IO_BASE + EFI_PAGE_SIZE,
                                        LEGACY_IO_SPARSE_LIMIT,
-                                       EFI_MEMORY_UC) ||
+                                       EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) ||
         !efi_memory_map_has_descriptor(EfiACPIReclaimMemory,
                                        ACPI_RECLAIM_BASE, ACPI_RECLAIM_END,
                                        EFI_MEMORY_WB) ||
+        !efi_memory_map_is_sorted() ||
         !efi_memory_map_covers_range(EfiRuntimeServicesData,
                                      runtime_data_start, firmware_end,
                                      EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
@@ -8422,13 +9184,10 @@ static void efi_init_memory_map(void)
                          ACPI_PM_BASE + ACPI_PM_SIZE,
                          EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
 
-    /* IA-64 exposes legacy PCI I/O through a memory-mapped port window. */
+    /* IA-64 defines a single memory-mapped I/O port translation window. */
     efi_add_memory_range(&index, EfiMemoryMappedIOPortSpace, LEGACY_IO_BASE,
-                         LEGACY_IO_BASE + EFI_PAGE_SIZE,
+                         LEGACY_IO_SPARSE_LIMIT,
                          EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-    efi_add_memory_range(&index, EfiMemoryMappedIOPortSpace,
-                         LEGACY_IO_BASE + EFI_PAGE_SIZE,
-                         LEGACY_IO_SPARSE_LIMIT, EFI_MEMORY_UC);
 
     /* Firmware SAL uses this ECAM aperture for runtime PCI config services. */
     efi_add_memory_range(&index, EfiMemoryMappedIO, PCI_CONFIG_ECAM_BASE,
@@ -8527,6 +9286,567 @@ static void efi_init_runtime_services(void)
         (UINTN)rs_get_next_high_monotonic_count;
     mRuntimeServices.ResetSystem = (UINTN)rs_reset_system;
     mRuntimeServices.QueryVariableInfo = (UINTN)rs_query_variable_info;
+}
+
+static UINTN smbios_ascii_len(const CHAR8 *Str)
+{
+    UINTN Len = 0;
+
+    if (Str == NULL) {
+        return 0;
+    }
+    while (Str[Len] != '\0') {
+        Len++;
+    }
+    return Len;
+}
+
+static BOOLEAN smbios_append_bytes(const VOID *Data, UINTN Size)
+{
+    if (Data == NULL || Size > sizeof(mSmbiosTable) - mSmbiosTableLength) {
+        return 0;
+    }
+    fw_copy_mem(&mSmbiosTable[mSmbiosTableLength], Data, Size);
+    mSmbiosTableLength = (UINT16)(mSmbiosTableLength + Size);
+    return 1;
+}
+
+static BOOLEAN smbios_append_byte(UINT8 Value)
+{
+    if (mSmbiosTableLength >= sizeof(mSmbiosTable)) {
+        return 0;
+    }
+    mSmbiosTable[mSmbiosTableLength++] = Value;
+    return 1;
+}
+
+static BOOLEAN smbios_append_string_set(const CHAR8 * const *Strings,
+                                        UINTN StringCount)
+{
+    UINTN i;
+    UINTN Len;
+
+    if (StringCount == 0) {
+        return smbios_append_byte(0) && smbios_append_byte(0);
+    }
+
+    for (i = 0; i < StringCount; i++) {
+        Len = smbios_ascii_len(Strings[i]);
+        if (!smbios_append_bytes(Strings[i], Len) ||
+            !smbios_append_byte(0)) {
+            return 0;
+        }
+    }
+    return smbios_append_byte(0);
+}
+
+static BOOLEAN smbios_append_structure(const VOID *Formatted,
+                                       UINTN FormattedSize,
+                                       const CHAR8 * const *Strings,
+                                       UINTN StringCount)
+{
+    UINTN Start;
+    UINTN StructureSize;
+
+    if (FormattedSize < sizeof(SMBIOS_STRUCTURE_HEADER) ||
+        FormattedSize > 0xffU) {
+        return 0;
+    }
+
+    Start = mSmbiosTableLength;
+    if (!smbios_append_bytes(Formatted, FormattedSize) ||
+        !smbios_append_string_set(Strings, StringCount)) {
+        return 0;
+    }
+
+    StructureSize = mSmbiosTableLength - Start;
+    if (StructureSize > mSmbiosMaxStructureSize) {
+        mSmbiosMaxStructureSize = (UINT16)StructureSize;
+    }
+    mSmbiosStructureCount++;
+    return 1;
+}
+
+static void smbios_header_init(SMBIOS_STRUCTURE_HEADER *Header,
+                               UINT8 Type, UINTN Length, UINT16 Handle)
+{
+    Header->Type = Type;
+    Header->Length = (UINT8)Length;
+    Header->Handle = Handle;
+}
+
+static BOOLEAN smbios_build_type0(void)
+{
+    static const CHAR8 * const Strings[] = {
+        "QEMU",
+        "ia64-firmware",
+        "01/01/2026",
+    };
+    SMBIOS_TYPE0_BIOS_INFORMATION T;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 0, sizeof(T), 0x0000);
+    T.Vendor = 1;
+    T.BiosVersion = 2;
+    T.BiosStartingAddressSegment = 0xe800;
+    T.BiosReleaseDate = 3;
+    T.BiosRomSize = 0;
+    T.BiosCharacteristics = 0x08;
+    T.BiosCharacteristicsExtensionBytes[1] = 0x18;
+    T.SystemBiosMajorRelease = 0xff;
+    T.SystemBiosMinorRelease = 0xff;
+    T.EmbeddedControllerMajorRelease = 0xff;
+    T.EmbeddedControllerMinorRelease = 0xff;
+    return smbios_append_structure(&T, sizeof(T), Strings,
+                                   FW_ARRAY_SIZE(Strings));
+}
+
+static BOOLEAN smbios_build_type1(void)
+{
+    static const CHAR8 * const Strings[] = {
+        "QEMU",
+        "IA-64 Virtual Platform",
+        "1.0",
+        "0",
+        "IA64-VPC",
+        "Virtual Machine",
+    };
+    SMBIOS_TYPE1_SYSTEM_INFORMATION T;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 1, sizeof(T), 0x0100);
+    T.Manufacturer = 1;
+    T.ProductName = 2;
+    T.Version = 3;
+    T.SerialNumber = 4;
+    T.WakeUpType = 0x06;
+    T.SkuNumber = 5;
+    T.Family = 6;
+    return smbios_append_structure(&T, sizeof(T), Strings,
+                                   FW_ARRAY_SIZE(Strings));
+}
+
+static BOOLEAN smbios_build_type2(void)
+{
+    static const CHAR8 * const Strings[] = {
+        "QEMU",
+        "IA-64 Virtual Board",
+        "1.0",
+        "0",
+        "0",
+        "Mainboard",
+    };
+    SMBIOS_TYPE2_BASEBOARD_INFORMATION T;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 2, sizeof(T), 0x0200);
+    T.Manufacturer = 1;
+    T.Product = 2;
+    T.Version = 3;
+    T.SerialNumber = 4;
+    T.AssetTag = 5;
+    T.FeatureFlags = 0x01;
+    T.LocationInChassis = 6;
+    T.ChassisHandle = 0x0300;
+    T.BoardType = 0x0a;
+    T.ContainedObjectHandleCount = 0;
+    return smbios_append_structure(&T, sizeof(T), Strings,
+                                   FW_ARRAY_SIZE(Strings));
+}
+
+static BOOLEAN smbios_build_type3(void)
+{
+    static const CHAR8 * const Strings[] = {
+        "QEMU",
+        "1.0",
+        "0",
+        "0",
+        "IA64-VPC",
+    };
+    SMBIOS_TYPE3_SYSTEM_ENCLOSURE T;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 3, sizeof(T), 0x0300);
+    T.Manufacturer = 1;
+    T.ChassisType = 0x01;
+    T.Version = 2;
+    T.SerialNumber = 3;
+    T.AssetTag = 4;
+    T.BootUpState = 0x03;
+    T.PowerSupplyState = 0x03;
+    T.ThermalState = 0x03;
+    T.SecurityStatus = 0x02;
+    T.SkuNumber = 5;
+    return smbios_append_structure(&T, sizeof(T), Strings,
+                                   FW_ARRAY_SIZE(Strings));
+}
+
+static BOOLEAN smbios_build_type4(void)
+{
+    static const CHAR8 * const Strings[] = {
+        "CPU 0",
+        "QEMU",
+        "IA-64",
+        "0",
+        "0",
+        "0",
+    };
+    SMBIOS_TYPE4_PROCESSOR_INFORMATION T;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 4, sizeof(T), 0x0400);
+    T.SocketDesignation = 1;
+    T.ProcessorType = 0x03;
+    T.ProcessorFamily = 0x82;
+    T.ProcessorManufacturer = 2;
+    T.ProcessorVersion = 3;
+    T.Status = 0x41;
+    T.ProcessorUpgrade = 0x01;
+    T.L1CacheHandle = 0xffff;
+    T.L2CacheHandle = 0xffff;
+    T.L3CacheHandle = 0xffff;
+    T.SerialNumber = 4;
+    T.AssetTag = 5;
+    T.PartNumber = 6;
+    T.CoreCount = 1;
+    T.CoreEnabled = 1;
+    T.ThreadCount = 1;
+    T.ProcessorCharacteristics = 0x0004;
+    T.ProcessorFamily2 = 0x0082;
+    return smbios_append_structure(&T, sizeof(T), Strings,
+                                   FW_ARRAY_SIZE(Strings));
+}
+
+static BOOLEAN smbios_build_type16(void)
+{
+    SMBIOS_TYPE16_PHYSICAL_MEMORY_ARRAY T;
+    UINT64 SizeKb;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 16, sizeof(T), 0x1000);
+    T.Location = 0x03;
+    T.Use = 0x03;
+    T.ErrorCorrection = 0x03;
+    SizeKb = mGuestLowRamEnd / 1024U;
+    if (SizeKb < 0x80000000ULL) {
+        T.MaximumCapacity = (UINT32)SizeKb;
+        T.ExtendedMaximumCapacity = 0;
+    } else {
+        T.MaximumCapacity = 0x80000000U;
+        T.ExtendedMaximumCapacity = mGuestLowRamEnd;
+    }
+    T.MemoryErrorInformationHandle = 0xfffe;
+    T.NumberOfMemoryDevices = 1;
+    return smbios_append_structure(&T, sizeof(T), NULL, 0);
+}
+
+static BOOLEAN smbios_build_type17(void)
+{
+    static const CHAR8 * const Strings[] = {
+        "DIMM 0",
+        "BANK 0",
+    };
+    SMBIOS_TYPE17_MEMORY_DEVICE T;
+    UINT64 SizeMb;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 17, sizeof(T), 0x1100);
+    T.PhysicalMemoryArrayHandle = 0x1000;
+    T.MemoryErrorInformationHandle = 0xfffe;
+    T.TotalWidth = 64;
+    T.DataWidth = 64;
+    SizeMb = (mGuestLowRamEnd + 0xfffffULL) >> 20;
+    if (SizeMb < 0x7fffULL) {
+        T.Size = (UINT16)SizeMb;
+        T.ExtendedSize = 0;
+    } else {
+        T.Size = 0x7fff;
+        T.ExtendedSize = (UINT32)SizeMb;
+    }
+    T.FormFactor = 0x09;
+    T.DeviceSet = 0;
+    T.DeviceLocator = 1;
+    T.BankLocator = 2;
+    T.MemoryType = 0x07;
+    T.TypeDetail = 0x0002;
+    T.Speed = 0;
+    T.Attributes = 0;
+    T.ConfiguredMemoryClockSpeed = 0;
+    return smbios_append_structure(&T, sizeof(T), Strings,
+                                   FW_ARRAY_SIZE(Strings));
+}
+
+static BOOLEAN smbios_build_type19(void)
+{
+    SMBIOS_TYPE19_MEMORY_ARRAY_MAPPED_ADDRESS T;
+    UINT64 End;
+    UINT64 StartKb;
+    UINT64 EndKb;
+
+    if (mGuestLowRamEnd == 0) {
+        return 0;
+    }
+
+    End = mGuestLowRamEnd - 1U;
+    StartKb = 0;
+    EndKb = End / 1024U;
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 19, sizeof(T), 0x1300);
+    if (EndKb < 0xffffffffULL) {
+        T.StartingAddress = (UINT32)StartKb;
+        T.EndingAddress = (UINT32)EndKb;
+        T.ExtendedStartingAddress = 0;
+        T.ExtendedEndingAddress = 0;
+    } else {
+        T.StartingAddress = 0xffffffffU;
+        T.EndingAddress = 0xffffffffU;
+        T.ExtendedStartingAddress = 0;
+        T.ExtendedEndingAddress = End;
+    }
+    T.MemoryArrayHandle = 0x1000;
+    T.PartitionWidth = 1;
+    return smbios_append_structure(&T, sizeof(T), NULL, 0);
+}
+
+static BOOLEAN smbios_build_type32(void)
+{
+    SMBIOS_TYPE32_SYSTEM_BOOT_INFORMATION T;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 32, sizeof(T), 0x2000);
+    T.BootStatus = 0;
+    return smbios_append_structure(&T, sizeof(T), NULL, 0);
+}
+
+static BOOLEAN smbios_build_type127(void)
+{
+    SMBIOS_TYPE127_END_OF_TABLE T;
+
+    fw_set_mem(&T, sizeof(T), 0);
+    smbios_header_init(&T.Hdr, 127, sizeof(T), 0x7f00);
+    return smbios_append_structure(&T, sizeof(T), NULL, 0);
+}
+
+static void smbios_entry_point_checksum(void)
+{
+    mSmbiosEntryPoint.Checksum = 0;
+    mSmbiosEntryPoint.IntermediateChecksum = 0;
+    mSmbiosEntryPoint.IntermediateChecksum =
+        table_checksum8((const UINT8 *)&mSmbiosEntryPoint + 0x10, 0x0f);
+    mSmbiosEntryPoint.Checksum =
+        table_checksum8(&mSmbiosEntryPoint, sizeof(mSmbiosEntryPoint));
+}
+
+static void smbios_init_table(void)
+{
+    BOOLEAN Ok;
+    UINTN i;
+
+    fw_set_mem(mSmbiosTable, sizeof(mSmbiosTable), 0);
+    fw_set_mem(&mSmbiosEntryPoint, sizeof(mSmbiosEntryPoint), 0);
+    mSmbiosTableLength = 0;
+    mSmbiosStructureCount = 0;
+    mSmbiosMaxStructureSize = 0;
+
+    Ok = smbios_build_type0() &&
+         smbios_build_type1() &&
+         smbios_build_type2() &&
+         smbios_build_type3() &&
+         smbios_build_type4() &&
+         smbios_build_type16() &&
+         smbios_build_type17() &&
+         smbios_build_type19() &&
+         smbios_build_type32() &&
+         smbios_build_type127();
+
+    if (!Ok || (UINTN)mSmbiosTable > 0xffffffffULL) {
+        mSmbiosTableLength = 0;
+        mSmbiosStructureCount = 0;
+        mSmbiosMaxStructureSize = 0;
+        return;
+    }
+
+    mSmbiosEntryPoint.AnchorString[0] = '_';
+    mSmbiosEntryPoint.AnchorString[1] = 'S';
+    mSmbiosEntryPoint.AnchorString[2] = 'M';
+    mSmbiosEntryPoint.AnchorString[3] = '_';
+    mSmbiosEntryPoint.Length = sizeof(mSmbiosEntryPoint);
+    mSmbiosEntryPoint.MajorVersion = 2;
+    mSmbiosEntryPoint.MinorVersion = 7;
+    mSmbiosEntryPoint.MaxStructureSize = mSmbiosMaxStructureSize;
+    mSmbiosEntryPoint.EntryPointRevision = 0;
+    for (i = 0; i < sizeof(mSmbiosEntryPoint.FormattedArea); i++) {
+        mSmbiosEntryPoint.FormattedArea[i] = 0;
+    }
+    mSmbiosEntryPoint.IntermediateAnchorString[0] = '_';
+    mSmbiosEntryPoint.IntermediateAnchorString[1] = 'D';
+    mSmbiosEntryPoint.IntermediateAnchorString[2] = 'M';
+    mSmbiosEntryPoint.IntermediateAnchorString[3] = 'I';
+    mSmbiosEntryPoint.IntermediateAnchorString[4] = '_';
+    mSmbiosEntryPoint.StructureTableLength = mSmbiosTableLength;
+    mSmbiosEntryPoint.StructureTableAddress = (UINT32)(UINTN)mSmbiosTable;
+    mSmbiosEntryPoint.NumberOfStructures = mSmbiosStructureCount;
+    mSmbiosEntryPoint.BcdRevision = 0x27;
+    smbios_entry_point_checksum();
+}
+
+static UINTN smbios_structure_size(const UINT8 *Data, UINTN Remaining)
+{
+    UINTN Pos;
+
+    if (Remaining < sizeof(SMBIOS_STRUCTURE_HEADER) ||
+        Data[1] < sizeof(SMBIOS_STRUCTURE_HEADER) ||
+        Data[1] > Remaining) {
+        return 0;
+    }
+
+    Pos = Data[1];
+    while (Pos + 1U < Remaining) {
+        if (Data[Pos] == 0 && Data[Pos + 1U] == 0) {
+            return Pos + 2U;
+        }
+        Pos++;
+    }
+    return 0;
+}
+
+static UINT16 smbios_get_u16(const UINT8 *Data, UINTN Offset)
+{
+    return (UINT16)((UINT16)Data[Offset] |
+                    ((UINT16)Data[Offset + 1U] << 8));
+}
+
+static BOOLEAN __attribute__((noinline)) smbios_table_integrity_selftest(void)
+{
+    UINTN Offset = 0;
+    UINTN Count = 0;
+    UINTN MaxSize = 0;
+    UINTN Size;
+    UINT16 RequiredTypes = 0;
+
+    if (mSmbiosEntryPoint.AnchorString[0] != '_' ||
+        mSmbiosEntryPoint.AnchorString[1] != 'S' ||
+        mSmbiosEntryPoint.AnchorString[2] != 'M' ||
+        mSmbiosEntryPoint.AnchorString[3] != '_' ||
+        mSmbiosEntryPoint.Length != sizeof(mSmbiosEntryPoint) ||
+        mSmbiosEntryPoint.MajorVersion != 2 ||
+        mSmbiosEntryPoint.MinorVersion != 7 ||
+        mSmbiosEntryPoint.EntryPointRevision != 0 ||
+        mSmbiosEntryPoint.IntermediateAnchorString[0] != '_' ||
+        mSmbiosEntryPoint.IntermediateAnchorString[1] != 'D' ||
+        mSmbiosEntryPoint.IntermediateAnchorString[2] != 'M' ||
+        mSmbiosEntryPoint.IntermediateAnchorString[3] != 'I' ||
+        mSmbiosEntryPoint.IntermediateAnchorString[4] != '_' ||
+        mSmbiosEntryPoint.StructureTableAddress != (UINT32)(UINTN)mSmbiosTable ||
+        mSmbiosEntryPoint.StructureTableLength != mSmbiosTableLength ||
+        mSmbiosEntryPoint.NumberOfStructures != mSmbiosStructureCount ||
+        mSmbiosEntryPoint.BcdRevision != 0x27 ||
+        table_checksum8(&mSmbiosEntryPoint, mSmbiosEntryPoint.Length) != 0 ||
+        table_checksum8((const UINT8 *)&mSmbiosEntryPoint + 0x10, 0x0f) != 0) {
+        return 0;
+    }
+
+    while (Offset < mSmbiosTableLength) {
+        const UINT8 *Data = &mSmbiosTable[Offset];
+        UINT8 Type = Data[0];
+        UINT8 Length = Data[1];
+
+        Size = smbios_structure_size(Data, mSmbiosTableLength - Offset);
+        if (Size == 0) {
+            return 0;
+        }
+        if (Size > MaxSize) {
+            MaxSize = Size;
+        }
+        Count++;
+
+        switch (Type) {
+        case 0:
+            if (Length != sizeof(SMBIOS_TYPE0_BIOS_INFORMATION) ||
+                Data[4] != 1 || Data[5] != 2 || Data[8] != 3 ||
+                Data[0x13] != 0x18) {
+                return 0;
+            }
+            RequiredTypes |= 0x001;
+            break;
+        case 1:
+            if (Length != sizeof(SMBIOS_TYPE1_SYSTEM_INFORMATION) ||
+                Data[4] != 1 || Data[5] != 2 || Data[0x18] != 0x06) {
+                return 0;
+            }
+            RequiredTypes |= 0x002;
+            break;
+        case 2:
+            if (Length != sizeof(SMBIOS_TYPE2_BASEBOARD_INFORMATION) ||
+                smbios_get_u16(Data, 0x0b) != 0x0300 ||
+                Data[0x0d] != 0x0a) {
+                return 0;
+            }
+            RequiredTypes |= 0x004;
+            break;
+        case 3:
+            if (Length != sizeof(SMBIOS_TYPE3_SYSTEM_ENCLOSURE) ||
+                Data[5] != 0x01 || Data[0x0c] != 0x02) {
+                return 0;
+            }
+            RequiredTypes |= 0x008;
+            break;
+        case 4:
+            if (Length != sizeof(SMBIOS_TYPE4_PROCESSOR_INFORMATION) ||
+                Data[5] != 0x03 || Data[6] != 0x82 ||
+                smbios_get_u16(Data, 0x28) != 0x0082) {
+                return 0;
+            }
+            RequiredTypes |= 0x010;
+            break;
+        case 16:
+            if (Length != sizeof(SMBIOS_TYPE16_PHYSICAL_MEMORY_ARRAY) ||
+                Data[4] != 0x03 || Data[5] != 0x03 || Data[6] != 0x03 ||
+                smbios_get_u16(Data, 0x0d) != 1) {
+                return 0;
+            }
+            RequiredTypes |= 0x020;
+            break;
+        case 17:
+            if (Length != sizeof(SMBIOS_TYPE17_MEMORY_DEVICE) ||
+                smbios_get_u16(Data, 4) != 0x1000 ||
+                Data[0x0e] != 0x09 || Data[0x12] != 0x07) {
+                return 0;
+            }
+            RequiredTypes |= 0x040;
+            break;
+        case 19:
+            if (Length != sizeof(SMBIOS_TYPE19_MEMORY_ARRAY_MAPPED_ADDRESS) ||
+                smbios_get_u16(Data, 0x0c) != 0x1000 ||
+                Data[0x0e] != 1) {
+                return 0;
+            }
+            RequiredTypes |= 0x080;
+            break;
+        case 32:
+            if (Length != sizeof(SMBIOS_TYPE32_SYSTEM_BOOT_INFORMATION) ||
+                Data[0x0a] != 0) {
+                return 0;
+            }
+            RequiredTypes |= 0x100;
+            break;
+        case 127:
+            if (Length != sizeof(SMBIOS_TYPE127_END_OF_TABLE) ||
+                Offset + Size != mSmbiosTableLength) {
+                return 0;
+            }
+            RequiredTypes |= 0x200;
+            break;
+        default:
+            break;
+        }
+        Offset += Size;
+    }
+
+    return Offset == mSmbiosTableLength &&
+           Count == mSmbiosStructureCount &&
+           MaxSize == mSmbiosEntryPoint.MaxStructureSize &&
+           RequiredTypes == 0x3ff;
 }
 
 static void efi_init_platform_tables(void)
@@ -8833,6 +10153,7 @@ static void efi_init_platform_tables(void)
     mRsdp.ExtendedChecksum = table_checksum8(&mRsdp, sizeof(mRsdp));
 
     acpi_publish_reclaim_tables();
+    smbios_init_table();
 
     for (i = 0; i < 16; i++) {
         mConfigTables[PLATFORM_TABLE_ACPI20].VendorGuid[i] =
@@ -8854,6 +10175,12 @@ static void efi_init_platform_tables(void)
             gEfiHcdpTableGuid[i];
     }
     mConfigTables[PLATFORM_TABLE_HCDP].VendorTable = (UINTN)mAcpiHcdp;
+    for (i = 0; i < 16; i++) {
+        mConfigTables[PLATFORM_TABLE_SMBIOS].VendorGuid[i] =
+            gEfiSmbiosTableGuid[i];
+    }
+    mConfigTables[PLATFORM_TABLE_SMBIOS].VendorTable =
+        (UINTN)&mSmbiosEntryPoint;
     for (i = 0; i < 16; i++) {
         mConfigTables[PLATFORM_TABLE_LOADED_IMAGE].VendorGuid[i] =
             mLoadedImageProtocolGuid[i];
@@ -9469,6 +10796,7 @@ static void efi_init_static_handles(void)
     mPciAhciHandle = FW_HANDLE_PCI_AHCI;
     mPciOhciHandle = FW_HANDLE_PCI_OHCI;
     mPciUhciHandle = FW_HANDLE_PCI_UHCI;
+    mTcgHandle = FW_HANDLE_TCG;
 }
 
 static void efi_init_system_table(void)
@@ -10484,13 +11812,14 @@ typedef struct {
 #define IDE_BMDMA_STATUS_ERROR  0x02U
 #define IDE_BMDMA_STATUS_INT    0x04U
 #define IDE_BMDMA_PRD_EOT       0x80000000U
+#define IDE_BMDMA_PRD_MAX       8U
 
 typedef struct {
     UINT32 BaseAddress;
     UINT32 ByteCount;
 } __attribute__((packed, aligned(8))) IDE_BMDMA_PRD;
 
-static IDE_BMDMA_PRD mIdeBmdmaPrd;
+static IDE_BMDMA_PRD mIdeBmdmaPrd[IDE_BMDMA_PRD_MAX];
 
 static volatile UINT8 *ata_reg(UINT64 offset)
 {
@@ -10907,6 +12236,8 @@ static BOOLEAN ata_pio_write_sectors(IDE_DEVICE *dev, const UINT8 *buf,
 }
 
 static BOOLEAN ide_bmdma_addr32(const VOID *Ptr, UINT32 *Address);
+static BOOLEAN ide_bmdma_prepare_prdt(const VOID *Buffer, UINT32 ByteCount,
+                                      UINT32 *PrdtAddress);
 static void ide_bmdma_stop(void);
 static BOOLEAN ide_bmdma_wait(UINT32 lba, UINT32 chunk);
 
@@ -10920,26 +12251,19 @@ static BOOLEAN ata_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
         count == 0 || count > 255) {
         return 0;
     }
-    if (!ide_bmdma_addr32(&mIdeBmdmaPrd, &prd_addr)) {
-        return 0;
-    }
 
     while (done < count) {
         UINT32 chunk = (UINT32)(count - done);
-        UINT32 buf_addr;
         UINT32 byte_count;
 
         if (chunk > 255) {
             chunk = 255;
         }
         byte_count = chunk * 512U;
-        if (!ide_bmdma_addr32(buf + done * 512U, &buf_addr)) {
+        if (!ide_bmdma_prepare_prdt(buf + done * 512U, byte_count,
+                                    &prd_addr)) {
             return 0;
         }
-
-        mIdeBmdmaPrd.BaseAddress = buf_addr;
-        mIdeBmdmaPrd.ByteCount = byte_count | IDE_BMDMA_PRD_EOT;
-        __asm__ __volatile__ ("mf" ::: "memory");
 
         ide_select_device(ide_lba_drive_select(dev, lba));
         ide_bmdma_stop();
@@ -10974,26 +12298,19 @@ static BOOLEAN ata_dma_write_sectors(IDE_DEVICE *dev, const UINT8 *buf,
         count == 0 || count > 255) {
         return 0;
     }
-    if (!ide_bmdma_addr32(&mIdeBmdmaPrd, &prd_addr)) {
-        return 0;
-    }
 
     while (done < count) {
         UINT32 chunk = (UINT32)(count - done);
-        UINT32 buf_addr;
         UINT32 byte_count;
 
         if (chunk > 255) {
             chunk = 255;
         }
         byte_count = chunk * 512U;
-        if (!ide_bmdma_addr32(buf + done * 512U, &buf_addr)) {
+        if (!ide_bmdma_prepare_prdt(buf + done * 512U, byte_count,
+                                    &prd_addr)) {
             return 0;
         }
-
-        mIdeBmdmaPrd.BaseAddress = buf_addr;
-        mIdeBmdmaPrd.ByteCount = byte_count | IDE_BMDMA_PRD_EOT;
-        __asm__ __volatile__ ("mf" ::: "memory");
 
         ide_select_device(ide_lba_drive_select(dev, lba));
         ide_bmdma_stop();
@@ -11247,6 +12564,45 @@ static BOOLEAN ide_bmdma_addr32(const VOID *Ptr, UINT32 *Address)
     return 1;
 }
 
+static BOOLEAN ide_bmdma_prepare_prdt(const VOID *Buffer, UINT32 ByteCount,
+                                      UINT32 *PrdtAddress)
+{
+    UINTN addr = (UINTN)Buffer;
+    UINT32 remaining = ByteCount;
+    UINTN entry = 0;
+
+    if (Buffer == NULL || ByteCount == 0 ||
+        !ide_bmdma_addr32(mIdeBmdmaPrd, PrdtAddress)) {
+        return 0;
+    }
+
+    while (remaining > 0) {
+        UINT32 chunk;
+        UINT32 boundary;
+
+        if ((addr >> 32) != 0 || entry >= IDE_BMDMA_PRD_MAX) {
+            return 0;
+        }
+
+        boundary = 0x10000U - ((UINT32)addr & 0xffffU);
+        chunk = remaining < boundary ? remaining : boundary;
+        if (chunk > 0x10000U) {
+            chunk = 0x10000U;
+        }
+
+        mIdeBmdmaPrd[entry].BaseAddress = (UINT32)addr;
+        mIdeBmdmaPrd[entry].ByteCount =
+            chunk == 0x10000U ? 0 : chunk;
+        addr += chunk;
+        remaining -= chunk;
+        entry++;
+    }
+
+    mIdeBmdmaPrd[entry - 1U].ByteCount |= IDE_BMDMA_PRD_EOT;
+    __asm__ __volatile__ ("mf" ::: "memory");
+    return 1;
+}
+
 static void ide_bmdma_stop(void)
 {
     ata_pio_write8(gIde.bmdma_base + IDE_BMDMA_CMD_OFF, 0);
@@ -11297,15 +12653,11 @@ static BOOLEAN atapi_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
     if (dev == NULL || !dev->present || !dev->is_atapi || !gIde.has_bmdma) {
         return 0;
     }
-    if (!ide_bmdma_addr32(&mIdeBmdmaPrd, &prd_addr)) {
-        return 0;
-    }
 
     while (done < count) {
         UINT16 cdb[6];
         UINT32 chunk = count - done;
         UINT32 chunk_lba = lba;
-        UINT32 buf_addr;
         UINT32 byte_count;
 
         if (chunk > ATAPI_MAX_TRANSFER_SECTORS) {
@@ -11313,16 +12665,12 @@ static BOOLEAN atapi_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
         }
         byte_count = chunk * ATAPI_SECTOR_SIZE;
 
-        if (!ide_bmdma_addr32(buf + (UINTN)done * ATAPI_SECTOR_SIZE,
-                              &buf_addr)) {
+        if (!ide_bmdma_prepare_prdt(buf + (UINTN)done * ATAPI_SECTOR_SIZE,
+                                    byte_count, &prd_addr)) {
             return 0;
         }
 
         atapi_build_read10_cdb(cdb, lba, chunk);
-
-        mIdeBmdmaPrd.BaseAddress = buf_addr;
-        mIdeBmdmaPrd.ByteCount = byte_count | IDE_BMDMA_PRD_EOT;
-        __asm__ __volatile__ ("mf" ::: "memory");
 
         ide_select_device(ide_packet_drive_select(dev));
         ide_bmdma_stop();
@@ -11554,6 +12902,9 @@ static EFI_DISK_IO_PROTOCOL  mDiskIoProto;
 static UINT32 mBootImageStartLba;
 static UINT32 mBootImagePartitionBlocks;
 static UINT64 mBootImagePartitionCdBlocks;
+static UINT32 mBootImageFatBlocks;
+static UINT16 mBootImageCatalogSectorCount;
+static BOOLEAN mBootImageUsesUefiSectorCount;
 static UINT32 mCdromBlocks;
 static BOOLEAN mBootImageMapped;
 static BOOLEAN mBootImageChecked;
@@ -11590,7 +12941,12 @@ static BOOLEAN atapi_configure_el_torito(void)
     static UINT8 sec[ATAPI_SECTOR_SIZE];
     UINT32 catalog_lba = 0;
     UINT32 boot_lba;
-    UINT32 total_blocks;
+    UINT32 filesystem_blocks;
+    UINT32 partition_blocks;
+    UINT16 catalog_sector_count;
+    UINT8 platform_id;
+    BOOLEAN have_bpb;
+    BOOLEAN use_uefi_sector_count;
     UINTN i;
 
     if (mBootImageChecked) {
@@ -11627,32 +12983,67 @@ static BOOLEAN atapi_configure_el_torito(void)
         return 0;
     }
 
+    platform_id = sec[1];
     if (sec[0x20] != 0x88) {
         return 0;
     }
 
+    catalog_sector_count = fw_le16(sec + 0x26);
     boot_lba = fw_le32(sec + 0x28);
     if (boot_lba == 0 || !atapi_read_sector(mBootIdeDevice, sec, boot_lba)) {
         return 0;
     }
 
-    if (bpb_is_valid((FAT_BPB *)sec)) {
+    have_bpb = bpb_is_valid((FAT_BPB *)sec);
+    if (have_bpb) {
         FAT_BPB *bpb = (FAT_BPB *)sec;
-        total_blocks = bpb->total_secs_small;
-        if (total_blocks == 0) {
-            total_blocks = bpb->total_secs_large;
+
+        filesystem_blocks = bpb->total_secs_small;
+        if (filesystem_blocks == 0) {
+            filesystem_blocks = bpb->total_secs_large;
         }
     } else {
-        total_blocks = (UINT32)fw_le16(sec + 0x26);
+        filesystem_blocks = catalog_sector_count;
     }
 
-    if (total_blocks == 0) {
+    if (filesystem_blocks == 0) {
+        return 0;
+    }
+
+    /*
+     * EFI Platform ID entries use the catalog Sector Count as the EFI system
+     * partition size.  Older no-emulation FAT boot images without the EFI
+     * Platform ID are not EFI system partitions by that rule; expose the FAT
+     * image described by the BPB so IA-64 EFI media that carry BOOTIA64.EFI in
+     * such an image remain readable.
+     */
+    use_uefi_sector_count = platform_id == 0xef;
+    if (!use_uefi_sector_count && have_bpb) {
+        partition_blocks = filesystem_blocks;
+    } else if (catalog_sector_count <= 1U) {
+        if (mCdromBlocks <= boot_lba ||
+            (UINT64)(mCdromBlocks - boot_lba) > (0xffffffffULL / 4U)) {
+            return 0;
+        }
+        partition_blocks = (mCdromBlocks - boot_lba) * 4U;
+    } else {
+        partition_blocks = catalog_sector_count;
+    }
+    if (partition_blocks == 0) {
+        return 0;
+    }
+    if (mCdromBlocks <= boot_lba ||
+        ((UINT64)partition_blocks + 3U) / 4U >
+            (UINT64)(mCdromBlocks - boot_lba)) {
         return 0;
     }
 
     mBootImageStartLba = boot_lba;
-    mBootImagePartitionBlocks = total_blocks;
-    mBootImagePartitionCdBlocks = ((UINT64)total_blocks + 3) / 4;
+    mBootImagePartitionBlocks = partition_blocks;
+    mBootImagePartitionCdBlocks = ((UINT64)partition_blocks + 3U) / 4U;
+    mBootImageFatBlocks = filesystem_blocks;
+    mBootImageCatalogSectorCount = catalog_sector_count;
+    mBootImageUsesUefiSectorCount = use_uefi_sector_count;
     mBootImageMapped = 1;
     return 1;
 }
@@ -11848,6 +13239,8 @@ EFI_STATUS blk_read(EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId,
     st = blk_validate_transfer(This, MediaId, Lba, BufferSize, Buffer,
                                &media, &dev, &block_count);
     if (st != EFI_SUCCESS || BufferSize == 0) {
+        if (st != EFI_SUCCESS) {
+        }
         return st;
     }
 
@@ -13158,6 +14551,39 @@ static BOOLEAN __attribute__((noinline)) optical_raw_device_path_selftest(void)
            fw_device_path_size((const FW_DEVICE_PATH_NODE *)
                                &mRawBlockDevicePath) ==
                sizeof(mRawBlockDevicePath);
+}
+
+static BOOLEAN __attribute__((noinline)) el_torito_partition_selftest(void)
+{
+    UINT64 expected_cd_blocks;
+
+    if (mBootIdeDevice == NULL || !mBootIdeDevice->present ||
+        !mBootIdeDevice->is_atapi || !mBootImageMapped) {
+        return 1;
+    }
+    if (mBootImageFatBlocks == 0 ||
+        mBootImagePartitionBlocks < mBootImageFatBlocks) {
+        return 0;
+    }
+
+    if (mBootImageUsesUefiSectorCount &&
+        mBootImageCatalogSectorCount <= 1U) {
+        if (mCdromBlocks <= mBootImageStartLba) {
+            return 0;
+        }
+        expected_cd_blocks = (UINT64)(mCdromBlocks - mBootImageStartLba);
+    } else {
+        expected_cd_blocks = ((UINT64)mBootImagePartitionBlocks + 3U) / 4U;
+    }
+
+    return mBootImagePartitionCdBlocks == expected_cd_blocks &&
+           mBlockIoMedia.LastBlock + 1U ==
+               mBootImagePartitionBlocks &&
+           mBlockDevicePath.Cdrom.PartitionStart == mBootImageStartLba &&
+           mBlockDevicePath.Cdrom.PartitionSize ==
+               mBootImagePartitionCdBlocks &&
+           mBootFullDevicePath.Cdrom.PartitionSize ==
+               mBootImagePartitionCdBlocks;
 }
 
 static EFI_HANDLE mLoadedImageUnloadSelftestHandle;
@@ -15469,14 +16895,16 @@ static EFI_STATUS fs_file_open(EFI_FILE_PROTOCOL *This,
                                UINT64 Attributes)
 {
     FW_FILE *file = fw_file_from_proto(This);
+    EFI_STATUS st;
 
     if (file != NULL && file->fs_kind == FW_FS_UDF) {
-        return udf_file_open(This, NewHandle, FileName, OpenMode, Attributes);
+        st = udf_file_open(This, NewHandle, FileName, OpenMode, Attributes);
+    } else if (file != NULL && file->fs_kind == FW_FS_ISO) {
+        st = iso_file_open(This, NewHandle, FileName, OpenMode, Attributes);
+    } else {
+        st = fat_file_open(This, NewHandle, FileName, OpenMode, Attributes);
     }
-    if (file != NULL && file->fs_kind == FW_FS_ISO) {
-        return iso_file_open(This, NewHandle, FileName, OpenMode, Attributes);
-    }
-    return fat_file_open(This, NewHandle, FileName, OpenMode, Attributes);
+    return st;
 }
 
 static BOOLEAN fat_dir_entry_visible(const FAT_DIR_ENTRY *entry)
@@ -16406,6 +17834,11 @@ static const UINT8 mPciRootBridgeIoProtocolGuid[16] = {
 static const UINT8 mPciIoProtocolGuid[16] = {
     0x00, 0xb2, 0xf5, 0x4c, 0xb8, 0x68, 0xa5, 0x4c,
     0x9e, 0xec, 0xb2, 0x3e, 0x3f, 0x50, 0x02, 0x9a
+};
+
+static const UINT8 mTcgProtocolGuid[16] = {
+    0x6d, 0x79, 0x41, 0xf5, 0x2e, 0xa6, 0x54, 0x49,
+    0xa7, 0x75, 0x95, 0x84, 0xf6, 0x1b, 0x9c, 0xdd
 };
 
 static const FW_PCI_ROOT_BRIDGE_RESOURCES mPciRootBridgeResources = {
@@ -18984,6 +20417,9 @@ EFI_STATUS bs_locate_protocol(void *Protocol, VOID *Registration, VOID **Interfa
     handle = handles[0];
     st = bs_handle_protocol(handle, Protocol, Interface);
     (void)bs_free_pool(handles);
+    if (st != EFI_SUCCESS) {
+    } else {
+    }
     return st;
 }
 
@@ -19781,13 +21217,14 @@ EFI_STATUS rs_get_variable(CHAR16 *VariableName, void *VendorGuid,
             return EFI_NOT_FOUND;
         }
         return rs_copy_variable(mNvramVars[index].attributes,
-                                mNvramVars[index].data,
-                                mNvramVars[index].data_size,
-                                Attributes, DataSize, Data);
+                                            mNvramVars[index].data,
+                                            mNvramVars[index].data_size,
+                                            Attributes, DataSize, Data);
     }
 
     if (rs_find_firmware_variable(VariableName, VendorGuid, &index)) {
-        return rs_get_firmware_variable(index, Attributes, DataSize, Data);
+        return rs_get_firmware_variable(index, Attributes,
+                                                    DataSize, Data);
     }
 
     return EFI_NOT_FOUND;
@@ -19958,9 +21395,10 @@ EFI_STATUS rs_get_next_var_name(UINTN *VariableNameSize,
             rs_variable_visible(mFirmwareVariables[index].attributes) &&
             !rs_firmware_variable_deleted(index)) {
             return rs_copy_ascii_variable_name(
-                mFirmwareVariables[index].name,
-                mFirmwareVariables[index].guid,
-                VariableNameSize, VariableName, VendorGuid);
+                                    mFirmwareVariables[index].name,
+                                    mFirmwareVariables[index].guid,
+                                    VariableNameSize, VariableName,
+                                    VendorGuid);
         }
     }
 
@@ -19975,8 +21413,9 @@ EFI_STATUS rs_get_next_var_name(UINTN *VariableNameSize,
             continue;
         }
         return rs_copy_nvram_variable_name(&mNvramVars[index],
-                                           VariableNameSize, VariableName,
-                                           VendorGuid);
+                                                        VariableNameSize,
+                                                        VariableName,
+                                                        VendorGuid);
     }
 
     return EFI_NOT_FOUND;
@@ -20005,6 +21444,7 @@ EFI_STATUS rs_query_variable_info(UINT32 Attributes,
     if (MaximumVariableStorageSize == NULL ||
         RemainingVariableStorageSize == NULL ||
         MaximumVariableSize == NULL) {
+        effective_attributes = 0;
         return EFI_INVALID_PARAMETER;
     }
 
@@ -20355,6 +21795,9 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     efi_init_conout();
     ps2_init_controller();
     efi_init_static_handles();
+    if (!tcg_install_protocol()) {
+        mTcgHandle = NULL;
+    }
     efi_init_system_table();
     efi_init_platform_tables();
     efi_init_loaded_image_proto();
@@ -20476,6 +21919,10 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     uart_puts(optical_raw_device_path_selftest() ?
               " whole-media ATAPI path verified\r\n" :
               " verification failed\r\n");
+    uart_puts("El Torito Mapping:    ");
+    uart_puts(el_torito_partition_selftest() ?
+              "partition verified\r\n" :
+              "verification failed\r\n");
     mSimpleFsProto.Revision = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_REVISION;
     mSimpleFsProto.OpenVolume = fat_open_volume;
     mOpticalSimpleFsProto.Revision = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_REVISION;
@@ -20597,6 +22044,10 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     uart_puts("FPSWA Protocol:       ");
     uart_puts(fpswa_protocol_selftest() ? "published (visibility fallback)\r\n" :
               "verification failed\r\n");
+    uart_puts("TCG EFI Protocol:     ");
+    uart_puts(tcg_protocol_selftest() ?
+              "published (TPM not present, SHA-1 HashAll)\r\n" :
+              "verification failed\r\n");
     uart_puts("SetVirtualAddressMap/ConvertPointer: enabled\r\n");
     uart_puts("NVRAM Variables:      enabled\r\n");
     nvram_variable_selftest_ok = runtime_variable_selftest();
@@ -20605,6 +22056,10 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
               "verification failed\r\n");
     uart_puts("ResetSystem:          enabled\r\n");
     uart_puts("SAL System Table:     published\r\n");
+    uart_puts("SMBIOS Table:         published\r\n");
+    uart_puts("SMBIOS Table Checks:  ");
+    uart_puts(smbios_table_integrity_selftest() ? "entry point verified\r\n" :
+              "verification failed\r\n");
     uart_puts("ACPI RSDP/RSDT/XSDT/FADT: published\r\n");
     uart_puts("ACPI FACS/DSDT:       published\r\n");
     uart_puts("ACPI MADT (SAPIC):    published\r\n");

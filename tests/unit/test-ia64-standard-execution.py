@@ -86,6 +86,9 @@ EFI_SAL_SYSTEM_TABLE_GUID = bytes.fromhex(
 EFI_HCDP_TABLE_GUID = bytes.fromhex(
     "8d 93 51 f9 0b 62 ef 42 82 79 a8 4b 79 61 78 98"
 )
+EFI_SMBIOS_TABLE_GUID = bytes.fromhex(
+    "31 2d 9d eb 88 2d d3 11 9a 16 00 90 27 3f c1 4d"
+)
 
 
 def load_csv(root, domain):
@@ -730,6 +733,8 @@ def test_sal_efi_firmware_boot_contract(qemu, firmware):
         "SAL Set Vectors:      argument checks verified",
         "SAL Frequency Base:   optional clocks verified",
         "SAL State Info:       no-log paths verified",
+        "SMBIOS Table:         published",
+        "SMBIOS Table Checks:  entry point verified",
         "ACPI RSDP/RSDT/XSDT/FADT: published",
         "ACPI MADT (SAPIC):    published",
         "ACPI SRAT/SLIT:       published",
@@ -755,12 +760,19 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     symbols = objdump_symbols(elf_path)
     runtime_names = [
         "mSystemTable", "mConfigTables", "mSalSystemTable",
+        "mSmbiosEntryPoint", "mSmbiosTable", "mSmbiosTableLength",
+        "mSmbiosStructureCount", "mSmbiosMaxStructureSize",
         "mMemoryMapEntries", "mMemoryMap",
     ]
     runtime = qemu_runtime_symbol_bytes(qemu, firmware, symbols, runtime_names)
     memory_map = parse_efi_memory_map(
         runtime["mMemoryMap"], u64(runtime["mMemoryMapEntries"], 0)
     )
+    if any(
+            memory_map[index - 1]["physical_start"] >
+            memory_map[index]["physical_start"]
+            for index in range(1, len(memory_map))):
+        raise RuntimeError("EFI memory map is not sorted by physical address")
 
     system_table = runtime["mSystemTable"]
     config_count = u64(system_table, 104)
@@ -780,6 +792,8 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         raise RuntimeError("EFI ACPI 1.0 and 2.0 GUIDs must both reference RSDP")
     if config.get(EFI_SAL_SYSTEM_TABLE_GUID) != symbols["mSalSystemTable"][0]:
         raise RuntimeError("EFI configuration table does not reference SAL table")
+    if config.get(EFI_SMBIOS_TABLE_GUID) != symbols["mSmbiosEntryPoint"][0]:
+        raise RuntimeError("EFI configuration table does not reference SMBIOS")
 
     def find_efi_descriptor(name, memory_type, addr, size,
                             required_attr=0):
@@ -802,22 +816,148 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         runtime_data_attr,
     )
     find_efi_descriptor(
+        "SMBIOS entry point", EFI_RUNTIME_SERVICES_DATA,
+        symbols["mSmbiosEntryPoint"][0], symbols["mSmbiosEntryPoint"][1],
+        runtime_data_attr,
+    )
+    find_efi_descriptor(
+        "SMBIOS structure table", EFI_RUNTIME_SERVICES_DATA,
+        symbols["mSmbiosTable"][0], symbols["mSmbiosTable"][1],
+        runtime_data_attr,
+    )
+    find_efi_descriptor(
         "PCI MMIO window", EFI_MEMORY_MAPPED_IO,
         PCI_MMIO_BASE, PCI_MMIO_SIZE, EFI_MEMORY_UC,
     )
-    find_efi_descriptor(
-        "PCI sparse I/O port window", EFI_MEMORY_MAPPED_IO_PORT_SPACE,
-        LEGACY_IO_BASE + EFI_PAGE_SIZE,
-        PCI_IO_SPARSE_SIZE - EFI_PAGE_SIZE, EFI_MEMORY_UC,
-    )
-    find_efi_descriptor(
-        "runtime reset I/O port page", EFI_MEMORY_MAPPED_IO_PORT_SPACE,
-        LEGACY_IO_BASE, EFI_PAGE_SIZE, EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
-    )
+    io_port_descs = [
+        desc for desc in memory_map
+        if desc["type"] == EFI_MEMORY_MAPPED_IO_PORT_SPACE
+    ]
+    if len(io_port_descs) != 1:
+        raise RuntimeError("IA-64 EFI memory map must expose one I/O port space")
+    io_port_desc = io_port_descs[0]
+    if (io_port_desc["physical_start"] != LEGACY_IO_BASE or
+            io_port_desc["pages"] * EFI_PAGE_SIZE != PCI_IO_SPARSE_SIZE or
+            (io_port_desc["attribute"] &
+             (EFI_MEMORY_UC | EFI_MEMORY_RUNTIME)) !=
+            (EFI_MEMORY_UC | EFI_MEMORY_RUNTIME)):
+        raise RuntimeError("PCI sparse I/O port window descriptor mismatch")
     find_efi_descriptor(
         "runtime ACPI PM window", EFI_MEMORY_MAPPED_IO,
         ACPI_PM_BASE, 0x2000, EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
     )
+
+    smbios_ep = runtime["mSmbiosEntryPoint"]
+    if (len(smbios_ep) != 31 or smbios_ep[:4] != b"_SM_" or
+            smbios_ep[5] != 0x1f or smbios_ep[6] != 2 or
+            smbios_ep[7] != 7 or smbios_ep[0x10:0x15] != b"_DMI_" or
+            smbios_ep[0x1e] != 0x27):
+        raise RuntimeError("SMBIOS 2.7 entry point signature/version mismatch")
+    if checksum8(smbios_ep[:smbios_ep[5]]) != 0:
+        raise RuntimeError("SMBIOS entry point checksum mismatch")
+    if checksum8(smbios_ep[0x10:0x1f]) != 0:
+        raise RuntimeError("SMBIOS intermediate checksum mismatch")
+    smbios_table_len = u16(smbios_ep, 0x16)
+    smbios_table_addr = u32(smbios_ep, 0x18)
+    smbios_struct_count = u16(smbios_ep, 0x1c)
+    smbios_max_struct_size = u16(smbios_ep, 0x08)
+    if smbios_table_addr != symbols["mSmbiosTable"][0]:
+        raise RuntimeError("SMBIOS entry point table address mismatch")
+    if smbios_table_len != u16(runtime["mSmbiosTableLength"], 0):
+        raise RuntimeError("SMBIOS entry point table length mismatch")
+    if smbios_struct_count != u16(runtime["mSmbiosStructureCount"], 0):
+        raise RuntimeError("SMBIOS entry point structure count mismatch")
+    if smbios_max_struct_size != u16(runtime["mSmbiosMaxStructureSize"], 0):
+        raise RuntimeError("SMBIOS entry point maximum structure size mismatch")
+
+    def smbios_structures(table):
+        off = 0
+        structures = []
+        while off < len(table):
+            if off + 4 > len(table):
+                raise RuntimeError("SMBIOS truncated structure header")
+            formatted_len = table[off + 1]
+            if formatted_len < 4 or off + formatted_len > len(table):
+                raise RuntimeError("SMBIOS invalid formatted structure length")
+            end = off + formatted_len
+            while end + 1 < len(table):
+                if table[end] == 0 and table[end + 1] == 0:
+                    end += 2
+                    break
+                end += 1
+            else:
+                raise RuntimeError("SMBIOS structure missing double-NUL terminator")
+            structures.append(table[off:end])
+            if table[off] == 127 and end != len(table):
+                raise RuntimeError("SMBIOS end-of-table is not the last structure")
+            off = end
+        return structures
+
+    def smbios_strings(structure):
+        text = structure[structure[1]:-2]
+        if not text:
+            return []
+        return text.split(b"\0")
+
+    smbios_table = runtime["mSmbiosTable"][:smbios_table_len]
+    smbios = smbios_structures(smbios_table)
+    if len(smbios) != smbios_struct_count:
+        raise RuntimeError("SMBIOS parsed structure count mismatch")
+    if max(len(entry) for entry in smbios) != smbios_max_struct_size:
+        raise RuntimeError("SMBIOS parsed maximum structure size mismatch")
+    smbios_by_type = {entry[0]: entry for entry in smbios}
+    required_smbios_types = {0, 1, 2, 3, 4, 16, 17, 19, 32, 127}
+    if set(smbios_by_type) != required_smbios_types:
+        raise RuntimeError("SMBIOS required type set mismatch")
+
+    t0 = smbios_by_type[0]
+    if (t0[1] != 0x18 or t0[4] != 1 or t0[5] != 2 or
+            t0[8] != 3 or u64(t0, 0x0a) != 0x08 or t0[0x13] != 0x18):
+        raise RuntimeError("SMBIOS Type 0 BIOS information mismatch")
+    if smbios_strings(t0) != [b"QEMU", b"ia64-firmware", b"01/01/2026"]:
+        raise RuntimeError("SMBIOS Type 0 string set mismatch")
+
+    t1 = smbios_by_type[1]
+    if t1[1] != 0x1b or t1[0x18] != 0x06:
+        raise RuntimeError("SMBIOS Type 1 system information mismatch")
+    if smbios_strings(t1)[:2] != [b"QEMU", b"IA-64 Virtual Platform"]:
+        raise RuntimeError("SMBIOS Type 1 identity strings mismatch")
+
+    t4 = smbios_by_type[4]
+    if (t4[1] != 0x2a or t4[5] != 0x03 or t4[6] != 0x82 or
+            t4[0x18] != 0x41 or u16(t4, 0x28) != 0x0082 or
+            u16(t4, 0x26) != 0x0004):
+        raise RuntimeError("SMBIOS Type 4 IA-64 processor fields mismatch")
+
+    t16 = smbios_by_type[16]
+    if (t16[1] != 0x17 or t16[4] != 0x03 or t16[5] != 0x03 or
+            t16[6] != 0x03 or u16(t16, 0x0b) != 0xfffe or
+            u16(t16, 0x0d) != 1):
+        raise RuntimeError("SMBIOS Type 16 physical memory array mismatch")
+
+    t17 = smbios_by_type[17]
+    if (t17[1] != 0x22 or u16(t17, 4) != 0x1000 or
+            u16(t17, 6) != 0xfffe or u16(t17, 8) != 64 or
+            u16(t17, 0x0a) != 64 or t17[0x0e] != 0x09 or
+            t17[0x12] != 0x07 or u16(t17, 0x13) != 0x0002):
+        raise RuntimeError("SMBIOS Type 17 memory device mismatch")
+
+    t19 = smbios_by_type[19]
+    if (t19[1] != 0x1f or u32(t19, 4) != 0 or
+            u16(t19, 0x0c) != 0x1000 or t19[0x0e] != 1):
+        raise RuntimeError("SMBIOS Type 19 memory array mapping mismatch")
+    mapped_mb = (u32(t19, 8) + 1) >> 10
+    if mapped_mb < 0x7fff and u16(t17, 0x0c) != mapped_mb:
+        raise RuntimeError("SMBIOS memory device size and mapped range mismatch")
+    if mapped_mb >= 0x7fff and (
+            u16(t17, 0x0c) != 0x7fff or u32(t17, 0x1c) != mapped_mb):
+        raise RuntimeError("SMBIOS memory device size and mapped range mismatch")
+
+    t32 = smbios_by_type[32]
+    if t32[1] != 0x0b or t32[4:10] != b"\0" * 6 or t32[0x0a] != 0:
+        raise RuntimeError("SMBIOS Type 32 boot status mismatch")
+    if smbios_by_type[127][1] != 4:
+        raise RuntimeError("SMBIOS Type 127 end-of-table mismatch")
 
     def require_acpi_reclaim(name, addr, size, align=8):
         reclaim_desc = find_efi_descriptor(
