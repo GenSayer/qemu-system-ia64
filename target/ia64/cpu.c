@@ -43,6 +43,7 @@ typedef struct DisasContext {
     bool current_ri_known;
     bool track_iipa;
     bool track_psr_suppression;
+    bool be_data;
     TCGLabel *counted_self_label;
     TCGv_i64 counted_self_budget;
     uint64_t counted_self_ip;
@@ -70,6 +71,7 @@ static TCGv_i64 cpu_nat[2];
 #define IA64_TB_FLAG_RI_MASK  (3u << IA64_TB_FLAG_RI_SHIFT)
 #define IA64_TB_FLAG_PSR_SUPPRESS (1u << 4)
 #define IA64_TB_FLAG_PSR_IC       (1u << 5)
+#define IA64_TB_FLAG_BE           (1u << 6)
 
 #define IA64_COUNTED_SELF_BUDGET 4096
 #define IA64_CLOOP_ZERO_ST1_MAX IA64_COUNTED_SELF_BUDGET
@@ -1314,6 +1316,19 @@ static MemOp ia64_memop_for_opcode(Ia64Opcode opcode)
         break;
     }
     g_assert_not_reached();
+}
+
+static MemOp ia64_memop_with_endian(MemOp memop, bool big_endian)
+{
+    if ((memop & MO_SIZE) == MO_8) {
+        return memop & ~MO_BSWAP;
+    }
+    return (memop & ~MO_BSWAP) | (big_endian ? MO_BE : MO_LE);
+}
+
+static MemOp ia64_data_memop(DisasContext *ctx, MemOp memop)
+{
+    return ia64_memop_with_endian(memop, ctx->be_data);
 }
 
 static uint32_t ia64_memop_size(MemOp memop)
@@ -6293,7 +6308,7 @@ static void ia64_gen_speculative_load(DisasContext *ctx,
                                       const Ia64Instruction *insn,
                                       bool advanced)
 {
-    MemOp mop = ia64_memop_for_opcode(insn->opcode);
+    MemOp mop = ia64_data_memop(ctx, ia64_memop_for_opcode(insn->opcode));
     TCGv_i64 addr;
     TCGv_i64 increment = NULL;
     TCGv_i64 base_nat = NULL;
@@ -6374,13 +6389,16 @@ static void ia64_gen_fp_load_value(DisasContext *ctx,
 {
     switch (insn->opcode) {
     case IA64_OP_LDFS:
-        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx, MO_LEUL);
+        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx,
+                       ia64_data_memop(ctx, MO_LEUL));
         break;
     case IA64_OP_LDFD:
-        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx, MO_LEUQ);
+        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx,
+                       ia64_data_memop(ctx, MO_LEUQ));
         break;
     case IA64_OP_LDF8:
-        ia64_gen_fr_ld_sig(insn->r1, addr, ctx->mmu_idx, MO_LEUQ);
+        ia64_gen_fr_ld_sig(insn->r1, addr, ctx->mmu_idx,
+                           ia64_data_memop(ctx, MO_LEUQ));
         break;
     case IA64_OP_LDF_FILL:
         gen_helper_ldf_fill(tcg_env, tcg_constant_i32(insn->r1), addr);
@@ -6515,19 +6533,25 @@ static void ia64_gen_fp_load_pair_value(DisasContext *ctx,
 
     switch (insn->opcode) {
     case IA64_OP_LDFPS:
-        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx, MO_LEUL);
+        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx,
+                       ia64_data_memop(ctx, MO_LEUL));
         tcg_gen_addi_i64(second, addr, 4);
-        ia64_gen_fr_ld(insn->r2, second, ctx->mmu_idx, MO_LEUL);
+        ia64_gen_fr_ld(insn->r2, second, ctx->mmu_idx,
+                       ia64_data_memop(ctx, MO_LEUL));
         break;
     case IA64_OP_LDFPD:
-        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx, MO_LEUQ);
+        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx,
+                       ia64_data_memop(ctx, MO_LEUQ));
         tcg_gen_addi_i64(second, addr, 8);
-        ia64_gen_fr_ld(insn->r2, second, ctx->mmu_idx, MO_LEUQ);
+        ia64_gen_fr_ld(insn->r2, second, ctx->mmu_idx,
+                       ia64_data_memop(ctx, MO_LEUQ));
         break;
     case IA64_OP_LDFP8:
-        ia64_gen_fr_ld_sig(insn->r1, addr, ctx->mmu_idx, MO_LEUQ);
+        ia64_gen_fr_ld_sig(insn->r1, addr, ctx->mmu_idx,
+                           ia64_data_memop(ctx, MO_LEUQ));
         tcg_gen_addi_i64(second, addr, 8);
-        ia64_gen_fr_ld_sig(insn->r2, second, ctx->mmu_idx, MO_LEUQ);
+        ia64_gen_fr_ld_sig(insn->r2, second, ctx->mmu_idx,
+                           ia64_data_memop(ctx, MO_LEUQ));
         break;
     default:
         g_assert_not_reached();
@@ -7994,7 +8018,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_load_reg_base_update_inputs(insn, &increment, &base_nat,
                                                  &increment_nat);
             if (insn->r1 != 0) {
-                MemOp mop = ia64_memop_for_opcode(insn->opcode);
+                MemOp mop = ia64_data_memop(
+                    ctx, ia64_memop_for_opcode(insn->opcode));
 
                 ia64_gen_check_nat_non_access(insn, insn->r3, false);
                 ia64_gen_check_alignment(insn, addr, ia64_memop_size(mop),
@@ -8032,7 +8057,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_load_reg_base_update_inputs(insn, &increment, &base_nat,
                                                  &increment_nat);
             if (insn->r1 != 0) {
-                MemOp mop = ia64_memop_for_opcode(insn->opcode);
+                MemOp mop = ia64_data_memop(
+                    ctx, ia64_memop_for_opcode(insn->opcode));
 
                 ia64_gen_check_nat_non_access(insn, insn->r3, false);
                 ia64_gen_check_alignment(insn, addr, ia64_memop_size(mop),
@@ -8072,7 +8098,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_load_reg_base_update_inputs(insn, &increment, &base_nat,
                                                  &increment_nat);
             if (insn->r1 != 0) {
-                MemOp mop = ia64_memop_for_opcode(insn->opcode);
+                MemOp mop = ia64_data_memop(
+                    ctx, ia64_memop_for_opcode(insn->opcode));
 
                 ia64_gen_check_nat_non_access(insn, insn->r3, false);
                 ia64_gen_check_alignment(insn, addr, ia64_memop_size(mop),
@@ -8107,7 +8134,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_load_reg_base_update_inputs(insn, &increment, &base_nat,
                                              &increment_nat);
         if (insn->r1 != 0) {
-            MemOp mop = ia64_memop_for_opcode(insn->opcode);
+            MemOp mop = ia64_data_memop(
+                ctx, ia64_memop_for_opcode(insn->opcode));
             const bool clear = insn->opcode >= IA64_OP_LD1C_CLR &&
                                insn->opcode <= IA64_OP_LD8C_CLR;
             TCGv_i64 hit = tcg_temp_new_i64();
@@ -8154,9 +8182,11 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 16, false,
                                      false);
             tcg_gen_qemu_ld_i64(low, ia64_gr_src(insn->r3),
-                                ctx->mmu_idx, MO_LEUQ);
+                                ctx->mmu_idx,
+                                ia64_data_memop(ctx, MO_LEUQ));
             tcg_gen_addi_i64(high_addr, ia64_gr_src(insn->r3), 8);
-            tcg_gen_qemu_ld_i64(high, high_addr, ctx->mmu_idx, MO_LEUQ);
+            tcg_gen_qemu_ld_i64(high, high_addr, ctx->mmu_idx,
+                                ia64_data_memop(ctx, MO_LEUQ));
             ia64_gen_memory_acquire(insn);
             if (insn->r1 != 0) {
                 ia64_gen_gr_nat_clear(insn->r1);
@@ -8176,10 +8206,11 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_memory_release(insn);
             tcg_gen_qemu_st_i64(ia64_gr_src(insn->r2),
                                 ia64_gr_src(insn->r3), ctx->mmu_idx,
-                                MO_LEUQ);
+                                ia64_data_memop(ctx, MO_LEUQ));
             tcg_gen_addi_i64(high_addr, ia64_gr_src(insn->r3), 8);
             gen_helper_read_ar(high, tcg_env, tcg_constant_i32(25));
-            tcg_gen_qemu_st_i64(high, high_addr, ctx->mmu_idx, MO_LEUQ);
+            tcg_gen_qemu_st_i64(high, high_addr, ctx->mmu_idx,
+                                ia64_data_memop(ctx, MO_LEUQ));
             ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 16);
         }
         break;
@@ -8195,7 +8226,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_ST2SPILL:
     case IA64_OP_ST4SPILL:
     case IA64_OP_ST8SPILL: {
-        MemOp mop = ia64_memop_for_opcode(insn->opcode);
+        MemOp mop = ia64_data_memop(ctx,
+                                    ia64_memop_for_opcode(insn->opcode));
         bool spill = insn->opcode >= IA64_OP_ST1SPILL &&
                      insn->opcode <= IA64_OP_ST8SPILL;
         TCGv_i64 addr = tcg_temp_new_i64();
@@ -8692,7 +8724,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 8, false,
                                  true);
         tcg_gen_qemu_st_i64(ia64_fr_src(insn->r2), ia64_gr_src(insn->r3),
-                             ctx->mmu_idx, MO_LEUQ);
+                             ctx->mmu_idx, ia64_data_memop(ctx, MO_LEUQ));
         ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 8);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
@@ -8703,7 +8735,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 4, false,
                                  true);
         tcg_gen_qemu_st_i64(ia64_fr_src(insn->r2), ia64_gr_src(insn->r3),
-                             ctx->mmu_idx, MO_LEUL);
+                             ctx->mmu_idx, ia64_data_memop(ctx, MO_LEUL));
         ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 4);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
@@ -8726,7 +8758,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 8, false,
                                  true);
         tcg_gen_qemu_st_i64(ia64_fr_src(insn->r2), ia64_gr_src(insn->r3),
-                             ctx->mmu_idx, MO_LEUQ);
+                             ctx->mmu_idx, ia64_data_memop(ctx, MO_LEUQ));
         ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 8);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
@@ -9484,7 +9516,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_XCHG2:
     case IA64_OP_XCHG4:
     case IA64_OP_XCHG8: {
-        MemOp memop = ia64_memop_for_opcode(insn->opcode);
+        MemOp memop = ia64_data_memop(ctx,
+                                      ia64_memop_for_opcode(insn->opcode));
         uint32_t size = ia64_memop_size(memop);
         TCGv_i64 addr = tcg_temp_new_i64();
         TCGv_i64 value = tcg_temp_new_i64();
@@ -9509,7 +9542,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_CMPXCHG2:
     case IA64_OP_CMPXCHG4:
     case IA64_OP_CMPXCHG8: {
-        MemOp memop = ia64_memop_for_opcode(insn->opcode);
+        MemOp memop = ia64_data_memop(ctx,
+                                      ia64_memop_for_opcode(insn->opcode));
         uint32_t size = ia64_memop_size(memop);
         TCGv_i64 addr = tcg_temp_new_i64();
         TCGv_i64 value = tcg_temp_new_i64();
@@ -9553,7 +9587,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     }
     case IA64_OP_FETCHADD4:
     case IA64_OP_FETCHADD8: {
-        MemOp memop = ia64_memop_for_opcode(insn->opcode);
+        MemOp memop = ia64_data_memop(ctx,
+                                      ia64_memop_for_opcode(insn->opcode));
         uint32_t size = ia64_memop_size(memop);
         TCGv_i64 addend = insn->imm ?
                            tcg_constant_i64(insn->imm) :
@@ -10254,6 +10289,9 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     }
     if (cpu->env.psr & IA64_PSR_IC) {
         flags |= IA64_TB_FLAG_PSR_IC;
+    }
+    if (cpu->env.psr & IA64_PSR_BE) {
+        flags |= IA64_TB_FLAG_BE;
     }
     flags |= ((cpu->env.psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT)
              << IA64_TB_FLAG_RI_SHIFT;
@@ -11056,7 +11094,9 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
         bool check_load_no_clear =
             ia64_opcode_is_check_load_no_clear(insn.opcode);
 
-        memop = ia64_memop_for_opcode(insn.opcode);
+        memop = ia64_memop_with_endian(
+            ia64_memop_for_opcode(insn.opcode),
+            (env->psr & IA64_PSR_BE) != 0);
         size = ia64_memop_size(memop);
         addr = env->gr[insn.r3];
         if (addr != fault_addr || ((addr & 0xfff) + size - 1) > 0xfff) {
@@ -11122,7 +11162,9 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
     }
 
     if (ia64_opcode_has_firmware_unaligned_store_assist(insn.opcode)) {
-        memop = ia64_memop_for_opcode(insn.opcode);
+        memop = ia64_memop_with_endian(
+            ia64_memop_for_opcode(insn.opcode),
+            (env->psr & IA64_PSR_BE) != 0);
         size = ia64_memop_size(memop);
         addr = env->gr[insn.r3];
         if (addr != fault_addr ||
@@ -11730,6 +11772,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->track_iipa = ctx->base.tb->flags & IA64_TB_FLAG_PSR_IC;
     ctx->track_psr_suppression =
         ctx->base.tb->flags & IA64_TB_FLAG_PSR_SUPPRESS;
+    ctx->be_data = ctx->base.tb->flags & IA64_TB_FLAG_BE;
 }
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)

@@ -728,6 +728,54 @@ static bool ia64_cmpxchg_compare_representable(uint64_t cmp, uint32_t size)
     }
 }
 
+static bool ia64_data_big_endian(CPUIA64State *env)
+{
+    return (env->psr & IA64_PSR_BE) != 0;
+}
+
+static MemOp ia64_data_memop(CPUIA64State *env, MemOp memop)
+{
+    if ((memop & MO_SIZE) == MO_8) {
+        return memop & ~MO_BSWAP;
+    }
+    return (memop & ~MO_BSWAP) |
+           (ia64_data_big_endian(env) ? MO_BE : MO_LE);
+}
+
+static uint32_t ia64_lduw_data_ra(CPUIA64State *env, uint64_t addr,
+                                  uintptr_t ra)
+{
+    return ia64_data_big_endian(env) ?
+           cpu_lduw_be_data_ra(env, addr, ra) :
+           cpu_lduw_le_data_ra(env, addr, ra);
+}
+
+static uint32_t ia64_ldl_data_ra(CPUIA64State *env, uint64_t addr,
+                                 uintptr_t ra)
+{
+    return ia64_data_big_endian(env) ?
+           cpu_ldl_be_data_ra(env, addr, ra) :
+           cpu_ldl_le_data_ra(env, addr, ra);
+}
+
+static uint64_t ia64_ldq_data_ra(CPUIA64State *env, uint64_t addr,
+                                 uintptr_t ra)
+{
+    return ia64_data_big_endian(env) ?
+           cpu_ldq_be_data_ra(env, addr, ra) :
+           cpu_ldq_le_data_ra(env, addr, ra);
+}
+
+static void ia64_stq_data_ra(CPUIA64State *env, uint64_t addr, uint64_t val,
+                             uintptr_t ra)
+{
+    if (ia64_data_big_endian(env)) {
+        cpu_stq_be_data_ra(env, addr, val, ra);
+    } else {
+        cpu_stq_le_data_ra(env, addr, val, ra);
+    }
+}
+
 uint64_t helper_cmpxchg(CPUIA64State *env, uint64_t addr, uint64_t cmp,
                         uint64_t val, uint32_t size)
 {
@@ -750,11 +798,14 @@ uint64_t helper_cmpxchg(CPUIA64State *env, uint64_t addr, uint64_t cmp,
         return old;
     case 2:
         if (cmp_representable) {
-            old = cpu_atomic_cmpxchgw_le_mmu(env, addr, cmp, val,
-                                             make_memop_idx(MO_LEUW, mmu_idx),
-                                             ra);
+            MemOpIdx oi = make_memop_idx(ia64_data_memop(env, MO_LEUW),
+                                         mmu_idx);
+
+            old = ia64_data_big_endian(env) ?
+                  cpu_atomic_cmpxchgw_be_mmu(env, addr, cmp, val, oi, ra) :
+                  cpu_atomic_cmpxchgw_le_mmu(env, addr, cmp, val, oi, ra);
         } else {
-            old = cpu_lduw_le_data_ra(env, addr, ra);
+            old = ia64_lduw_data_ra(env, addr, ra);
         }
         if (old == cmp) {
             ia64_invalidate_alat_store(env, addr, size);
@@ -762,23 +813,30 @@ uint64_t helper_cmpxchg(CPUIA64State *env, uint64_t addr, uint64_t cmp,
         return old;
     case 4:
         if (cmp_representable) {
-            old = cpu_atomic_cmpxchgl_le_mmu(env, addr, cmp, val,
-                                             make_memop_idx(MO_LEUL, mmu_idx),
-                                             ra);
+            MemOpIdx oi = make_memop_idx(ia64_data_memop(env, MO_LEUL),
+                                         mmu_idx);
+
+            old = ia64_data_big_endian(env) ?
+                  cpu_atomic_cmpxchgl_be_mmu(env, addr, cmp, val, oi, ra) :
+                  cpu_atomic_cmpxchgl_le_mmu(env, addr, cmp, val, oi, ra);
         } else {
-            old = cpu_ldl_le_data_ra(env, addr, ra);
+            old = ia64_ldl_data_ra(env, addr, ra);
         }
         if (old == cmp) {
             ia64_invalidate_alat_store(env, addr, size);
         }
         return old;
-    case 8:
-        old = cpu_atomic_cmpxchgq_le_mmu(env, addr, cmp, val,
-                                         make_memop_idx(MO_LEUQ, mmu_idx), ra);
+    case 8: {
+        MemOpIdx oi = make_memop_idx(ia64_data_memop(env, MO_LEUQ), mmu_idx);
+
+        old = ia64_data_big_endian(env) ?
+              cpu_atomic_cmpxchgq_be_mmu(env, addr, cmp, val, oi, ra) :
+              cpu_atomic_cmpxchgq_le_mmu(env, addr, cmp, val, oi, ra);
         if (old == cmp) {
             ia64_invalidate_alat_store(env, addr, size);
         }
         return old;
+    }
     default:
         g_assert_not_reached();
     }
@@ -793,10 +851,10 @@ uint64_t helper_cmp8xchg16(CPUIA64State *env, uint64_t addr, uint64_t cmp,
     int mmu_idx = cpu_mmu_index(env_cpu(env), false);
 
     probe_write(env, base, 16, mmu_idx, ra);
-    old = cpu_ldq_le_data_ra(env, addr, ra);
+    old = ia64_ldq_data_ra(env, addr, ra);
     if (old == cmp) {
-        cpu_stq_le_data_ra(env, base, val, ra);
-        cpu_stq_le_data_ra(env, base + 8, csd, ra);
+        ia64_stq_data_ra(env, base, val, ra);
+        ia64_stq_data_ra(env, base + 8, csd, ra);
         ia64_invalidate_alat_store(env, base, 16);
     }
     return old;
@@ -6007,18 +6065,36 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
 void helper_ldfe(CPUIA64State *env, uint32_t r1, uint64_t addr)
 {
     uintptr_t ra = GETPC();
-    uint64_t low = cpu_ldq_le_data_ra(env, addr, ra);
-    uint16_t high = cpu_lduw_le_data_ra(env, addr + 8, ra);
-    floatx80 value = make_floatx80(high, low);
+    uint64_t low;
+    uint16_t high;
+    floatx80 value;
 
+    if (ia64_data_big_endian(env)) {
+        high = cpu_lduw_be_data_ra(env, addr, ra);
+        low = cpu_ldq_be_data_ra(env, addr + 2, ra);
+    } else {
+        low = cpu_ldq_le_data_ra(env, addr, ra);
+        high = cpu_lduw_le_data_ra(env, addr + 8, ra);
+    }
+    value = make_floatx80(high, low);
     ia64_fr_write(env, r1, floatx80_to_float64(value, &env->fp_status));
 }
 
 void helper_ldf_fill(CPUIA64State *env, uint32_t r1, uint64_t addr)
 {
     uintptr_t ra = GETPC();
-    uint64_t low = cpu_ldq_le_data_ra(env, addr, ra);
-    uint64_t high = cpu_ldq_le_data_ra(env, addr + 8, ra);
+    uint64_t low;
+    uint64_t high;
+
+    if (ia64_data_big_endian(env)) {
+        low = cpu_ldq_be_data_ra(env, addr + 8, ra);
+        high = ((uint64_t)cpu_ldub_data_ra(env, addr + 7, ra)) |
+               ((uint64_t)cpu_ldub_data_ra(env, addr + 6, ra) << 8) |
+               ((uint64_t)cpu_ldub_data_ra(env, addr + 5, ra) << 16);
+    } else {
+        low = cpu_ldq_le_data_ra(env, addr, ra);
+        high = cpu_ldq_le_data_ra(env, addr + 8, ra);
+    }
 
     ia64_fr_fill_spill_words(env, r1, low, high);
 }
@@ -6028,8 +6104,13 @@ void helper_stfe(CPUIA64State *env, uint64_t addr, uint32_t r2)
     uintptr_t ra = GETPC();
     floatx80 value = float64_to_floatx80(env->fr[r2], &env->fp_status);
 
-    cpu_stq_le_data_ra(env, addr, value.low, ra);
-    cpu_stw_le_data_ra(env, addr + 8, value.high, ra);
+    if (ia64_data_big_endian(env)) {
+        cpu_stw_be_data_ra(env, addr, value.high, ra);
+        cpu_stq_be_data_ra(env, addr + 2, value.low, ra);
+    } else {
+        cpu_stq_le_data_ra(env, addr, value.low, ra);
+        cpu_stw_le_data_ra(env, addr + 8, value.high, ra);
+    }
 }
 
 void helper_stf_spill(CPUIA64State *env, uint64_t addr, uint32_t r2)
@@ -6039,8 +6120,20 @@ void helper_stf_spill(CPUIA64State *env, uint64_t addr, uint32_t r2)
     uint64_t high;
 
     ia64_fr_spill_words(env, r2, &low, &high);
-    cpu_stq_le_data_ra(env, addr, low, ra);
-    cpu_stq_le_data_ra(env, addr + 8, high, ra);
+    if (ia64_data_big_endian(env)) {
+        cpu_stb_data_ra(env, addr, 0, ra);
+        cpu_stb_data_ra(env, addr + 1, 0, ra);
+        cpu_stb_data_ra(env, addr + 2, 0, ra);
+        cpu_stb_data_ra(env, addr + 3, 0, ra);
+        cpu_stb_data_ra(env, addr + 4, 0, ra);
+        cpu_stb_data_ra(env, addr + 5, (high >> 16) & 0xff, ra);
+        cpu_stb_data_ra(env, addr + 6, (high >> 8) & 0xff, ra);
+        cpu_stb_data_ra(env, addr + 7, high & 0xff, ra);
+        cpu_stq_be_data_ra(env, addr + 8, low, ra);
+    } else {
+        cpu_stq_le_data_ra(env, addr, low, ra);
+        cpu_stq_le_data_ra(env, addr + 8, high, ra);
+    }
 }
 
 /* ---- ITC read helper ---- */

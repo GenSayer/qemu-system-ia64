@@ -672,6 +672,15 @@ def ldf8(f1, r3, hint=0, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def ldfe(f1, r3, hint=0, qp=0):
+    return (
+        op(6)
+        | bitfield(hint, 28, 2)
+        | bitfield(r3, 20, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
 def ldf8_s(f1, r3, hint=0, qp=0):
     return ldf8(f1, r3, hint, qp) | bitfield(0x05, 30, 6)
 
@@ -5011,6 +5020,145 @@ test_memory_order_completers_decode = require_registers(
         "r12": 0x0102030405060708,
         "r13": 10,
         "r14": 11,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_data_big_endian_load_store = require_registers(
+    "data_big_endian_load_store", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x201, 0),
+         addl(5, 0x202, 0)),
+        (0x20, 0x00, addl(6, 0x203, 0), nop_i(),
+         nop_i()),
+        (0x30, *movl_mlx(16, 0x11223344)),
+        (0x40, 0x00, sum_um(IA64_PSR_BE), nop_i(),
+         nop_i()),
+        (0x50, 0x08, st4(3, 16), ld4(17, 3),
+         nop_i()),
+        (0x60, 0x00, rum(IA64_PSR_BE), nop_i(),
+         nop_i()),
+        (0x70, 0x08, ld1(18, 3), ld1(19, 4),
+         nop_i()),
+        (0x80, 0x08, ld1(20, 5), ld1(21, 6),
+         nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "r17": 0x11223344,
+        "r18": 0x11,
+        "r19": 0x22,
+        "r20": 0x33,
+        "r21": 0x44,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_data_big_endian_cmpxchg4 = require_registers(
+    "data_big_endian_cmpxchg4", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x201, 0),
+         addl(5, 0x202, 0)),
+        (0x20, 0x00, addl(6, 0x203, 0), nop_i(),
+         nop_i()),
+        (0x30, *movl_mlx(10, 0x01020304)),
+        (0x40, *movl_mlx(16, 0x01020304)),
+        (0x50, *movl_mlx(18, 0x11223344)),
+        (0x60, 0x00, sum_um(IA64_PSR_BE), nop_i(),
+         nop_i()),
+        (0x70, 0x00, st4(3, 16), nop_i(),
+         nop_i()),
+        (0x80, 0x00, mov_m_gr_ar(10, 32), nop_i(),
+         nop_i()),
+        (0x90, 0x00, cmpxchg4_acq(17, 3, 18), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, rum(IA64_PSR_BE), nop_i(),
+         nop_i()),
+        (0xb0, 0x08, ld1(19, 3), ld1(20, 4),
+         nop_i()),
+        (0xc0, 0x08, ld1(21, 5), ld1(22, 6),
+         nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+    ], {
+        "ip": 0xd0,
+        "r17": 0x01020304,
+        "r19": 0x11,
+        "r20": 0x22,
+        "r21": 0x33,
+        "r22": 0x44,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_data_big_endian_stf_spill_ldf_fill = require_registers(
+    "data_big_endian_stf_spill_ldf_fill", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x205, 0),
+         addl(5, 0x207, 0)),
+        (0x20, 0x00, addl(6, 0x208, 0), addl(7, 0x20f, 0),
+         nop_i()),
+        (0x30, *movl_mlx(16, 0x1122334455667788)),
+        (0x40, 0x09, setf_sig(8, 16), nop_i(),
+         nop_i()),
+        (0x50, 0x00, sum_um(IA64_PSR_BE), nop_i(),
+         nop_i()),
+        (0x60, 0x08, stf_spill_postinc(3, 8, 0), nop_i(),
+         nop_i()),
+        (0x70, 0x09, setf_sig(8, 0), nop_i(),
+         nop_i()),
+        (0x80, 0x08, ldf_fill_postinc(8, 3, 0), nop_i(),
+         nop_i()),
+        (0x90, 0x00, rum(IA64_PSR_BE), getf_sig(9, 8),
+         nop_i()),
+        (0xa0, 0x08, ld1(10, 3), ld1(11, 4),
+         nop_i()),
+        (0xb0, 0x08, ld1(12, 5), ld1(13, 6),
+         nop_i()),
+        (0xc0, 0x08, ld1(14, 7), nop_m(),
+         nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+    ], {
+        "ip": 0xd0,
+        "r9": 0x1122334455667788,
+        "r10": 0,
+        "r11": 1,
+        "r12": 0x3e,
+        "r13": 0x11,
+        "r14": 0x88,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_data_big_endian_ldfe_stfe = require_registers(
+    "data_big_endian_ldfe_stfe", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x210, 0),
+         addl(5, 0x211, 0)),
+        (0x20, 0x00, addl(6, 0x212, 0), addl(7, 0x219, 0),
+         adds(16, 0x3f, 0)),
+        (0x30, 0x00, adds(17, 0xff, 0), adds(18, 0x80, 0),
+         nop_i()),
+        (0x40, 0x08, st1_postinc(3, 16, 1), st1_postinc(3, 17, 1),
+         nop_i()),
+        (0x50, 0x00, st1_postinc(3, 18, 1), nop_i(),
+         nop_i()),
+        (0x60, 0x00, addl(3, 0x200, 0), nop_i(),
+         nop_i()),
+        (0x70, 0x00, sum_um(IA64_PSR_BE), nop_i(),
+         nop_i()),
+        (0x80, 0x00, ldfe(8, 3), nop_i(),
+         nop_i()),
+        (0x90, 0x00, stfe(4, 8), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, rum(IA64_PSR_BE), nop_i(),
+         nop_i()),
+        (0xb0, 0x08, ld1(10, 4), ld1(11, 5),
+         nop_i()),
+        (0xc0, 0x08, ld1(12, 6), ld1(13, 7),
+         nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+    ], {
+        "ip": 0xd0,
+        "r10": 0x3f,
+        "r11": 0xff,
+        "r12": 0x80,
+        "r13": 0,
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
@@ -14899,6 +15047,11 @@ TEST_NAMES = {
     "st16_stores_gr_and_csd": test_st16_stores_gr_and_csd,
     "st16_rel_stores_gr_and_csd": test_st16_rel_stores_gr_and_csd,
     "memory_order_completers_decode": test_memory_order_completers_decode,
+    "data_big_endian_load_store": test_data_big_endian_load_store,
+    "data_big_endian_cmpxchg4": test_data_big_endian_cmpxchg4,
+    "data_big_endian_stf_spill_ldf_fill":
+        test_data_big_endian_stf_spill_ldf_fill,
+    "data_big_endian_ldfe_stfe": test_data_big_endian_ldfe_stfe,
     "store_invalidates_advanced_load": test_store_invalidates_advanced_load,
     "rse_call_invalidates_stacked_alat": test_rse_call_invalidates_stacked_alat,
     "semaphore_ops_invalidate_advanced_loads": test_semaphore_ops_invalidate_advanced_loads,
