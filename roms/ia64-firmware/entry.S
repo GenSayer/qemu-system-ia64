@@ -16,6 +16,53 @@ _start:
     movl r12 = 0x08000000
     ;;
 
+    br.cond.sptk.few start_after_pal
+    ;;
+    .org 0x60
+    .endp _start
+    .size _start, . - _start
+
+    .section .text.pal_proc_entry, "ax"
+    .global pal_proc_entry
+    .type pal_proc_entry, @function
+    .proc pal_proc_entry
+    .explicit
+pal_proc_entry:
+    break.m 0x100000
+    ;;
+    br.many b0
+    ;;
+    .endp pal_proc_entry
+    .size pal_proc_entry, . - pal_proc_entry
+
+    .section .text.start_after_pal, "ax"
+    .type start_after_pal, @function
+    .proc start_after_pal
+    .explicit
+start_after_pal:
+
+    /*
+     * QEMU reloads the firmware image on reset, but the raw binary does not
+     * contain the trailing NOBITS .bss.  Clear it here so guest-requested and
+     * monitor-requested resets start with the same firmware state as a fresh
+     * process.
+     */
+    movl r14 = _bss_start
+    ;;
+    movl r15 = _bss_end
+    ;;
+1:
+    cmp.ltu p6, p7 = r14, r15
+    ;;
+(p7) br.cond.dpnt.few 2f
+    ;;
+    st8 [r14] = r0, 8
+    ;;
+    br.cond.sptk.few 1b
+    ;;
+2:
+    ;;
+
     /* GP = linker-defined __gp (already at runtime VMA=0x100000 address) */
     movl r1 = __gp
     ;;
@@ -41,18 +88,5 @@ _start:
     /* firmware_main should not return */
     break 0
     ;;
-    .endp _start
-    .size _start, . - _start
-
-    .section .text.pal_proc_entry, "ax"
-    .global pal_proc_entry
-    .type pal_proc_entry, @function
-    .proc pal_proc_entry
-    .explicit
-pal_proc_entry:
-    break.m 0x100000
-    ;;
-    br.many b0
-    ;;
-    .endp pal_proc_entry
-    .size pal_proc_entry, . - pal_proc_entry
+    .endp start_after_pal
+    .size start_after_pal, . - start_after_pal

@@ -964,7 +964,7 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[439];
+    UINT8 Aml[451];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
@@ -1321,7 +1321,7 @@ FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 92, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 64, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 475, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 487, acpi_dsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 145, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
@@ -1395,6 +1395,8 @@ static ACPI_FACS               mFacs __attribute__((aligned(64)));
  */
 static ACPI_DSDT               mDsdt = {
     .Aml = {
+    /* Name (_S5, Package (0x04) { Zero, Zero, Zero, Zero }) */
+    0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
     0x10, 0x46, 0x1b, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x4d, 0x1a,
     0x50, 0x43, 0x49, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50, 0x4e,
     0x50, 0x30, 0x41, 0x30, 0x38, 0x00, 0x08, 0x5f, 0x43, 0x49, 0x44, 0x0d,
@@ -5684,7 +5686,8 @@ static void graphics_load_text_font(void)
 
 static void graphics_program_text_mode(void)
 {
-    static const UINT8 seq[] = { 0x03, 0x00, 0x03, 0x00, 0x02 };
+    /* SR01 bit 0 keeps 80-column text at 640 pixels instead of 720. */
+    static const UINT8 seq[] = { 0x03, 0x01, 0x03, 0x00, 0x02 };
     static const UINT8 crtc[] = {
         0x5f, 0x4f, 0x50, 0x82, 0x55, 0x81, 0xbf, 0x1f,
         0x00, 0x4f, 0x0d, 0x0e, 0x00, 0x00, 0x00, 0x00,
@@ -8642,7 +8645,6 @@ static void efi_init_platform_tables(void)
     mFadt.BootFlags = 0;
     mFadt.Reserved0 = 0;
     mFadt.Flags = ACPI_FADT_FLAG_WBINVD |
-                  ACPI_FADT_FLAG_PWR_BUTTON |
                   ACPI_FADT_FLAG_SLP_BUTTON |
                   ACPI_FADT_FLAG_TMR_VAL_EXT;
     mFadt.ResetRegister.SpaceId = 0;
@@ -8919,6 +8921,7 @@ static BOOLEAN acpi_ssdt_has_bytes(const UINT8 *Needle, UINTN NeedleLen)
 static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
 {
     static const UINT8 pci0_name[] = { 'P', 'C', 'I', '0' };
+    static const UINT8 s5_name[] = { '_', 'S', '5', '_' };
     static const UINT8 cpu0_processor[] = {
         0x5b, 0x83, 0x0b, 'C', 'P', 'U', '0',
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -8994,6 +8997,7 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     }
 
     if (!acpi_dsdt_has_bytes(pci0_name, sizeof(pci0_name)) ||
+        !acpi_dsdt_has_bytes(s5_name, sizeof(s5_name)) ||
         !acpi_dsdt_has_bytes(hid_pci_express, sizeof(hid_pci_express) - 1) ||
         !acpi_dsdt_has_bytes(cid_pci, sizeof(cid_pci) - 1) ||
         !acpi_dsdt_has_bytes(crs_name, sizeof(crs_name)) ||
@@ -9021,7 +9025,8 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
             ACPI_PM_BASE + ACPI_PM1_CNT_OFFSET ||
         mAcpiFadt->XPmTimerBlock.BitWidth != 32 ||
         acpi_gas_address(&mAcpiFadt->XPmTimerBlock) !=
-            ACPI_PM_BASE + ACPI_PM_TMR_OFFSET) {
+            ACPI_PM_BASE + ACPI_PM_TMR_OFFSET ||
+        (mAcpiFadt->Flags & ACPI_FADT_FLAG_PWR_BUTTON) != 0) {
         return 0;
     }
 

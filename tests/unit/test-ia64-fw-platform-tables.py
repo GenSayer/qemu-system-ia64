@@ -76,6 +76,7 @@ def main():
         "sal_proc_dispatch_selftest",
         "pci_config_ecam_addr",
         "acpi_table_integrity_selftest",
+        "pal_proc_entry",
         "mSalPalProcPhysicalAddress",
         "mGraphicsDevicePath",
         "mPciRootBridgeIoProto",
@@ -133,6 +134,12 @@ def main():
                 data.extend(bytes.fromhex(word))
         return bytes(data[:size])
 
+    pal_proc_addr = symbol_addr("pal_proc_entry")
+    if pal_proc_addr != 0x100060:
+        print("not ok 1 - PAL proc entry fixed offset")
+        print(f"# expected pal_proc_entry at 0x100060, got 0x{pal_proc_addr:x}")
+        return 1
+
     madt_size = symbol_size("mMadt")
     if madt_size != 0x48:
         print("not ok 1 - IA-64 MADT layout size")
@@ -146,9 +153,9 @@ def main():
         return 1
 
     dsdt_size = symbol_size("mDsdt")
-    if dsdt_size != 0x1db:
+    if dsdt_size != 0x1e7:
         print("not ok 1 - IA-64 DSDT layout size")
-        print(f"# expected mDsdt size 0x1db, got 0x{dsdt_size:x}")
+        print(f"# expected mDsdt size 0x1e7, got 0x{dsdt_size:x}")
         return 1
 
     ssdt_size = symbol_size("mSsdt")
@@ -191,7 +198,7 @@ def main():
         return 1
 
     dsdt = symbol_bytes("mDsdt")
-    for token in [b"PCI0", b"PNP0A08", b"PNP0A03", b"_CRS", b"_PRT"]:
+    for token in [b"_S5_", b"PCI0", b"PNP0A08", b"PNP0A03", b"_CRS", b"_PRT"]:
         if token not in dsdt:
             print("not ok 1 - DSDT PCI root bridge AML")
             print(f"# missing AML token: {token.decode('ascii')}")

@@ -175,7 +175,12 @@ static void ia64_vpc_powerdown_req(Notifier *n, void *opaque)
     (void)n;
     (void)opaque;
 
-    acpi_pm1_evt_power_down(&ia64_vpc_acpi_regs);
+    if (ia64_vpc_acpi_regs.pm1.evt.en & ACPI_BITMASK_POWER_BUTTON_ENABLE) {
+        acpi_pm1_evt_power_down(&ia64_vpc_acpi_regs);
+    } else {
+        /* Avoid making QEMU's powerdown action a no-op before ACPI is armed. */
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+    }
 }
 
 static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,

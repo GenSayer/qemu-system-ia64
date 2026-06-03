@@ -42,7 +42,6 @@ ACPI_FADT_FLAG_SLP_BUTTON = 1 << 5
 ACPI_FADT_FLAG_TMR_VAL_EXT = 1 << 8
 ACPI_FADT_EXPECTED_FLAGS = (
     ACPI_FADT_FLAG_WBINVD |
-    ACPI_FADT_FLAG_PWR_BUTTON |
     ACPI_FADT_FLAG_SLP_BUTTON |
     ACPI_FADT_FLAG_TMR_VAL_EXT
 )
@@ -916,9 +915,19 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     })
     dsdt = fadt_children["mDsdt"]
     validate_sdt("mDsdt", dsdt, "DSDT", 2)
-    for token in [b"PCI0", b"PNP0A08", b"PNP0A03", b"_CRS", b"_PRT"]:
+    for token in [b"_S5_", b"PCI0", b"PNP0A08", b"PNP0A03", b"_CRS", b"_PRT"]:
         if token not in dsdt:
             raise RuntimeError(f"DSDT PCI namespace missing {token!r}")
+    s5_name_off = dsdt.index(b"_S5_")
+    if s5_name_off == 0 or dsdt[s5_name_off - 1] != 0x08:
+        raise RuntimeError("DSDT _S5 must be a NameOp")
+    s5_count, s5_off, s5_end = aml_package(dsdt, s5_name_off + 4)
+    s5_values = []
+    while s5_off < s5_end:
+        value, s5_off = aml_integer(dsdt, s5_off)
+        s5_values.append(value)
+    if s5_count != 4 or s5_values != [0, 0, 0, 0] or s5_off != s5_end:
+        raise RuntimeError("DSDT _S5 package mismatch")
     expected_prt = []
     for slot in range(5):
         for pin in range(PCI_INTX_LINES):
