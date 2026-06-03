@@ -89,6 +89,15 @@ EFI_HCDP_TABLE_GUID = bytes.fromhex(
 EFI_SMBIOS_TABLE_GUID = bytes.fromhex(
     "31 2d 9d eb 88 2d d3 11 9a 16 00 90 27 3f c1 4d"
 )
+EFI_DEBUG_IMAGE_INFO_TABLE_GUID = bytes.fromhex(
+    "77 2e 15 49 da 1a 64 47 b7 a2 7a fe fe d9 5e 8b"
+)
+EFI_LOADED_IMAGE_PROTOCOL_GUID = bytes.fromhex(
+    "a1 31 1b 5b 62 95 d2 11 8e 3f 00 a0 c9 69 72 3b"
+)
+EFI_DEVICE_PATH_PROTOCOL_GUID = bytes.fromhex(
+    "91 6e 57 09 3f 6d d2 11 8e 39 00 a0 c9 69 72 3b"
+)
 
 
 def load_csv(root, domain):
@@ -588,7 +597,8 @@ def test_csv_rows_are_bound_to_execution(root, qemu1, qemu2):
                            "brl_call_mlx_decode", "br_call_indirect_completers_decode",
                            "br_ctop_rotating_pipeline"},
         "integer": {"alu_immediate_ops", "register_shifts", "deposit_immediate",
-                    "extract_immediate", "dep_decode", "popcnt_decode"},
+                    "extract_immediate", "dep_decode", "popcnt_decode",
+                    "clz_decode", "mpyshl4_decode"},
         "predicate": {"predicate_register_moves", "predicate_rot_immediate",
                       "predication"},
         "predicate_compare": {"cmp_eq_and_decode", "cmp_ge_or_decode",
@@ -664,9 +674,9 @@ def test_csv_rows_are_bound_to_execution(root, qemu1, qemu2):
     # binary table verifier below.  Their exact row count is asserted so adding
     # a new CSV function requires extending this execution test deliberately.
     expected_counts = {
-        "efi": 147,
+        "efi": 158,
         "sal": 28,
-        "acpi": 24,
+        "acpi": 28,
     }
     for domain, count in expected_counts.items():
         if len(rows[domain]) != count:
@@ -760,6 +770,7 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     symbols = objdump_symbols(elf_path)
     runtime_names = [
         "mSystemTable", "mConfigTables", "mSalSystemTable",
+        "mDebugImageInfoHeader",
         "mSmbiosEntryPoint", "mSmbiosTable", "mSmbiosTableLength",
         "mSmbiosStructureCount", "mSmbiosMaxStructureSize",
         "mMemoryMapEntries", "mMemoryMap",
@@ -794,6 +805,14 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         raise RuntimeError("EFI configuration table does not reference SAL table")
     if config.get(EFI_SMBIOS_TABLE_GUID) != symbols["mSmbiosEntryPoint"][0]:
         raise RuntimeError("EFI configuration table does not reference SMBIOS")
+    if (config.get(EFI_DEBUG_IMAGE_INFO_TABLE_GUID) !=
+            symbols["mDebugImageInfoHeader"][0]):
+        raise RuntimeError("EFI configuration table does not reference debug image info")
+    for guid_name, guid in (
+            ("Loaded Image Protocol", EFI_LOADED_IMAGE_PROTOCOL_GUID),
+            ("Device Path Protocol", EFI_DEVICE_PATH_PROTOCOL_GUID)):
+        if guid in config:
+            raise RuntimeError(f"{guid_name} GUID must not be an EFI configuration table")
 
     def find_efi_descriptor(name, memory_type, addr, size,
                             required_attr=0):

@@ -1644,10 +1644,8 @@ FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE127_END_OF_TABLE) == 4,
 #define PLATFORM_TABLE_SAL           2
 #define PLATFORM_TABLE_HCDP          3
 #define PLATFORM_TABLE_SMBIOS        4
-#define PLATFORM_TABLE_LOADED_IMAGE  5
-#define PLATFORM_TABLE_DEVICE_PATH   6
-#define PLATFORM_TABLE_DEBUG_IMAGE   7
-#define PLATFORM_TABLE_INITIAL       8
+#define PLATFORM_TABLE_DEBUG_IMAGE   5
+#define PLATFORM_TABLE_INITIAL       6
 #define PLATFORM_TABLE_MAX           16
 #define LOADED_IMAGE_MAX             8
 #define SMBIOS_TABLE_MAX_SIZE        1024U
@@ -1970,8 +1968,6 @@ typedef struct {
     EFI_STATUS exit_status;
     UINTN exit_data_size;
     CHAR16 *exit_data;
-    UINTN prev_loaded_image_table;
-    UINTN prev_device_path_table;
     UINT64 saved_psr;
 } EFI_START_IMAGE_FRAME;
 
@@ -7089,37 +7085,6 @@ static void start_image_pop_frame(EFI_START_IMAGE_FRAME *Frame)
     mStartImageFrameDepth--;
 }
 
-static void __attribute__((noinline, used))
-fw_push_image_config_tables(EFI_START_IMAGE_FRAME *Frame,
-                            EFI_LOADED_IMAGE_RECORD *Rec)
-{
-    if (Frame == NULL || Rec == NULL) {
-        return;
-    }
-
-    Frame->prev_loaded_image_table =
-        mConfigTables[PLATFORM_TABLE_LOADED_IMAGE].VendorTable;
-    Frame->prev_device_path_table =
-        mConfigTables[PLATFORM_TABLE_DEVICE_PATH].VendorTable;
-    mConfigTables[PLATFORM_TABLE_LOADED_IMAGE].VendorTable =
-        (UINTN)&Rec->loaded_image;
-    mConfigTables[PLATFORM_TABLE_DEVICE_PATH].VendorTable =
-        (UINTN)Rec->device_path;
-}
-
-static void __attribute__((noinline, used))
-fw_pop_image_config_tables(EFI_START_IMAGE_FRAME *Frame)
-{
-    if (Frame == NULL) {
-        return;
-    }
-
-    mConfigTables[PLATFORM_TABLE_LOADED_IMAGE].VendorTable =
-        Frame->prev_loaded_image_table;
-    mConfigTables[PLATFORM_TABLE_DEVICE_PATH].VendorTable =
-        Frame->prev_device_path_table;
-}
-
 EFI_STATUS bs_exit(EFI_HANDLE ImageHandle, EFI_STATUS ExitStatus,
                    UINTN ExitDataSize, CHAR16 *ExitData)
 {
@@ -8243,7 +8208,6 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
         return EFI_OUT_OF_RESOURCES;
     }
     rec->started = 1;
-    fw_push_image_config_tables(frame, rec);
 
     if (__builtin_setjmp(frame->jump) != 0) {
         frame = start_image_top_frame();
@@ -8258,7 +8222,6 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
         if (ExitData) {
             *ExitData = frame->exit_data;
         }
-        fw_pop_image_config_tables(frame);
         start_image_pop_frame(frame);
         return (EFI_STATUS)status;
     }
@@ -8271,7 +8234,6 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
     status = fw_call_efi_entry(rec->entry, ImageHandle, &mSystemTable,
                                frame->saved_psr);
     frame = start_image_top_frame();
-    fw_pop_image_config_tables(frame);
     start_image_pop_frame(frame);
     return (EFI_STATUS)status;
 }
@@ -10182,17 +10144,9 @@ static void efi_init_platform_tables(void)
     mConfigTables[PLATFORM_TABLE_SMBIOS].VendorTable =
         (UINTN)&mSmbiosEntryPoint;
     for (i = 0; i < 16; i++) {
-        mConfigTables[PLATFORM_TABLE_LOADED_IMAGE].VendorGuid[i] =
-            mLoadedImageProtocolGuid[i];
-        mConfigTables[PLATFORM_TABLE_DEVICE_PATH].VendorGuid[i] =
-            mDevicePathProtocolGuid[i];
         mConfigTables[PLATFORM_TABLE_DEBUG_IMAGE].VendorGuid[i] =
             mDebugImageInfoTableGuid[i];
     }
-    mConfigTables[PLATFORM_TABLE_LOADED_IMAGE].VendorTable =
-        (UINTN)&mLoadedImageProto;
-    mConfigTables[PLATFORM_TABLE_DEVICE_PATH].VendorTable =
-        0;
     mConfigTables[PLATFORM_TABLE_DEBUG_IMAGE].VendorTable =
         (UINTN)&mDebugImageInfoHeader;
 

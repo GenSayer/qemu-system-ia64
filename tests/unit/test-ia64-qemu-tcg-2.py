@@ -81,6 +81,14 @@ EFI_DEBUG_IMAGE_INFO_TABLE_GUID = bytes([
     0x77, 0x2e, 0x15, 0x49, 0xda, 0x1a, 0x64, 0x47,
     0xb7, 0xa2, 0x7a, 0xfe, 0xfe, 0xd9, 0x5e, 0x8b,
 ])
+EFI_LOADED_IMAGE_PROTOCOL_GUID = bytes([
+    0xa1, 0x31, 0x1b, 0x5b, 0x62, 0x95, 0xd2, 0x11,
+    0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b,
+])
+EFI_DEVICE_PATH_PROTOCOL_GUID = bytes([
+    0x91, 0x6e, 0x57, 0x09, 0x3f, 0x6d, 0xd2, 0x11,
+    0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b,
+])
 
 IA64_BREAK_VECTOR = 0x2c00
 IA64_DTLB_VECTOR = 0x0800
@@ -12251,7 +12259,7 @@ def test_firmware_debug_tables(qemu):
         raise RuntimeError("EFI system table CRC mismatch")
 
     entry_count, config_table = struct.unpack_from("<QQ", table, 104)
-    if entry_count < 7:
+    if entry_count < 6:
         raise RuntimeError(f"too few EFI configuration table entries {entry_count}")
     if config_table + entry_count * 24 > len(low):
         raise RuntimeError(f"EFI configuration table outside low dump 0x{config_table:x}")
@@ -12264,6 +12272,11 @@ def test_firmware_debug_tables(qemu):
         config[guid] = vendor_table
     if config.get(EFI_ACPI_20_TABLE_GUID) != 0x800000:
         raise RuntimeError("ACPI 2.0 RSDP configuration table is not physical 0x800000")
+    for guid_name, guid in (
+            ("Loaded Image Protocol", EFI_LOADED_IMAGE_PROTOCOL_GUID),
+            ("Device Path Protocol", EFI_DEVICE_PATH_PROTOCOL_GUID)):
+        if guid in config:
+            raise RuntimeError(f"{guid_name} GUID must not be an EFI configuration table")
     debug_header = config.get(EFI_DEBUG_IMAGE_INFO_TABLE_GUID)
     if debug_header is None:
         raise RuntimeError("missing EFI debug image info configuration table")

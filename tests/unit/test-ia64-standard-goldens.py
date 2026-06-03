@@ -33,11 +33,11 @@ STANDARD_FILES = {
 }
 
 EXPECTED_COUNTS = {
-    "instructions": 471,
-    "efi": 147,
-    "pal": 55,
+    "instructions": 473,
+    "efi": 158,
+    "pal": 56,
     "sal": 28,
-    "acpi": 24,
+    "acpi": 28,
 }
 
 INSTRUCTION_CATEGORY_REFS = {
@@ -222,7 +222,7 @@ EFI_AREA_ASSERTIONS = {
         "readiness semantics exactly as specified",
         "block, disk, file, filesystem, and load-file protocols enforce media "
         "IDs, block alignment, EOF, buffer-size, read-only, and file-info rules",
-        "graphics, PCI, device-path, loaded-image, FPSWA, and collation "
+        "graphics, PCI, device-path, loaded-image, FPSWA, TCG, and collation "
         "protocols use the standard structures and operation-specific status "
         "codes",
     ],
@@ -264,16 +264,20 @@ SAL_ASSERTIONS = [
 
 ACPI_REFS = ["acpi_2:acpi-2.0-table-definitions",
              "acpi_ia64:ia64-sapic-and-efi-acpi-support",
-             "uefi:configuration-table-acpi-guid"]
+             "uefi:configuration-table-acpi-sal-smbios-guid",
+             "efi_1_10:debug-image-info-configuration-table",
+             "smbios:2.7-entry-point-and-structures"]
 
 ACPI_ASSERTIONS = [
-    "every ACPI table has the standard signature, revision, length, checksum, "
-    "OEM, creator, and reserved-field values",
-    "64-bit IA-64 table pointers and both ACPI 1.0 and 2.0 EFI "
-    "configuration-table GUIDs resolve to the physical tables in EFI ACPI "
-    "Reclaim memory exposed to the OS loader",
+    "every published ACPI, SAL, SMBIOS, and debug-image table has the standard "
+    "signature, revision, length, checksum, header, and reserved-field values "
+    "where that table format defines them",
+    "64-bit IA-64 table pointers and EFI configuration-table GUIDs resolve to "
+    "the architecturally appropriate physical ACPI reclaim or runtime firmware "
+    "tables exposed to the OS loader",
     "RSDP/RSDT/XSDT/FADT/FACS/DSDT/SSDT/MADT/MCFG/SRAT/SLIT/HCDP/SAL-table "
-    "structures match ACPI 2.0 IA-64 layout and entry ordering requirements",
+    "and SMBIOS structures match ACPI 2.0 IA-64, EFI, and SMBIOS layout and "
+    "entry ordering requirements",
     "SAPIC, I/O SAPIC, PM block, SCI, PIB, and IOSAPIC MMIO behavior follows "
     "the IA-64 ACPI and interrupt-controller specifications",
 ]

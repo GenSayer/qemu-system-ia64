@@ -27,7 +27,7 @@ def main():
         print(f"not ok 1 - firmware exists ({firmware})")
         print("not ok 2 - firmware entry ABI and GP fixup")
         print("not ok 3 - firmware StartImage/Exit nonlocal handoff")
-        print("not ok 4 - firmware StartImage config table compatibility")
+        print("not ok 4 - firmware StartImage protocol handoff")
         print("not ok 5 - firmware RAM handoff memory map")
         print("not ok 6 - firmware GOP multi-mode table")
         print("not ok 7 - firmware EFI input scan tables")
@@ -39,7 +39,7 @@ def main():
         print(f"not ok 1 - firmware ELF exists ({elf_path})")
         print("not ok 2 - firmware entry ABI and GP fixup")
         print("not ok 3 - firmware StartImage/Exit nonlocal handoff")
-        print("not ok 4 - firmware StartImage config table compatibility")
+        print("not ok 4 - firmware StartImage protocol handoff")
         print("not ok 5 - firmware RAM handoff memory map")
         print("not ok 6 - firmware GOP multi-mode table")
         print("not ok 7 - firmware EFI input scan tables")
@@ -59,7 +59,7 @@ def main():
             print(f"# {line}")
         print("not ok 2 - firmware entry ABI and GP fixup")
         print("not ok 3 - firmware StartImage/Exit nonlocal handoff")
-        print("not ok 4 - firmware StartImage config table compatibility")
+        print("not ok 4 - firmware StartImage protocol handoff")
         print("not ok 5 - firmware RAM handoff memory map")
         print("not ok 6 - firmware GOP multi-mode table")
         print("not ok 7 - firmware EFI input scan tables")
@@ -205,7 +205,7 @@ def main():
             print(f"# missing symbol: {sym}")
         print("not ok 2 - firmware entry ABI and GP fixup")
         print("not ok 3 - firmware StartImage/Exit nonlocal handoff")
-        print("not ok 4 - firmware StartImage config table compatibility")
+        print("not ok 4 - firmware StartImage protocol handoff")
         print("not ok 5 - firmware RAM handoff memory map")
         print("not ok 6 - firmware GOP multi-mode table")
         print("not ok 7 - firmware EFI input scan tables")
@@ -226,7 +226,7 @@ def main():
         for line in disasm.stdout.splitlines():
             print(f"# {line}")
         print("not ok 3 - firmware StartImage/Exit nonlocal handoff")
-        print("not ok 4 - firmware StartImage config table compatibility")
+        print("not ok 4 - firmware StartImage protocol handoff")
         print("not ok 5 - firmware RAM handoff memory map")
         print("not ok 6 - firmware GOP multi-mode table")
         print("not ok 7 - firmware EFI input scan tables")
@@ -256,7 +256,7 @@ def main():
         for msg in failed:
             print(f"# {msg}")
         print("not ok 3 - firmware StartImage/Exit nonlocal handoff")
-        print("not ok 4 - firmware StartImage config table compatibility")
+        print("not ok 4 - firmware StartImage protocol handoff")
         print("not ok 5 - firmware RAM handoff memory map")
         print("not ok 6 - firmware GOP multi-mode table")
         print("not ok 7 - firmware EFI input scan tables")
@@ -277,7 +277,7 @@ def main():
         print("not ok 3 - firmware StartImage/Exit nonlocal handoff")
         for msg in handoff_failed:
             print(f"# {msg}")
-        print("not ok 4 - firmware StartImage config table compatibility")
+        print("not ok 4 - firmware StartImage protocol handoff")
         print("not ok 5 - firmware RAM handoff memory map")
         print("not ok 6 - firmware GOP multi-mode table")
         print("not ok 7 - firmware EFI input scan tables")
@@ -287,14 +287,20 @@ def main():
     print("ok 3 - firmware StartImage/Exit nonlocal handoff")
 
     compat_checks = [
-        ("fw_push_image_config_tables" in objdump.stdout,
-         "missing StartImage config table push helper"),
-        ("fw_pop_image_config_tables" in objdump.stdout,
-         "missing StartImage config table pop helper"),
+        ("mLoadedImageProtocolGuid" in objdump.stdout,
+         "missing Loaded Image Protocol GUID"),
+        ("mLoadedImageDevicePathProtocolGuid" in objdump.stdout,
+         "missing Loaded Image Device Path Protocol GUID"),
+        ("mDevicePathProtocolGuid" in objdump.stdout,
+         "missing Device Path Protocol GUID"),
+        ("fw_push_image_config_tables" not in objdump.stdout,
+         "Loaded Image Protocol must not be exposed through EFI configuration tables"),
+        ("fw_pop_image_config_tables" not in objdump.stdout,
+         "Device Path Protocol must not be exposed through EFI configuration tables"),
     ]
     compat_failed = [msg for ok, msg in compat_checks if not ok]
     if compat_failed:
-        print("not ok 4 - firmware StartImage config table compatibility")
+        print("not ok 4 - firmware StartImage protocol handoff")
         for msg in compat_failed:
             print(f"# {msg}")
         print("not ok 5 - firmware RAM handoff memory map")
@@ -303,7 +309,7 @@ def main():
         print("not ok 8 - firmware EFI event notification core")
         return 1
 
-    print("ok 4 - firmware StartImage config table compatibility")
+    print("ok 4 - firmware StartImage protocol handoff")
 
     proc = subprocess.Popen(
         [
