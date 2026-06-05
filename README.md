@@ -22,7 +22,7 @@ PC profile intended for firmware, boot loader, and operating-system bring-up:
 Configure and build the IA-64 target:
 
 ```sh
-./configure --target-list=ia64-softmmu
+./configure
 ninja -C build qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
 
@@ -61,9 +61,9 @@ python3 tests/unit/test-ia64-fw-smoke.py ./build/roms/ia64-firmware/ia64-firmwar
 The target is still incomplete.  It is suitable for IA-64 firmware and OS boot experiments, but instruction coverage, privileged architecture behavior,
 floating-point corner cases, and device compatibility still need validation against the IA-64, EFI, SAL, and ACPI specifications.
 
-## Legal discrimer
+## Legal disclaimer
 
-This repository does not contain any kind of unauthorised,unlicensed, or proprietary images or copies, such as disk images and firmware, machine ROM dumps, or operating system binaries.
+This repository does not contain any kind of unauthorised, unlicensed, or proprietary images, such as disk images and firmware, machine ROM dumps, or operating system binaries.
 
 This project is not affiliated with or endorsed by Intel, HPE or the QEMU project.
 
