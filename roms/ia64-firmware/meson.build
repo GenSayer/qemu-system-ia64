@@ -10,7 +10,7 @@ build_fw_script = files('build_firmware.sh')
 ia64_firmware_bin = custom_target(
   'ia64-firmware.bin',
   output: 'ia64-firmware.bin',
-  input: files('entry.S', 'firmware.c', 'firmware.lds'),
+  input: files('entry.S', 'firmware.c', 'firmware.lds', 'linker-symbols.h'),
   command: [
     sh_prog,
     build_fw_script,

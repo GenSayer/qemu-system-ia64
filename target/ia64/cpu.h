@@ -16,7 +16,8 @@
 #undef NB_MMU_MODES
 #define MMU_PHYS_IDX     0
 #define MMU_IDX_VIRT     1
-#define NB_MMU_MODES     2
+#define MMU_IDX_RSE      2
+#define NB_MMU_MODES     3
 
 #define IA64_GR_COUNT    128
 #define IA64_PR_COUNT    64
@@ -90,12 +91,11 @@
 #define IA64_BUNDLE_SIZE  16ULL
 #define IA64_IP_BUNDLE_MASK (~(IA64_BUNDLE_SIZE - 1))
 #define IA64_REGION7_PHYS_MASK ((1ULL << IA64_REGION_SHIFT) - 1)
-#define IA64_REGION7_IDENTITY_LIMIT 0x0000010000000000ULL
+#define IA64_PHYS_UC_BIT (1ULL << 63)
 #define IA64_FW_IDENTITY_BASE 0x00100000ULL
 #define IA64_FW_IDENTITY_SIZE 0x00100000ULL
 #define IA64_FIRMWARE_IVT_BASE 0x10000ULL
-#define IA64_FW_BOOT_IDENTITY_LIMIT IA64_REGION7_IDENTITY_LIMIT
-#define IA64_LOCAL_SAPIC_VA   0xc0000000fee00000ULL
+#define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 #define IA64_LOCAL_SAPIC_PA   0x00000000fee00000ULL
 #define IA64_LOCAL_SAPIC_SIZE 0x00200000ULL
 #define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
@@ -120,36 +120,9 @@ static inline bool ia64_firmware_identity_pa(uint64_t va, uint64_t *pa)
     return false;
 }
 
-static inline bool ia64_region7_identity_pa(uint64_t va, uint64_t *pa)
+static inline uint64_t ia64_physical_address(uint64_t addr)
 {
-    uint64_t phys = va & IA64_REGION7_PHYS_MASK;
-
-    if (((va >> IA64_REGION_SHIFT) & IA64_REGION_MASK) != 7) {
-        return false;
-    }
-    if (phys >= IA64_REGION7_IDENTITY_LIMIT) {
-        return false;
-    }
-
-    *pa = phys;
-    return true;
-}
-
-static inline bool ia64_region6_uncached_pa(uint64_t va, uint64_t *pa)
-{
-    uint64_t phys = va & IA64_REGION7_PHYS_MASK;
-
-    if (((va >> IA64_REGION_SHIFT) & IA64_REGION_MASK) != 6) {
-        return false;
-    }
-
-    *pa = phys;
-    return true;
-}
-
-static inline bool ia64_psr_cpl0(uint64_t psr)
-{
-    return (psr & IA64_PSR_CPL_MASK) == 0;
+    return addr & ~IA64_PHYS_UC_BIT;
 }
 
 static inline uint64_t ia64_ip_bundle_addr(uint64_t ip)
@@ -193,34 +166,6 @@ static inline uint8_t ia64_psr_cpl(uint64_t psr)
     return (psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
 }
 
-static inline bool ia64_kernel_direct_data_pa(uint64_t psr, uint64_t rr,
-                                              uint64_t va, uint64_t *pa)
-{
-    if (!ia64_psr_cpl0(psr)) {
-        return false;
-    }
-
-    if (ia64_region6_uncached_pa(va, pa)) {
-        return true;
-    }
-
-    return ia64_rr_rid(rr) == 0 && ia64_region7_identity_pa(va, pa);
-}
-
-static inline bool ia64_region6_local_sapic_pa(uint64_t va, uint64_t *pa)
-{
-    uint64_t phys;
-
-    if (!ia64_region6_uncached_pa(va, &phys) ||
-        phys < IA64_LOCAL_SAPIC_PA ||
-        phys >= IA64_LOCAL_SAPIC_PA + IA64_LOCAL_SAPIC_SIZE) {
-        return false;
-    }
-
-    *pa = phys;
-    return true;
-}
-
 #define IA64_RI_0        (0ULL << 41)
 #define IA64_RI_1        (1ULL << 41)
 #define IA64_RI_2        (2ULL << 41)
@@ -228,8 +173,15 @@ static inline bool ia64_region6_local_sapic_pa(uint64_t va, uint64_t *pa)
 /* ---- RSC bit definitions ---- */
 #define IA64_RSC_MODE    0x3ULL
 #define IA64_RSC_PL      0xcULL
+#define IA64_RSC_PL_SHIFT 2
+#define IA64_RSC_BE      0x10ULL
 #define IA64_RSC_LOADRS_SHIFT 16
 #define IA64_RSC_LOADRS_MASK  0x3fffULL
+
+static inline uint8_t ia64_rsc_pl(uint64_t rsc)
+{
+    return (rsc & IA64_RSC_PL) >> IA64_RSC_PL_SHIFT;
+}
 
 /* ---- CFM mask definitions ---- */
 #define IA64_CFM_SOF_MASK     0x7f
@@ -271,6 +223,12 @@ static inline bool ia64_region6_local_sapic_pa(uint64_t va, uint64_t *pa)
 #define IA64_ITIR_PS_SHIFT   2
 #define IA64_ITIR_KEY_MASK   (0xffffffULL << 8)
 #define IA64_ITIR_KEY_SHIFT  8
+#define IA64_INSERTABLE_PAGE_SIZE_MASK \
+    ((1ULL << 12) | (1ULL << 13) | (1ULL << 14) | (1ULL << 16) | \
+     (1ULL << 18) | (1ULL << 20) | (1ULL << 22) | (1ULL << 24) | \
+     (1ULL << 26) | (1ULL << 28))
+#define IA64_PURGEABLE_PAGE_SIZE_MASK \
+    (IA64_INSERTABLE_PAGE_SIZE_MASK | (1ULL << 32))
 
 /* ---- General exception codes ---- */
 #define IA64_GENEX_UNIMPL_DATA_ADDR 43
@@ -389,6 +347,12 @@ typedef struct IA64AlatEntry {
     bool     valid;
 } IA64AlatEntry;
 
+typedef enum IA64RSECurrentFrameLoadOrigin {
+    IA64_RSE_CURRENT_FRAME_LOAD_NONE,
+    IA64_RSE_CURRENT_FRAME_LOAD_RFI,
+    IA64_RSE_CURRENT_FRAME_LOAD_BR_RET,
+} IA64RSECurrentFrameLoadOrigin;
+
 typedef struct IA64ExceptionFrame {
     uint32_t exception;
     uint64_t gr[IA64_GR_COUNT - 32];
@@ -406,6 +370,7 @@ typedef struct IA64ExceptionFrame {
     uint64_t iim;
     uint64_t iha;
     uint64_t interrupted_iip;
+    IA64RSECurrentFrameLoadOrigin interrupted_current_frame_load;
     uint64_t rnat;
     uint32_t rse_cumulative_words;
     uint32_t rse_spill_words;
@@ -649,6 +614,7 @@ typedef struct CPUArchState {
     uint64_t pal_io_block_addr;
 
     /* RSE dirty-region and spill tracking */
+    IA64RSECurrentFrameLoadOrigin rse_current_frame_load;
     uint32_t rse_cumulative_words; /* total stacked GR words across all frames */
     uint32_t rse_spill_words;      /* words spilled by last flushrs */
     uint64_t rse_spill_base;       /* physical address where last spill started */
@@ -784,6 +750,21 @@ static inline uint8_t ia64_rr_index(uint64_t va)
     return (va >> IA64_REGION_SHIFT) & IA64_REGION_MASK;
 }
 
+static inline uint64_t ia64_va_vpn_mask(uint64_t ps)
+{
+    return IA64_REGION7_PHYS_MASK & ~(ps - 1);
+}
+
+static inline uint64_t ia64_va_page_base(uint64_t va, uint64_t ps)
+{
+    return va & ia64_va_vpn_mask(ps);
+}
+
+static inline bool ia64_page_shift_insertable(uint8_t page_shift)
+{
+    return (IA64_INSERTABLE_PAGE_SIZE_MASK >> page_shift) & 1;
+}
+
 static inline uint32_t ia64_region_rid(const CPUIA64State *env, uint64_t va)
 {
     return ia64_rr_rid(env->rr[ia64_rr_index(va)]);
@@ -902,6 +883,7 @@ static inline bool ia64_vhpt_config_valid(const CPUIA64State *env,
 
 static inline bool ia64_vhpt_walker_enabled(const CPUIA64State *env,
                                             uint64_t va, bool is_ifetch,
+                                            bool is_rse,
                                             uint8_t *size,
                                             bool *long_format)
 {
@@ -914,7 +896,8 @@ static inline bool ia64_vhpt_walker_enabled(const CPUIA64State *env,
     if (!(env->rr[ia64_rr_index(va)] & IA64_RR_VE)) {
         return false;
     }
-    if (!(env->psr & IA64_PSR_DT)) {
+    if (!(env->psr & IA64_PSR_DT) ||
+        (is_rse && !(env->psr & IA64_PSR_RT))) {
         return false;
     }
     if (is_ifetch &&
@@ -936,14 +919,18 @@ static inline bool ia64_exception_initializes_iha(int excp)
 }
 
 bool ia64_vhpt_walk(CPUIA64State *env, uint64_t va, uint32_t rid,
-                    bool is_ifetch, uint64_t *pa, uint8_t *perm);
+                    bool is_ifetch, bool is_rse, uint8_t access_level,
+                    uint64_t *pa, uint8_t *perm);
 bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
-                         bool is_ifetch, uint64_t *pa, uint8_t *perm,
-                         uint64_t *pte, uint32_t *key);
+                         bool is_ifetch, bool is_rse, uint8_t access_level,
+                         uint64_t *pa, uint8_t *perm, uint64_t *pte,
+                         uint32_t *key);
 bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
-                               bool is_ifetch, uint64_t *entry_va);
+                               bool is_ifetch, bool is_rse,
+                               uint64_t *entry_va);
 bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,
-                                bool is_ifetch, uint64_t *entry_va);
+                                bool is_ifetch, bool is_rse,
+                                uint64_t *entry_va);
 uint64_t ia64_vhpt_hash_address(CPUIA64State *env, uint64_t va);
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value);

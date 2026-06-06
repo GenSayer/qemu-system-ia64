@@ -7,8 +7,16 @@ SECTIONS
 {
     . = 0x100000;
 
-    .text : {
+    .text.boot : {
         *(.text._start)
+        *(.text.pal_proc_entry)
+        *(.text.start_after_pal)
+    }
+
+    . = ALIGN(0x2000);
+    __runtime_code_start = .;
+
+    .text : {
         *(.text*)
         *(.plt*)
     }

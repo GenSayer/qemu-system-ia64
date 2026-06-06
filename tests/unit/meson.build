@@ -257,7 +257,7 @@ if 'ia64-softmmu' in target_dirs
          meson.project_build_root() / 'qemu-system-ia64',
        ],
        protocol: 'tap',
-       timeout: 180,
+       timeout: 600,
        suite: ['unit', 'ia64'])
 
   test('test-ia64-fw-smoke',

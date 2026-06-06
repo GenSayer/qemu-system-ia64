@@ -21,6 +21,20 @@
 #define IA64_PTE_PL_MASK  (3ULL << IA64_PTE_PL_SHIFT)
 #define IA64_PTE_AR_SHIFT 9
 #define IA64_PTE_AR_MASK  (7ULL << IA64_PTE_AR_SHIFT)
+#define IA64_PTE_MA_SHIFT 2
+#define IA64_PTE_MA_MASK  (7ULL << IA64_PTE_MA_SHIFT)
+#define IA64_PTE_MA_WB 0
+#define IA64_PTE_MA_UC 4
+#define IA64_PTE_MA_UCE 5
+#define IA64_PTE_MA_WC 6
+#define IA64_PTE_MA_NATPAGE 7
+#define IA64_PTE_RESERVED_MASK ((1ULL << 1) | (3ULL << 50))
+#define IA64_ITIR_RESERVED_MASK (3ULL | (0xffffffffULL << 32))
+typedef enum IA64MemorySpeculation {
+    IA64_MEM_NON_SPECULATIVE,
+    IA64_MEM_LIMITED_SPECULATION,
+    IA64_MEM_SPECULATIVE,
+} IA64MemorySpeculation;
 
 #define IA64_FP_REG_INTEGER_EXP 0x1003e
 #define IA64_FP_REG_NATVAL_EXP  0x1fffe
@@ -34,9 +48,7 @@
 #define IA64_CPUID_VENDOR1           0x000000006c65746eULL /* "ntel" */
 #define IA64_CPUID_SERIAL            0x0000000000000000ULL
 #define IA64_CPUID_VERSION_ITANIUM2  0x000000001f010504ULL
-#define IA64_CPUID_FEATURES          ((1ULL << 0) | (1ULL << 1) | \
-                                      (1ULL << 2) | (1ULL << 32) | \
-                                      (1ULL << 33))
+#define IA64_CPUID_FEATURES          ((1ULL << 0) | (1ULL << 32) | (1ULL << 33))
 
 static inline void ia64_fr_write(CPUIA64State *env, uint32_t reg,
                                  uint64_t value)
@@ -292,13 +304,13 @@ static bool ia64_tlb_entry_overlaps(const IA64TlbEntry *entry,
         return false;
     }
 
-    start = (va & IA64_REGION7_PHYS_MASK) & ~(ps - 1);
+    start = ia64_va_page_base(va, ps);
     end = start + ps - 1;
     if (end < start || end > IA64_REGION7_PHYS_MASK) {
         end = IA64_REGION7_PHYS_MASK;
     }
 
-    entry_start = (entry->va & IA64_REGION7_PHYS_MASK) & ~(entry->ps - 1);
+    entry_start = ia64_va_page_base(entry->va, entry->ps);
     entry_end = entry_start + entry->ps - 1;
     if (entry_end < entry_start || entry_end > IA64_REGION7_PHYS_MASK) {
         entry_end = IA64_REGION7_PHYS_MASK;
@@ -311,23 +323,36 @@ static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
                                       const IA64TlbEntry *entry)
 {
     uint64_t base;
+    uint8_t region;
 
     if (!entry->valid || entry->ps < TARGET_PAGE_SIZE) {
         return;
     }
 
-    base = entry->va & ~(entry->ps - 1);
-    tlb_flush_range_by_mmuidx(env_cpu(env), base, entry->ps,
-                              1u << MMU_IDX_VIRT, TARGET_LONG_BITS);
+    base = ia64_va_page_base(entry->va, entry->ps);
+    for (region = 0; region <= IA64_REGION_MASK; region++) {
+        uint64_t va = ((uint64_t)region << IA64_REGION_SHIFT) | base;
+
+        tlb_flush_range_by_mmuidx(env_cpu(env), va, entry->ps,
+                                  (1u << MMU_IDX_VIRT) | (1u << MMU_IDX_RSE),
+                                  TARGET_LONG_BITS);
+    }
 }
 
 static bool ia64_data_address_to_mapped_phys(CPUIA64State *env, uint64_t va,
+                                             bool is_rse,
+                                             uint8_t access_level,
                                              uint64_t *pa);
 static bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va,
                                       uint64_t *pa);
+static bool ia64_data_address_to_phys_attr(CPUIA64State *env, uint64_t va,
+                                           uint64_t *pa,
+                                           IA64MemorySpeculation *spec);
 static bool ia64_rse_address_to_phys(CPUIA64State *env, uint64_t va,
                                      uint64_t *pa);
 static uint64_t ia64_rse_mapped_bsp(CPUIA64State *env, uint64_t bsp);
+static int ia64_rse_bsp_compare(CPUIA64State *env, uint64_t left,
+                                uint64_t right);
 static void ia64_raise_data_reference_fault_if_needed(CPUIA64State *env,
                                                       uint64_t va,
                                                       uint32_t is_write,
@@ -373,18 +398,28 @@ static uint64_t ia64_rse_canonical_bsp(CPUIA64State *env, uint64_t bsp)
 
 static int ia64_rse_mmu_index(CPUIA64State *env)
 {
-    return env->psr & IA64_PSR_RT ? MMU_IDX_VIRT : MMU_PHYS_IDX;
+    return env->psr & IA64_PSR_RT ? MMU_IDX_RSE : MMU_PHYS_IDX;
 }
 
 static void ia64_rse_write_u64(CPUIA64State *env, uint64_t addr,
                                uint64_t value)
 {
-    cpu_stq_mmuidx_ra(env, addr, value, ia64_rse_mmu_index(env), GETPC());
+    int mmu_idx = ia64_rse_mmu_index(env);
+
+    if (env->ar_rsc & IA64_RSC_BE) {
+        cpu_stq_be_mmuidx_ra(env, addr, value, mmu_idx, GETPC());
+    } else {
+        cpu_stq_le_mmuidx_ra(env, addr, value, mmu_idx, GETPC());
+    }
 }
 
 static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr)
 {
-    return cpu_ldq_mmuidx_ra(env, addr, ia64_rse_mmu_index(env), GETPC());
+    int mmu_idx = ia64_rse_mmu_index(env);
+
+    return env->ar_rsc & IA64_RSC_BE ?
+           cpu_ldq_be_mmuidx_ra(env, addr, mmu_idx, GETPC()) :
+           cpu_ldq_le_mmuidx_ra(env, addr, mmu_idx, GETPC());
 }
 
 /*
@@ -563,6 +598,36 @@ static uint64_t ia64_current_pfs(const CPUIA64State *env)
     return ia64_current_cfm(env)
         | ((env->ar_ec & 0x3fULL) << IA64_PFS_PEC_SHIFT)
         | ((uint64_t)ia64_psr_cpl(env->psr) << IA64_PFS_PPL_SHIFT);
+}
+
+static uint64_t ia64_rse_nat_mask0(uint32_t words)
+{
+    if (words >= 32) {
+        return UINT64_MAX;
+    }
+    return (1ULL << (IA64_STACKED_GR_BASE + words)) - 1;
+}
+
+static uint64_t ia64_rse_nat_mask1(uint32_t words)
+{
+    if (words <= 32) {
+        return 0;
+    }
+    if (words >= IA64_STACKED_GR_COUNT) {
+        return UINT64_MAX;
+    }
+    return (1ULL << (words - 32)) - 1;
+}
+
+static void ia64_rse_mask_nat_to_words(uint64_t nat[2], uint32_t words)
+{
+    nat[0] &= ia64_rse_nat_mask0(words);
+    nat[1] &= ia64_rse_nat_mask1(words);
+}
+
+static void ia64_rse_mask_current_frame_nat(CPUIA64State *env)
+{
+    ia64_rse_mask_nat_to_words(env->nat, env->cfm_sof);
 }
 
 static void ia64_rse_resize_current_frame(CPUIA64State *env, uint32_t sof)
@@ -860,12 +925,109 @@ uint64_t helper_cmp8xchg16(CPUIA64State *env, uint64_t addr, uint64_t cmp,
     return old;
 }
 
+static bool ia64_rfi_same_bspstore(CPUIA64State *env,
+                                  const IA64ExceptionFrame *frame)
+{
+    return ia64_rse_mapped_bsp(env, env->ar_bspstore) ==
+           ia64_rse_mapped_bsp(env, frame->bspstore);
+}
+
+static bool ia64_rfi_loadrs_zero_at_interrupted_bsp(
+    CPUIA64State *env, const IA64ExceptionFrame *frame, uint32_t sof)
+{
+    return ia64_rse_mapped_bsp(env, env->ar_bspstore) ==
+           ia64_rse_mapped_bsp(env, frame->bsp) &&
+           env->rse_frame_depth == 0 &&
+           env->rse_cover_depth == 0 &&
+           env->rse_spill_words == 0 &&
+           env->rse_cumulative_words == sof &&
+           !env->rse_bspstore_switched;
+}
+
+static bool ia64_rfi_ifm_matches(const IA64ExceptionFrame *frame,
+                                 uint64_t cfm_val, bool ifs_valid)
+{
+    return ifs_valid &&
+           (cfm_val & IA64_IFS_IFM_MASK) ==
+           (frame->ifm & IA64_IFS_IFM_MASK);
+}
+
+static unsigned ia64_rfi_frame_match_score(CPUIA64State *env,
+                                           const IA64ExceptionFrame *frame,
+                                           uint64_t iip, uint64_t cfm_val,
+                                           bool ifs_valid)
+{
+    unsigned score = 0;
+    uint32_t target_sof =
+        ifs_valid ? cfm_val & IA64_CFM_SOF_MASK : env->cfm_sof;
+    bool same_bspstore = ia64_rfi_same_bspstore(env, frame);
+    bool loadrs_zero_at_interrupted_bsp =
+        ia64_rfi_loadrs_zero_at_interrupted_bsp(env, frame, target_sof);
+
+    if (iip == ia64_ip_bundle_addr(frame->interrupted_iip)) {
+        score += 4;
+    }
+    if (same_bspstore || loadrs_zero_at_interrupted_bsp ||
+        (frame->rse_bspstore_switched &&
+         iip != ia64_ip_bundle_addr(frame->interrupted_iip))) {
+        score += 2;
+    }
+    if (!ifs_valid) {
+        return score;
+    }
+    if (ia64_rfi_ifm_matches(frame, cfm_val, ifs_valid)) {
+        score += 1;
+    }
+    return score;
+}
+
+static IA64ExceptionFrame *ia64_rfi_select_exception_frame(CPUIA64State *env,
+                                                           uint64_t iip,
+                                                           uint64_t cfm_val,
+                                                           bool ifs_valid)
+{
+    uint32_t selected = env->excp_frame_depth - 1;
+    unsigned best_score;
+
+    best_score = ia64_rfi_frame_match_score(env, &env->excp_frames[selected],
+                                            iip, cfm_val, ifs_valid);
+    for (uint32_t i = selected; i-- > 0;) {
+        unsigned score =
+            ia64_rfi_frame_match_score(env, &env->excp_frames[i],
+                                       iip, cfm_val, ifs_valid);
+
+        if (score > best_score) {
+            best_score = score;
+            selected = i;
+        }
+    }
+
+    /*
+     * Exception frames are an emulator cache, not architectural state.  An
+     * exact interrupted IP, a matching backing-store context, or a matching
+     * IFM ties a cache entry to this return.  A zero score means the guest
+     * rebuilt a context unrelated to every cached exception frame.
+     */
+    if (best_score == 0) {
+        env->excp_frame_depth = 0;
+        return NULL;
+    }
+    env->excp_frame_depth = selected;
+    return &env->excp_frames[selected];
+}
+
 void helper_rfi(CPUIA64State *env)
 {
     uint64_t ipsr = env->cr_ipsr;
     uint64_t iip = ia64_ip_bundle_addr(env->cr_iip);
     uint64_t cfm_val = env->cr_ifs;
+    uint32_t current_sof = env->cfm_sof;
+    IA64ExceptionFrame *selected_frame = NULL;
     bool ifs_valid = cfm_val & IA64_IFS_V;
+    bool load_current_frame = false;
+    bool drop_transient_snapshots = false;
+    bool restore_call_cache = false;
+    bool external_context = env->excp_frame_depth == 0;
 
     if (ifs_valid) {
         env->cfm_sof = cfm_val & IA64_CFM_SOF_MASK;
@@ -874,99 +1036,93 @@ void helper_rfi(CPUIA64State *env)
         env->cfm_rrb_gr =
             (cfm_val & IA64_CFM_RRB_GR_MASK) >> IA64_CFM_RRB_GR_SHIFT;
     }
-    if (env->excp_frame_depth > 0) {
-        uint32_t depth = --env->excp_frame_depth;
-        IA64ExceptionFrame *frame = &env->excp_frames[depth];
-        bool same_bspstore =
-            ia64_rse_mapped_bsp(env, env->ar_bspstore) ==
-            ia64_rse_mapped_bsp(env, frame->bspstore);
-        /*
-         * loadrs with a zero distance invalidates live non-current frames and
-         * leaves BSPSTORE at the interrupted BSP.  The collected interruption
-         * frame still owns the emulator's saved RSE frame cache for rfi.
-         */
-        bool loadrs_zero_at_interrupted_bsp =
-            ia64_rse_mapped_bsp(env, env->ar_bspstore) ==
-            ia64_rse_mapped_bsp(env, frame->bsp) &&
-            env->rse_frame_depth == 0 &&
-            env->rse_cover_depth == 0 &&
-            env->rse_spill_words == 0 &&
-            env->rse_cumulative_words == env->cfm_sof &&
-            !env->rse_bspstore_switched;
-        bool ifm_match =
-            ifs_valid &&
-            ((cfm_val & IA64_IFS_IFM_MASK) ==
-             (frame->ifm & IA64_IFS_IFM_MASK));
-        bool restore_frame =
-            (same_bspstore || loadrs_zero_at_interrupted_bsp) &&
-            (ifm_match ||
-             !ifs_valid);
-        bool advanced_bspstore_return =
-            frame->rse_bspstore_switched &&
-            iip != frame->interrupted_iip;
-        bool restore_advanced_call_cache =
-            same_bspstore && ifs_valid && ifm_match &&
-            advanced_bspstore_return;
-        bool advanced_dirty_frame_return =
-            advanced_bspstore_return &&
-            (env->rse_frame_depth > 0 || env->rse_cover_depth > 0);
-        bool restore_current_frame =
-            ifs_valid &&
-            (same_bspstore || loadrs_zero_at_interrupted_bsp ||
-             ifm_match || advanced_dirty_frame_return);
+    if (!external_context) {
+        IA64ExceptionFrame *frame =
+            ia64_rfi_select_exception_frame(env, iip, cfm_val, ifs_valid);
 
-        if (restore_frame && advanced_bspstore_return) {
-            restore_frame = false;
-        }
-
-        if (restore_frame) {
-            memcpy(&env->gr[32], frame->gr, sizeof(frame->gr));
-            memcpy(env->nat, frame->nat, sizeof(frame->nat));
-            env->ar_bsp = frame->bsp;
-            env->ar_bspstore = frame->bspstore;
-            env->ar_rnat = frame->rnat;
-            env->rse_cumulative_words = frame->rse_cumulative_words;
-            env->rse_spill_words = frame->rse_spill_words;
-            env->rse_spill_base = frame->rse_spill_base;
-            env->rse_bspstore_switched = frame->rse_bspstore_switched;
-            env->rse_flushed = frame->rse_flushed;
-            ia64_rse_restore_exception_snapshots(env, frame);
+        if (frame == NULL) {
+            external_context = true;
+            drop_transient_snapshots = true;
         } else {
-            if (same_bspstore) {
-                env->ar_rnat = ia64_rse_spill_exception_frame(env, frame);
-            }
+            bool same_bspstore = ia64_rfi_same_bspstore(env, frame);
+            bool retry_interrupted_rfi_fill =
+                frame->interrupted_current_frame_load ==
+                IA64_RSE_CURRENT_FRAME_LOAD_RFI;
             /*
-             * An advanced rfi target can be the current dirty frame saved by
-             * cover in the interruption handler.  Restore it before dropping
-             * the transient cover/loadrs snapshots.
+             * loadrs with a zero distance invalidates live non-current frames
+             * and leaves BSPSTORE at the interrupted BSP.  The collected
+             * interruption frame still owns the emulator's saved RSE frame
+             * cache for rfi.
              */
-            if (restore_current_frame) {
-                ia64_rse_restore_current_frame_from_bsp(env, env->cfm_sof);
+            bool loadrs_zero_at_interrupted_bsp =
+                ia64_rfi_loadrs_zero_at_interrupted_bsp(
+                    env, frame, env->cfm_sof);
+            bool ifm_match = ia64_rfi_ifm_matches(frame, cfm_val, ifs_valid);
+            bool restore_frame =
+                (same_bspstore || loadrs_zero_at_interrupted_bsp) &&
+                (ifm_match ||
+                 !ifs_valid);
+            bool advanced_iip_return = iip != frame->interrupted_iip;
+            bool advanced_bspstore_return =
+                frame->rse_bspstore_switched &&
+                advanced_iip_return;
+            bool restore_call_cache_requested = ifs_valid && ifm_match;
+            bool advanced_dirty_frame_return =
+                advanced_bspstore_return &&
+                (env->rse_frame_depth > 0 || env->rse_cover_depth > 0);
+            bool restore_current_frame =
+                ifs_valid &&
+                (same_bspstore || loadrs_zero_at_interrupted_bsp ||
+                 ifm_match || advanced_dirty_frame_return);
+
+            if (restore_frame && advanced_bspstore_return) {
+                restore_frame = false;
             }
-            ia64_rse_drop_snapshots(env);
-            if (restore_advanced_call_cache &&
-                ia64_rse_exception_top_matches_pfs(env, frame)) {
+
+            if (restore_frame) {
+                memcpy(&env->gr[32], frame->gr, sizeof(frame->gr));
+                memcpy(env->nat, frame->nat, sizeof(frame->nat));
+                env->ar_bsp = frame->bsp;
+                env->ar_bspstore = frame->bspstore;
+                env->ar_rnat = frame->rnat;
+                env->rse_cumulative_words = frame->rse_cumulative_words;
+                env->rse_spill_words = frame->rse_spill_words;
+                env->rse_spill_base = frame->rse_spill_base;
+                env->rse_bspstore_switched = frame->rse_bspstore_switched;
+                env->rse_flushed = frame->rse_flushed;
                 ia64_rse_restore_exception_snapshots(env, frame);
+                load_current_frame = retry_interrupted_rfi_fill;
+            } else {
+                if (same_bspstore) {
+                    env->ar_rnat = ia64_rse_spill_exception_frame(env, frame);
+                }
+                selected_frame = frame;
+                load_current_frame = restore_current_frame ||
+                                     retry_interrupted_rfi_fill;
+                drop_transient_snapshots = true;
+                restore_call_cache = restore_call_cache_requested;
             }
+            env->cr_ipsr = frame->ipsr;
+            env->cr_iip = frame->iip;
+            env->cr_ifs = frame->ifs;
+            env->cr_ifa = frame->ifa;
+            env->cr_isr = frame->isr;
+            env->cr_itir = frame->itir;
+            env->cr_iipa = frame->iipa;
+            env->cr_iim = frame->iim;
+            env->cr_iha = frame->iha;
         }
-        env->cr_ipsr = frame->ipsr;
-        env->cr_iip = frame->iip;
-        env->cr_ifs = frame->ifs;
-        env->cr_ifa = frame->ifa;
-        env->cr_isr = frame->isr;
-        env->cr_itir = frame->itir;
-        env->cr_iipa = frame->iipa;
-        env->cr_iim = frame->iim;
-        env->cr_iha = frame->iha;
-    } else {
+    }
+    if (external_context) {
         /*
          * Software return stubs can rebuild IPSR/IIP/IFS after cover/loadrs
-         * without entering through QEMU's exception-frame stack.  A valid IFS
-         * still makes IFM the current frame on rfi.
+         * or switch to a context unrelated to QEMU's cached exception frames.
+         * A valid IFS still makes IFM the current frame on rfi.  Restoring a
+         * frame larger than the current frame requires current-frame loads;
+         * shrinking to a frame already resident in the stacked register file
+         * does not.
          */
-        if (ifs_valid) {
-            ia64_rse_restore_current_frame_from_bsp(env, env->cfm_sof);
-        }
+        load_current_frame = ifs_valid && env->cfm_sof > current_sof;
         env->cr_ipsr = 0;
         env->cr_iip = 0;
         env->cr_ifs = 0;
@@ -977,13 +1133,36 @@ void helper_rfi(CPUIA64State *env)
     env->fault_slot = 0;
     ia64_invalidate_stacked_alat(env);
     /*
-     * RSE restore can fault; publish the restored PSR/IP only after it
-     * succeeds.
+     * rfi restores PSR before changing the RSE frame.  Mandatory RSE loads
+     * are delivered on the target instruction and therefore use the restored
+     * PSR's rt/ic state, not the interruption handler's PSR.
      */
     ia64_set_psr(env, ipsr);
     env->ip = iip;
     helper_tlb_serialize(env, 1, 1);
     tlb_flush(env_cpu(env));
+
+    /*
+     * The rfi target can be the current dirty frame saved by cover in the
+     * interruption handler.  Restore it before dropping the transient
+     * cover/loadrs snapshots.  A matching IFM can also identify interrupted
+     * caller snapshots after either an advanced or same-IP return; preserve
+     * them only when their top frame still matches the restored PFS and BSP.
+     */
+    if (load_current_frame) {
+        env->rse_current_frame_load = IA64_RSE_CURRENT_FRAME_LOAD_RFI;
+        ia64_rse_restore_current_frame_from_bsp(env, env->cfm_sof);
+        env->rse_current_frame_load = IA64_RSE_CURRENT_FRAME_LOAD_NONE;
+    }
+    if (drop_transient_snapshots) {
+        bool call_cache_matches =
+            restore_call_cache &&
+            ia64_rse_exception_top_matches_pfs(env, selected_frame);
+        ia64_rse_drop_snapshots(env);
+        if (call_cache_matches) {
+            ia64_rse_restore_exception_snapshots(env, selected_frame);
+        }
+    }
 }
 
 uint64_t helper_read_pr(CPUIA64State *env)
@@ -999,16 +1178,14 @@ uint64_t helper_read_pr(CPUIA64State *env)
 
 static void ia64_rse_trim_frames_to_bsp(CPUIA64State *env, uint64_t bsp)
 {
-    uint64_t trim_bsp = ia64_rse_canonical_bsp(env, bsp);
-
     while (env->rse_frame_depth > 0 &&
-           ia64_rse_canonical_bsp(
-               env, env->rse_frame_bsp[env->rse_frame_depth - 1]) > trim_bsp) {
+           ia64_rse_bsp_compare(
+               env, env->rse_frame_bsp[env->rse_frame_depth - 1], bsp) > 0) {
         env->rse_frame_depth--;
     }
     while (env->rse_cover_depth > 0 &&
-           ia64_rse_canonical_bsp(
-               env, env->rse_cover_bsp[env->rse_cover_depth - 1]) > trim_bsp) {
+           ia64_rse_bsp_compare(
+               env, env->rse_cover_bsp[env->rse_cover_depth - 1], bsp) > 0) {
         env->rse_cover_depth--;
     }
 }
@@ -1048,6 +1225,84 @@ void helper_epc(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
 static bool ia64_rse_is_rnat_slot(uint64_t bsp)
 {
     return ((bsp >> 3) & 0x3f) == 0x3f;
+}
+
+static uint64_t ia64_rse_spill_trailing_rnat(CPUIA64State *env,
+                                             uint64_t bspstore,
+                                             uint64_t rnat)
+{
+    /*
+     * BSP advances past the RNAT slot after register slot 62.  Materialize
+     * that completed collection even when no later register starts another
+     * spill-loop iteration.
+     */
+    if (ia64_rse_is_rnat_slot(bspstore)) {
+        ia64_rse_write_u64(env, bspstore, rnat);
+        return 0;
+    }
+    return rnat;
+}
+
+static uint64_t ia64_rse_rnat_assign(uint64_t rnat, uint64_t addr, bool nat)
+{
+    uint64_t bit = 1ULL << ((addr >> 3) & 0x3f);
+
+    if (nat) {
+        rnat |= bit;
+    } else {
+        rnat &= ~bit;
+    }
+    return rnat & ~(1ULL << 63);
+}
+
+static uint64_t ia64_rse_rnat_address(uint64_t addr)
+{
+    return (addr & ~0x1ffULL) | 0x1f8;
+}
+
+static uint64_t ia64_rse_backing_rnat_for_addr(CPUIA64State *env,
+                                               uint64_t addr)
+{
+    return ia64_rse_read_u64(env, ia64_rse_rnat_address(addr)) &
+           ~(1ULL << 63);
+}
+
+static uint64_t ia64_rse_rnat_defined_mask(uint64_t bspstore)
+{
+    uint32_t index = (bspstore >> 3) & 0x3f;
+
+    if (index >= 62) {
+        return ~(1ULL << 63);
+    }
+    return (1ULL << (index + 1)) - 1;
+}
+
+static uint64_t ia64_rse_rnat_for_addr(CPUIA64State *env, uint64_t addr,
+                                       uint64_t bspstore, uint64_t rnat)
+{
+    uint64_t rnat_addr = ia64_rse_rnat_address(addr);
+
+    if (rnat_addr == ia64_rse_rnat_address(bspstore)) {
+        return rnat & ~(1ULL << 63);
+    }
+    return ia64_rse_backing_rnat_for_addr(env, addr);
+}
+
+static uint64_t ia64_rse_rnat_for_bspstore(CPUIA64State *env,
+                                           uint64_t bspstore,
+                                           uint64_t old_bspstore,
+                                           uint64_t old_rnat)
+{
+    return ia64_rse_rnat_for_addr(env, bspstore, old_bspstore, old_rnat) &
+           ia64_rse_rnat_defined_mask(bspstore);
+}
+
+static int ia64_rse_backing_nat_at(CPUIA64State *env, uint64_t addr,
+                                   uint64_t bspstore, uint64_t rnat)
+{
+    uint64_t collection = ia64_rse_rnat_for_addr(env, addr, bspstore, rnat);
+
+    return (collection >> ((addr >> 3) & 0x3f)) & 1;
 }
 
 static uint64_t ia64_rse_bsp_advance(uint64_t bsp, uint32_t words)
@@ -1093,11 +1348,22 @@ static uint64_t ia64_rse_mapped_bsp(CPUIA64State *env, uint64_t bsp)
     return ia64_rse_canonical_bsp(env, bsp);
 }
 
-static bool ia64_rse_bsp_distance(CPUIA64State *env, uint64_t start,
-                                  uint64_t end, uint32_t *words)
+static int ia64_rse_bsp_compare(CPUIA64State *env, uint64_t left,
+                                uint64_t right)
 {
-    uint64_t start_slot = ia64_rse_mapped_bsp(env, start) >> 3;
-    uint64_t end_slot = ia64_rse_mapped_bsp(env, end) >> 3;
+    if (ia64_rr_index(left) != ia64_rr_index(right)) {
+        left = ia64_rse_mapped_bsp(env, left);
+        right = ia64_rse_mapped_bsp(env, right);
+    }
+    return (left > right) - (left < right);
+}
+
+static bool ia64_rse_bsp_distance_in_address_space(uint64_t start,
+                                                   uint64_t end,
+                                                   uint32_t *words)
+{
+    uint64_t start_slot = start >> 3;
+    uint64_t end_slot = end >> 3;
     uint64_t total_slots;
     uint64_t rnat_slots;
 
@@ -1109,6 +1375,18 @@ static bool ia64_rse_bsp_distance(CPUIA64State *env, uint64_t start,
     rnat_slots = end_slot / 64 - start_slot / 64;
     *words = total_slots - rnat_slots;
     return *words <= UINT32_MAX;
+}
+
+static bool ia64_rse_bsp_distance(CPUIA64State *env, uint64_t start,
+                                  uint64_t end, uint32_t *words)
+{
+    if (ia64_rr_index(start) == ia64_rr_index(end)) {
+        return ia64_rse_bsp_distance_in_address_space(start, end, words);
+    }
+
+    return ia64_rse_bsp_distance_in_address_space(
+        ia64_rse_mapped_bsp(env, start), ia64_rse_mapped_bsp(env, end),
+        words);
 }
 
 static void ia64_rse_rebase_spilled_snapshots(CPUIA64State *env,
@@ -1169,8 +1447,8 @@ static void ia64_rse_refresh_cumulative(CPUIA64State *env)
 
     if (ia64_rse_bsp_distance(env, env->ar_bspstore, env->ar_bsp, &dirty)) {
         env->rse_cumulative_words = dirty + env->cfm_sof;
-    } else if (ia64_rse_mapped_bsp(env, env->ar_bsp) <=
-               ia64_rse_mapped_bsp(env, env->ar_bspstore)) {
+    } else if (ia64_rse_bsp_compare(env, env->ar_bsp,
+                                    env->ar_bspstore) <= 0) {
         env->rse_cumulative_words = env->cfm_sof;
     }
 }
@@ -1183,8 +1461,7 @@ static void ia64_rse_redirty_current_frame(CPUIA64State *env)
      * make the whole frame dirty so later spills preserve any writes performed
      * after it was last loaded.
      */
-    if (ia64_rse_mapped_bsp(env, env->ar_bspstore) >
-        ia64_rse_mapped_bsp(env, env->ar_bsp)) {
+    if (ia64_rse_bsp_compare(env, env->ar_bspstore, env->ar_bsp) > 0) {
         env->ar_bspstore = env->ar_bsp;
     }
 }
@@ -1418,44 +1695,39 @@ static void ia64_rse_evict_parent_frames(CPUIA64State *env)
 static bool ia64_rse_bsp_in_spill_range(CPUIA64State *env, uint64_t bsp,
                                         uint64_t old_bspstore)
 {
-    uint64_t new_bsp = ia64_rse_mapped_bsp(env, bsp);
-    uint64_t base = ia64_rse_mapped_bsp(env, env->rse_spill_base);
+    uint64_t base = env->rse_spill_base;
     uint64_t end =
-        ia64_rse_mapped_bsp(env,
-                            ia64_rse_bsp_advance(
-                                old_bspstore,
-                                env->rse_cumulative_words));
+        ia64_rse_bsp_advance(old_bspstore, env->rse_cumulative_words);
 
     if (env->rse_frame_depth > 0) {
         uint32_t depth = env->rse_frame_depth - 1;
         uint64_t frame_end =
-            ia64_rse_mapped_bsp(
-                env, ia64_rse_bsp_advance(env->rse_frame_bsp[depth],
-                                          env->rse_frame_sof[depth]));
+            ia64_rse_bsp_advance(env->rse_frame_bsp[depth],
+                                 env->rse_frame_sof[depth]);
 
-        if (frame_end > end) {
+        if (ia64_rse_bsp_compare(env, frame_end, end) > 0) {
             end = frame_end;
         }
     }
     if (env->rse_cover_depth > 0) {
         uint32_t depth = env->rse_cover_depth - 1;
         uint64_t cover_end =
-            ia64_rse_mapped_bsp(
-                env, ia64_rse_bsp_advance(env->rse_cover_bsp[depth],
-                                          env->rse_cover_sof[depth]));
+            ia64_rse_bsp_advance(env->rse_cover_bsp[depth],
+                                 env->rse_cover_sof[depth]);
 
-        if (cover_end > end) {
+        if (ia64_rse_bsp_compare(env, cover_end, end) > 0) {
             end = cover_end;
         }
     }
 
-    if (end < base) {
+    if (ia64_rse_bsp_compare(env, end, base) < 0) {
         uint64_t tmp = base;
 
         base = end;
         end = tmp;
     }
-    return new_bsp >= base && new_bsp <= end;
+    return ia64_rse_bsp_compare(env, bsp, base) >= 0 &&
+           ia64_rse_bsp_compare(env, bsp, end) <= 0;
 }
 
 static int ia64_rse_snapshot_nat_bit(const uint64_t nat[2], uint32_t index)
@@ -1463,6 +1735,39 @@ static int ia64_rse_snapshot_nat_bit(const uint64_t nat[2], uint32_t index)
     uint32_t reg = IA64_STACKED_GR_BASE + index;
 
     return (nat[reg / 64] >> (reg % 64)) & 1;
+}
+
+static bool ia64_rse_cover_word_at(
+    CPUIA64State *env,
+    const uint64_t cover_gr[IA64_RSE_FRAME_MAX][IA64_STACKED_GR_COUNT],
+    const uint64_t cover_nat[IA64_RSE_FRAME_MAX][2],
+    const uint8_t cover_sof[IA64_RSE_FRAME_MAX],
+    const uint64_t cover_bsp[IA64_RSE_FRAME_MAX],
+    uint32_t cover_depth, uint64_t addr, uint64_t *value, int *nat)
+{
+    int depth;
+
+    /*
+     * A frame can be covered again after being restored and modified.  The
+     * most recent snapshot contains the current dirty-register contents for
+     * any overlapping backing-store locations.
+     */
+    for (depth = (int)cover_depth - 1; depth >= 0; depth--) {
+        uint32_t sof = cover_sof[depth];
+        uint32_t index;
+
+        if (sof == 0 ||
+            !ia64_rse_bsp_distance(env, cover_bsp[depth], addr, &index) ||
+            index >= sof) {
+            continue;
+        }
+
+        *value = cover_gr[depth][index];
+        *nat = ia64_rse_snapshot_nat_bit(cover_nat[depth], index);
+        return true;
+    }
+
+    return false;
 }
 
 static bool ia64_rse_snapshot_word_at(CPUIA64State *env, uint64_t addr,
@@ -1485,23 +1790,10 @@ static bool ia64_rse_snapshot_word_at(CPUIA64State *env, uint64_t addr,
         *nat = ia64_rse_snapshot_nat_bit(env->rse_frame_nat[depth], index);
         return true;
     }
-    for (depth = 0; depth < env->rse_cover_depth; depth++) {
-        uint32_t sof = env->rse_cover_sof[depth];
-        uint32_t index;
 
-        if (sof == 0 ||
-            !ia64_rse_bsp_distance(env, env->rse_cover_bsp[depth], addr,
-                                   &index) ||
-            index >= sof) {
-            continue;
-        }
-
-        *value = env->rse_cover_gr[depth][index];
-        *nat = ia64_rse_snapshot_nat_bit(env->rse_cover_nat[depth], index);
-        return true;
-    }
-
-    return false;
+    return ia64_rse_cover_word_at(env, env->rse_cover_gr, env->rse_cover_nat,
+                                  env->rse_cover_sof, env->rse_cover_bsp,
+                                  env->rse_cover_depth, addr, value, nat);
 }
 
 static bool ia64_rse_read_backing_u64_if_mapped(CPUIA64State *env,
@@ -1516,7 +1808,7 @@ static bool ia64_rse_read_backing_u64_if_mapped(CPUIA64State *env,
     }
 
     cpu_physical_memory_read(pa, buf, sizeof(buf));
-    *value = ldq_le_p(buf);
+    *value = env->ar_rsc & IA64_RSC_BE ? ldq_be_p(buf) : ldq_le_p(buf);
     return true;
 }
 
@@ -1531,8 +1823,26 @@ static bool ia64_rse_write_backing_u64_if_mapped(CPUIA64State *env,
         return false;
     }
 
-    stq_le_p(buf, value);
+    if (env->ar_rsc & IA64_RSC_BE) {
+        stq_be_p(buf, value);
+    } else {
+        stq_le_p(buf, value);
+    }
     cpu_physical_memory_write(pa, buf, sizeof(buf));
+    return true;
+}
+
+static bool ia64_rse_spill_trailing_rnat_if_mapped(CPUIA64State *env,
+                                                   uint64_t bspstore,
+                                                   uint64_t *rnat)
+{
+    if (!ia64_rse_is_rnat_slot(bspstore)) {
+        return true;
+    }
+    if (!ia64_rse_write_backing_u64_if_mapped(env, bspstore, *rnat)) {
+        return false;
+    }
+    *rnat = 0;
     return true;
 }
 
@@ -1543,8 +1853,9 @@ static bool ia64_rse_dirty_word_at(CPUIA64State *env, uint64_t addr,
         return true;
     }
 
+    *nat = ia64_rse_backing_nat_at(env, addr, env->ar_bspstore,
+                                   env->ar_rnat);
     *value = ia64_rse_read_u64(env, addr);
-    *nat = 0;
     return false;
 }
 
@@ -1571,11 +1882,15 @@ static bool ia64_rse_copy_dirty_partition(CPUIA64State *env,
             old_ptr += 8;
         }
 
-        if (!ia64_rse_snapshot_word_at(env, old_ptr, &values[i], &nat) &&
-            !ia64_rse_read_backing_u64_if_mapped(env, old_ptr, &values[i])) {
-            g_free(nats);
-            g_free(values);
-            return false;
+        if (!ia64_rse_snapshot_word_at(env, old_ptr, &values[i], &nat)) {
+            if (!ia64_rse_read_backing_u64_if_mapped(env, old_ptr,
+                                                     &values[i])) {
+                g_free(nats);
+                g_free(values);
+                return false;
+            }
+            nat = ia64_rse_backing_nat_at(env, old_ptr, old_bspstore,
+                                          env->ar_rnat);
         }
         nats[i] = nat != 0;
         old_ptr += 8;
@@ -1592,11 +1907,7 @@ static bool ia64_rse_copy_dirty_partition(CPUIA64State *env,
             rnat = 0;
         }
 
-        if (nats[i]) {
-            rnat |= 1ULL << ((new_ptr >> 3) & 0x3f);
-        } else {
-            rnat &= ~(1ULL << ((new_ptr >> 3) & 0x3f));
-        }
+        rnat = ia64_rse_rnat_assign(rnat, new_ptr, nats[i]);
 
         if (!ia64_rse_write_backing_u64_if_mapped(env, new_ptr, values[i])) {
             g_free(nats);
@@ -1604,6 +1915,11 @@ static bool ia64_rse_copy_dirty_partition(CPUIA64State *env,
             return false;
         }
         new_ptr += 8;
+    }
+    if (!ia64_rse_spill_trailing_rnat_if_mapped(env, new_ptr, &rnat)) {
+        g_free(nats);
+        g_free(values);
+        return false;
     }
 
     g_free(nats);
@@ -1634,24 +1950,16 @@ static bool ia64_rse_exception_frame_word_at(CPUIA64State *env,
         *nat = ia64_rse_snapshot_nat_bit(frame->rse_frame_nat[depth], index);
         return true;
     }
-    for (depth = 0; depth < frame->rse_cover_depth; depth++) {
-        uint32_t sof = frame->rse_cover_sof[depth];
-        uint32_t index;
 
-        if (sof == 0 ||
-            !ia64_rse_bsp_distance(env, frame->rse_cover_bsp[depth], addr,
-                                   &index) ||
-            index >= sof) {
-            continue;
-        }
-
-        *value = frame->rse_cover_gr[depth][index];
-        *nat = ia64_rse_snapshot_nat_bit(frame->rse_cover_nat[depth], index);
+    if (ia64_rse_cover_word_at(env, frame->rse_cover_gr,
+                               frame->rse_cover_nat, frame->rse_cover_sof,
+                               frame->rse_cover_bsp, frame->rse_cover_depth,
+                               addr, value, nat)) {
         return true;
     }
 
+    *nat = ia64_rse_backing_nat_at(env, addr, frame->bspstore, frame->rnat);
     *value = ia64_rse_read_u64(env, addr);
-    *nat = 0;
     return false;
 }
 
@@ -1683,16 +1991,12 @@ static uint64_t ia64_rse_spill_exception_frame(CPUIA64State *env,
 
         ia64_rse_exception_frame_word_at(env, frame, bspstore, &value,
                                          &nat_bit);
-        if (nat_bit) {
-            rnat |= 1ULL << ((bspstore >> 3) & 0x3f);
-        }
-        rnat &= ~(1ULL << 63);
+        rnat = ia64_rse_rnat_assign(rnat, bspstore, nat_bit);
 
         ia64_rse_write_u64(env, bspstore, value);
         bspstore += 8;
     }
-
-    return rnat;
+    return ia64_rse_spill_trailing_rnat(env, bspstore, rnat);
 }
 
 static void ia64_rse_restore_current_frame_from_bsp(CPUIA64State *env,
@@ -1701,42 +2005,46 @@ static void ia64_rse_restore_current_frame_from_bsp(CPUIA64State *env,
     uint32_t count = MIN(sof, IA64_STACKED_GR_COUNT);
     uint64_t load_base = ia64_rse_bsp_retreat(env->ar_bsp, count);
     uint64_t load_ptr = load_base;
-    uint64_t rnat_collection = env->ar_rnat & ~(1ULL << 63);
+    uint64_t old_bspstore = env->ar_bspstore;
+    uint64_t old_rnat = env->ar_rnat;
+    uint64_t restored_gr[IA64_STACKED_GR_COUNT];
+    uint8_t restored_nat[IA64_STACKED_GR_COUNT];
+    uint64_t restored_rnat = old_rnat;
     uint32_t i;
 
     for (i = 0; i < count; i++) {
-        uint32_t reg = IA64_STACKED_GR_BASE + i;
-        uint8_t bit;
         int nat_bit = 0;
 
         if (ia64_rse_is_rnat_slot(load_ptr)) {
-            rnat_collection = ia64_rse_read_u64(env, load_ptr);
-            rnat_collection &= ~(1ULL << 63);
             load_ptr += 8;
         }
 
-        bit = (load_ptr >> 3) & 0x3f;
         /*
          * loadrs may have materialized the target frame in cover snapshots
          * without writing the backing store.  Prefer dirty RSE state when it
          * exists, and fall back to backing memory/RNAT otherwise.
          */
-        if (ia64_rse_dirty_word_at(env, load_ptr, &env->gr[reg], &nat_bit)) {
-            if (nat_bit) {
-                rnat_collection |= 1ULL << bit;
-            } else {
-                rnat_collection &= ~(1ULL << bit);
-            }
-        } else {
-            nat_bit = (rnat_collection >> bit) & 1;
-        }
-        ia64_gr_nat_set(env, reg, nat_bit);
+        ia64_rse_dirty_word_at(env, load_ptr, &restored_gr[i], &nat_bit);
+        restored_nat[i] = nat_bit != 0;
         load_ptr += 8;
     }
+    if (count > 0) {
+        restored_rnat =
+            ia64_rse_rnat_for_bspstore(env, load_base, old_bspstore,
+                                       old_rnat);
+    }
+
+    for (i = 0; i < count; i++) {
+        uint32_t reg = IA64_STACKED_GR_BASE + i;
+
+        env->gr[reg] = restored_gr[i];
+        ia64_gr_nat_set(env, reg, restored_nat[i]);
+    }
+    ia64_rse_mask_current_frame_nat(env);
 
     env->ar_bsp = load_base;
     env->ar_bspstore = load_base;
-    env->ar_rnat = rnat_collection;
+    env->ar_rnat = restored_rnat;
     env->rse_spill_base = load_base;
     env->rse_spill_words = 0;
     env->rse_cumulative_words = env->cfm_sof;
@@ -1787,6 +2095,17 @@ void helper_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
             env->itm_armed_value = value;
         }
         ia64_itm_update(env, env->cr[1]);
+        return;
+    }
+    if (ar_num == 16) {
+        uint8_t pl = MAX(ia64_rsc_pl(value), ia64_psr_cpl(env->psr));
+        uint64_t old_rsc = env->ar_rsc;
+
+        env->ar_rsc = (value & ~IA64_RSC_PL) |
+                      ((uint64_t)pl << IA64_RSC_PL_SHIFT);
+        if ((old_rsc ^ env->ar_rsc) & IA64_RSC_PL) {
+            tlb_flush_by_mmuidx(env_cpu(env), 1u << MMU_IDX_RSE);
+        }
         return;
     }
     old_bspstore = env->ar_bspstore;
@@ -2072,7 +2391,7 @@ static void pal_vm_summary(CPUIA64State *env)
         env->gr[8] = PAL_STATUS_SUCCESS;
         env->gr[9] = 1ULL |
                      ((uint64_t)IA64_IMPL_PA_BITS << 1) |
-                     ((uint64_t)IA64_IMPL_RID_BITS << 8) |
+                     ((uint64_t)IA64_IMPL_KEY_BITS << 8) |
                      (((uint64_t)IA64_PKR_COUNT - 1ULL) << 16) |
                      (8ULL << 24) |
                      (((uint64_t)IA64_TR_COUNT - 1ULL) << 32) |
@@ -2259,20 +2578,12 @@ static void pal_mem_attrib(CPUIA64State *env)
     env->gr[11] = 0;
 }
 
-static uint64_t pal_page_size_mask(void)
-{
-    return (1ULL << 12) | (1ULL << 13) | (1ULL << 14) |
-           (1ULL << 16) | (1ULL << 18) | (1ULL << 20) |
-           (1ULL << 22) | (1ULL << 24) | (1ULL << 26) |
-           (1ULL << 28) | (1ULL << 32);
-}
-
 static void pal_vm_page_size(CPUIA64State *env)
 {
     if (pal_reserved_args_are_zero(env)) {
         env->gr[8] = PAL_STATUS_SUCCESS;
-        env->gr[9] = pal_page_size_mask();
-        env->gr[10] = pal_page_size_mask();
+        env->gr[9] = IA64_INSERTABLE_PAGE_SIZE_MASK;
+        env->gr[10] = IA64_PURGEABLE_PAGE_SIZE_MASK;
     } else {
         env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[9] = 0;
@@ -2561,13 +2872,8 @@ static void pal_proc_get_features(CPUIA64State *env)
 {
     if (pal_reserved_args_are_zero(env)) {
         env->gr[8] = PAL_STATUS_SUCCESS;
-        env->gr[9] = (1ULL << 0)  | (1ULL << 1)  | (1ULL << 2)  |
-                     (1ULL << 8)  | (1ULL << 9)  | (1ULL << 10) |
-                     (1ULL << 16) | (1ULL << 17) | (1ULL << 20) |
-                     (1ULL << 32) | (1ULL << 33) | (1ULL << 48) |
-                     (1ULL << 49);
-        env->gr[10] = (1ULL << 0) | (1ULL << 2) | (1ULL << 4) |
-                      (1ULL << 8);
+        env->gr[9] = 0;
+        env->gr[10] = 0;
         env->gr[11] = 0;
     } else {
         env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
@@ -2697,7 +3003,7 @@ static void pal_vm_info(CPUIA64State *env)
     env->gr[9] = 2ULL | (((uint64_t)IA64_TLB_MAX / 2U) << 8) |
                  ((uint64_t)IA64_TLB_MAX << 16) | (1ULL << 32) |
                  (1ULL << 34);
-    env->gr[10] = pal_page_size_mask();
+    env->gr[10] = IA64_INSERTABLE_PAGE_SIZE_MASK;
     env->gr[11] = 0;
 }
 
@@ -3151,47 +3457,118 @@ uint32_t helper_pal_dispatch(CPUIA64State *env)
     return flags;
 }
 
-static bool ia64_data_address_to_mapped_phys(CPUIA64State *env, uint64_t va,
-                                             uint64_t *pa)
+static IA64MemorySpeculation ia64_pte_memory_speculation(uint64_t pte)
+{
+    switch ((pte & IA64_PTE_MA_MASK) >> IA64_PTE_MA_SHIFT) {
+    case IA64_PTE_MA_WB:
+    case IA64_PTE_MA_WC:
+    case IA64_PTE_MA_NATPAGE:
+        return IA64_MEM_SPECULATIVE;
+    case IA64_PTE_MA_UC:
+    case IA64_PTE_MA_UCE:
+    default:
+        return IA64_MEM_NON_SPECULATIVE;
+    }
+}
+
+static bool ia64_memory_allows_advanced_load(IA64MemorySpeculation spec)
+{
+    return spec != IA64_MEM_NON_SPECULATIVE;
+}
+
+static bool ia64_memory_allows_control_speculation(IA64MemorySpeculation spec)
+{
+    return spec == IA64_MEM_SPECULATIVE;
+}
+
+static bool ia64_data_address_to_mapped_phys_attr(CPUIA64State *env,
+                                                  uint64_t va, bool is_rse,
+                                                  uint8_t access_level,
+                                                  uint64_t *pa,
+                                                  IA64MemorySpeculation *spec)
 {
     uint8_t perm;
     uint32_t rid;
+    const IA64TlbEntry *entry;
 
     if (ia64_firmware_identity_pa(va, pa)) {
+        if (spec) {
+            *spec = IA64_MEM_SPECULATIVE;
+        }
         return true;
     }
 
     if (ia64_sal_boot_virtual_pa(env, va, pa)) {
+        if (spec) {
+            *spec = IA64_MEM_SPECULATIVE;
+        }
         return true;
     }
 
     rid = ia64_region_rid(env, va);
-    if (ia64_tlb_lookup(env->tlb_data, env->tlb_data_count,
-                        va, rid, ia64_psr_cpl(env->psr), false, pa, &perm)) {
+    entry = ia64_tlb_find(env->tlb_data, env->tlb_data_count, va, rid,
+                          false);
+    if (entry) {
+        ia64_tlb_entry_translate(entry, va, access_level, pa, &perm);
+        if (spec) {
+            *spec = ia64_pte_memory_speculation(entry->pte);
+        }
         return (perm & IA64_TLB_R) != 0;
     }
 
-    if (ia64_kernel_direct_data_pa(env->psr, env->rr[ia64_rr_index(va)],
-                                   va, pa)) {
+    {
+        uint64_t pte = 0;
+
+        if (ia64_vhpt_walk_full(env, va, rid, false, is_rse, access_level,
+                                pa, &perm, &pte, NULL)) {
+            if (spec) {
+                *spec = ia64_pte_memory_speculation(pte);
+            }
+            return (perm & IA64_TLB_R) != 0;
+        }
+    }
+
+    if (ia64_sal_boot_identity_pa(env, va, pa)) {
+        if (spec) {
+            *spec = IA64_MEM_SPECULATIVE;
+        }
         return true;
     }
 
-    if (ia64_vhpt_walk(env, va, rid, false, pa, &perm)) {
-        return (perm & IA64_TLB_R) != 0;
+    return false;
+}
+
+static bool ia64_data_address_to_mapped_phys(CPUIA64State *env, uint64_t va,
+                                             bool is_rse,
+                                             uint8_t access_level,
+                                             uint64_t *pa)
+{
+    return ia64_data_address_to_mapped_phys_attr(env, va, is_rse,
+                                                access_level, pa, NULL);
+}
+
+static bool ia64_data_address_to_phys_attr(CPUIA64State *env, uint64_t va,
+                                           uint64_t *pa,
+                                           IA64MemorySpeculation *spec)
+{
+    if (!(env->psr & IA64_PSR_DT)) {
+        *pa = ia64_physical_address(va);
+        if (spec) {
+            *spec = (va & IA64_PHYS_UC_BIT) ?
+                    IA64_MEM_NON_SPECULATIVE :
+                    IA64_MEM_LIMITED_SPECULATION;
+        }
+        return true;
     }
 
-    return ia64_sal_boot_identity_pa(env, va, pa);
+    return ia64_data_address_to_mapped_phys_attr(
+        env, va, false, ia64_psr_cpl(env->psr), pa, spec);
 }
 
 static bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va,
                                       uint64_t *pa)
 {
-    if (!(env->psr & IA64_PSR_DT)) {
-        *pa = va;
-        return true;
-    }
-
-    return ia64_data_address_to_mapped_phys(env, va, pa);
+    return ia64_data_address_to_phys_attr(env, va, pa, NULL);
 }
 
 static bool ia64_rse_address_to_phys(CPUIA64State *env, uint64_t va,
@@ -3202,7 +3579,8 @@ static bool ia64_rse_address_to_phys(CPUIA64State *env, uint64_t va,
         return true;
     }
 
-    return ia64_data_address_to_mapped_phys(env, va, pa);
+    return ia64_data_address_to_mapped_phys(
+        env, va, true, ia64_rsc_pl(env->ar_rsc), pa);
 }
 
 void helper_fc(CPUIA64State *env, uint64_t addr)
@@ -3463,6 +3841,7 @@ void helper_br_call_rse(CPUIA64State *env, uint32_t b_reg,
         }
         env->rse_frame_nat[depth][0] = env->nat[0];
         env->rse_frame_nat[depth][1] = env->nat[1];
+        ia64_rse_mask_nat_to_words(env->rse_frame_nat[depth], caller_sof);
         env->rse_frame_sof[depth] = env->cfm_sof;
         env->rse_frame_sol[depth] = env->cfm_sol;
         env->rse_frame_sor[depth] = env->cfm_sor;
@@ -3501,67 +3880,57 @@ void helper_br_call_rse(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
+    ia64_rse_mask_current_frame_nat(env);
     ia64_rse_refresh_cumulative(env);
     ia64_invalidate_stacked_alat(env);
     env->br[b_reg] = next_ip;
     env->ip = ia64_ip_bundle_addr(target);
 }
 
-void helper_br_ia_diag(CPUIA64State *env, uint32_t b_reg)
+void helper_br_ia(CPUIA64State *env, uint32_t b_reg)
 {
-    static unsigned br_ia_zero_logs;
-    uint64_t target = env->br[b_reg];
-
-    if (target == 0 && br_ia_zero_logs++ < 16) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "ia64 br.ia target zero ip=0x%016" PRIx64
-                      " b%u pfs=0x%016" PRIx64 " depth=%u"
-                      " b0=0x%016" PRIx64 " b6=0x%016" PRIx64
-                      " r1=0x%016" PRIx64 " r10=0x%016" PRIx64
-                      " r11=0x%016" PRIx64 " r14=0x%016" PRIx64
-                      " r16=0x%016" PRIx64 " r17=0x%016" PRIx64
-                      " r18=0x%016" PRIx64 "\n",
-                      env->ip, b_reg, env->ar_pfs, env->rse_frame_depth,
-                      env->br[0], env->br[6], env->gr[1], env->gr[10],
-                      env->gr[11], env->gr[14], env->gr[16], env->gr[17],
-                      env->gr[18]);
-    }
-    env->ip = target;
+    env->ip = env->br[b_reg];
 }
 
 static void ia64_rse_reload_spilled_words(CPUIA64State *env)
 {
     uint32_t count = env->rse_spill_words;
     uint64_t load_ptr = env->rse_spill_base;
-    uint64_t rnat_collection = env->ar_rnat & ~(1ULL << 63);
+    uint64_t old_bspstore = env->ar_bspstore;
+    uint64_t old_rnat = env->ar_rnat;
+    uint64_t values[IA64_STACKED_GR_COUNT];
+    uint8_t nats[IA64_STACKED_GR_COUNT];
+    uint32_t cached = MIN(count, IA64_STACKED_GR_COUNT);
     uint32_t i;
 
     for (i = 0; i < count; i++) {
-        uint8_t bit;
         uint64_t value;
         int nat;
 
         if (ia64_rse_is_rnat_slot(load_ptr)) {
-            rnat_collection = ia64_rse_read_u64(env, load_ptr);
-            rnat_collection &= ~(1ULL << 63);
             load_ptr += 8;
         }
 
-        bit = (load_ptr >> 3) & 0x3f;
-        nat = (rnat_collection >> bit) & 1;
+        nat = ia64_rse_backing_nat_at(env, load_ptr, old_bspstore, old_rnat);
         value = ia64_rse_read_u64(env, load_ptr);
         load_ptr += 8;
 
-        if (i < IA64_STACKED_GR_COUNT) {
-            uint32_t reg = IA64_STACKED_GR_BASE + i;
-
-            env->gr[reg] = value;
-            ia64_gr_nat_set(env, reg, nat);
+        if (i < cached) {
+            values[i] = value;
+            nats[i] = nat != 0;
         }
     }
 
+    for (i = 0; i < cached; i++) {
+        uint32_t reg = IA64_STACKED_GR_BASE + i;
+
+        env->gr[reg] = values[i];
+        ia64_gr_nat_set(env, reg, nats[i]);
+    }
+
     env->ar_bspstore = env->rse_spill_base;
-    env->ar_rnat = rnat_collection;
+    env->ar_rnat = ia64_rse_rnat_for_bspstore(env, env->rse_spill_base,
+                                              old_bspstore, old_rnat);
     env->rse_cumulative_words += count;
     env->rse_spill_words = 0;
 }
@@ -3630,6 +3999,9 @@ static void ia64_rse_trim_snapshot_to_bsp(CPUIA64State *env,
                                           uint32_t snapshot_index,
                                           uint64_t bsp)
 {
+    uint64_t old_bspstore = env->ar_bspstore;
+    uint64_t old_rnat = env->ar_rnat;
+
     if (snapshot_depth >= 0 && snapshot_index > 0) {
         env->ar_bspstore = env->rse_cover_bsp[snapshot_depth];
         env->rse_spill_base = env->rse_cover_bsp[snapshot_depth];
@@ -3644,6 +4016,8 @@ static void ia64_rse_trim_snapshot_to_bsp(CPUIA64State *env,
             env->rse_cover_depth = 0;
         }
     }
+    env->ar_rnat = ia64_rse_rnat_for_bspstore(env, env->ar_bspstore,
+                                              old_bspstore, old_rnat);
     env->rse_spill_words = 0;
 }
 
@@ -3699,6 +4073,7 @@ static void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs,
         env->cfm_sol = env->rse_frame_sol[depth];
         env->cfm_sor = env->rse_frame_sor[depth];
         env->cfm_rrb_gr = env->rse_frame_rrb_gr[depth];
+        ia64_rse_mask_current_frame_nat(env);
         env->rse_cumulative_words = env->rse_frame_cumulative_words[depth];
         env->ar_bsp = env->rse_frame_bsp[depth];
         ia64_rse_refresh_cumulative(env);
@@ -3724,22 +4099,28 @@ static void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs,
         }
 
         cover_depth = -1;
-        if (env->cfm_sof == saved_sof) {
-            cover_depth =
-                ia64_rse_find_cover_frame_ending_at_bsp(env, saved_sof,
-                                                        &cover_base,
-                                                        &cover_index, true);
-        } else if (sol == 0) {
-            cover_depth =
-                ia64_rse_find_cover_frame_ending_at_bsp(env, saved_sof,
-                                                        &cover_base,
-                                                        &cover_index, false);
-        }
-        if (cover_depth < 0) {
+        /*
+         * A return restores the preserved locals selected by PFS.sol.  Prefer
+         * the snapshot ending at that boundary even when the current and
+         * saved frame sizes happen to match.  Falling back to the complete
+         * covered frame in that case would move RSE.BOF by PFS.sof instead
+         * of PFS.sol.
+         */
+        if (sol > 0) {
             cover_depth =
                 ia64_rse_find_cover_frame_ending_at_bsp(env, sol,
                                                         &cover_base,
                                                         &cover_index, true);
+        } else if (env->cfm_sof == saved_sof) {
+            cover_depth =
+                ia64_rse_find_cover_frame_ending_at_bsp(env, saved_sof,
+                                                        &cover_base,
+                                                        &cover_index, true);
+        } else {
+            cover_depth =
+                ia64_rse_find_cover_frame_ending_at_bsp(env, saved_sof,
+                                                        &cover_base,
+                                                        &cover_index, false);
         }
         if (cover_depth >= 0) {
             uint64_t retained_cover_base = env->rse_cover_bsp[cover_depth];
@@ -3772,34 +4153,29 @@ static void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs,
             }
             env->rse_spill_words = 0;
         } else if (sol <= IA64_STACKED_GR_COUNT) {
+            uint64_t restored_gr[IA64_STACKED_GR_COUNT];
+            uint8_t restored_nat[IA64_STACKED_GR_COUNT];
             load_ptr = ia64_rse_bsp_retreat(env->ar_bsp, sol);
             load_base = load_ptr;
             cover_depth =
                 ia64_rse_find_snapshot_containing_bsp(env, load_base,
                                                       &cover_index, -1);
             for (i = 0; i < sol; i++) {
-                uint32_t reg = IA64_STACKED_GR_BASE + i;
-                uint8_t bit;
                 int nat_bit = 0;
 
-                if (((load_ptr >> 3) & 0x3f) == 0x3f) {
-                    env->ar_rnat =
-                        ia64_rse_read_u64(env, load_ptr) & ~(1ULL << 63);
+                if (ia64_rse_is_rnat_slot(load_ptr)) {
                     load_ptr += 8;
                 }
-                bit = (load_ptr >> 3) & 0x3f;
-                if (ia64_rse_dirty_word_at(env, load_ptr, &env->gr[reg],
-                                           &nat_bit)) {
-                    if (nat_bit) {
-                        env->ar_rnat |= 1ULL << bit;
-                    } else {
-                        env->ar_rnat &= ~(1ULL << bit);
-                    }
-                } else {
-                    nat_bit = (env->ar_rnat >> bit) & 1;
-                }
+                ia64_rse_dirty_word_at(env, load_ptr, &restored_gr[i],
+                                       &nat_bit);
+                restored_nat[i] = nat_bit != 0;
                 load_ptr += 8;
-                ia64_gr_nat_set(env, reg, nat_bit);
+            }
+            for (i = 0; i < sol; i++) {
+                uint32_t reg = IA64_STACKED_GR_BASE + i;
+
+                env->gr[reg] = restored_gr[i];
+                ia64_gr_nat_set(env, reg, restored_nat[i]);
             }
             env->ar_bsp = load_base;
             ia64_rse_trim_snapshot_to_bsp(env, cover_depth, cover_index,
@@ -3816,6 +4192,7 @@ static void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs,
         env->cfm_sol = (pfs & IA64_CFM_SOL_MASK) >> IA64_CFM_SOL_SHIFT;
         env->cfm_sor = (pfs & IA64_CFM_SOR_MASK) >> IA64_CFM_SOR_SHIFT;
         env->cfm_rrb_gr = (pfs & IA64_CFM_RRB_GR_MASK) >> IA64_CFM_RRB_GR_SHIFT;
+        ia64_rse_mask_current_frame_nat(env);
         ia64_rse_refresh_cumulative(env);
         ia64_invalidate_stacked_alat(env);
     }
@@ -3823,26 +4200,19 @@ static void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs,
 
 void helper_br_ret_rse(CPUIA64State *env, uint32_t b_reg)
 {
-    static unsigned br_ret_zero_logs;
     uint64_t pfs = env->ar_pfs;
     uint64_t target = env->br[b_reg];
     uint8_t ppl = (pfs & IA64_PFS_PPL_MASK) >> IA64_PFS_PPL_SHIFT;
 
+    env->rse_current_frame_load = IA64_RSE_CURRENT_FRAME_LOAD_BR_RET;
     ia64_rse_pop_return_frame(env, pfs, true);
+    env->rse_current_frame_load = IA64_RSE_CURRENT_FRAME_LOAD_NONE;
     env->ar_ec = (pfs & IA64_PFS_PEC_MASK) >> IA64_PFS_PEC_SHIFT;
     if (ia64_psr_cpl(env->psr) < ppl) {
         ia64_set_psr(env, (env->psr & ~IA64_PSR_CPL_MASK) |
                           ((uint64_t)ppl << IA64_PSR_CPL_SHIFT));
     }
 
-    if (target == 0 && br_ret_zero_logs++ < 16) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "ia64 br.ret target zero ip=0x%016" PRIx64
-                      " b%u pfs=0x%016" PRIx64 " depth=%u"
-                      " b0=0x%016" PRIx64 " b6=0x%016" PRIx64 "\n",
-                      env->ip, b_reg, pfs, env->rse_frame_depth,
-                      env->br[0], env->br[6]);
-    }
     env->ip = ia64_ip_bundle_addr(target);
 }
 
@@ -4078,19 +4448,34 @@ void helper_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
 {
     IA64TlbEntry *tlb;
     uint16_t *cnt;
-    uint64_t ps = ia64_itir_page_size(env);
-    uint64_t va = env->cr_ifa & ~(ps - 1);
-    uint64_t pa = (pte & IA64_PTE_PPN_MASK) & ~(ps - 1);
-    uint32_t key = (env->cr_itir & IA64_ITIR_KEY_MASK) >>
-                   IA64_ITIR_KEY_SHIFT;
-    uint8_t ar = ia64_pte_ar(pte);
-    uint8_t pl = ia64_pte_pl(pte);
-    uint8_t perm = ia64_pte_perm(pte, 0);
-    uint32_t rid = ia64_region_rid(env, env->cr_ifa);
-    uint32_t slot = slot_reg;
+    uint64_t ps;
+    uint64_t va;
+    uint64_t pa;
+    uint32_t key;
+    uint8_t ar;
+    uint8_t pl;
+    uint8_t perm;
+    uint32_t rid;
+    uint32_t slot = slot_reg & 0xff;
     uint16_t *next_replace;
-
     CPUState *cs = env_cpu(env);
+
+    if (slot >= IA64_TR_COUNT) {
+        helper_raise_exception(env, IA64_EXCP_ILLEGAL,
+                               ia64_ip_bundle_addr(env->ip), slot_reg,
+                               (env->psr & IA64_PSR_RI_MASK) >>
+                               IA64_PSR_RI_SHIFT);
+        return;
+    }
+
+    ps = ia64_itir_page_size(env);
+    va = env->cr_ifa & ~(ps - 1);
+    pa = (pte & IA64_PTE_PPN_MASK) & ~(ps - 1);
+    key = (env->cr_itir & IA64_ITIR_KEY_MASK) >> IA64_ITIR_KEY_SHIFT;
+    ar = ia64_pte_ar(pte);
+    pl = ia64_pte_pl(pte);
+    perm = ia64_pte_perm(pte, 0);
+    rid = ia64_region_rid(env, env->cr_ifa);
 
     if (!ia64_va_is_implemented(env->cr_ifa)) {
         ia64_raise_unimplemented_data_address(
@@ -4111,40 +4496,38 @@ void helper_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
         next_replace = &env->tlb_inst_replace;
     }
 
-    if (slot < IA64_TR_COUNT) {
-        IA64TlbEntry old_tr = tlb[slot];
+    IA64TlbEntry old_tr = tlb[slot];
 
-        ia64_purge_tc_entries(env, tlb, cnt, va, ps, rid, is_data);
-        if (old_tr.valid && !old_tr.is_tr) {
-            ia64_qemu_tlb_flush_entry(env, &old_tr);
-        }
-        ia64_cache_replaced_tr(tlb, cnt, next_replace, &old_tr);
+    ia64_purge_tc_entries(env, tlb, cnt, va, ps, rid, is_data);
+    if (old_tr.valid && !old_tr.is_tr) {
+        ia64_qemu_tlb_flush_entry(env, &old_tr);
+    }
+    ia64_cache_replaced_tr(tlb, cnt, next_replace, &old_tr);
 
-        tlb[slot].va = va;
-        tlb[slot].pa = pa;
-        tlb[slot].ps = ps;
-        tlb[slot].pte = pte;
-        tlb[slot].perm = perm;
-        tlb[slot].ar = ar;
-        tlb[slot].pl = pl;
-        tlb[slot].valid = 1;
-        tlb[slot].is_tr = 1;
-        tlb[slot].pending_purge = 0;
-        tlb[slot].rid = rid;
-        tlb[slot].key = key;
-        tlb[slot].slot = slot;
-        if (slot >= *cnt) {
-            *cnt = slot + 1;
-        }
-        qemu_log_mask(CPU_LOG_MMU,
-                      "ia64 itr.%c slot=%u va=0x%016" PRIx64
-                      " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
-                      " ps=0x%016" PRIx64 " pte=0x%016" PRIx64 "\n",
-                      is_data ? 'd' : 'i', slot, va, rid, pa, ps, pte);
-        tlb_flush(cs);
-        if (!is_data) {
-            ia64_defer_itlb_tb_flush(env);
-        }
+    tlb[slot].va = va;
+    tlb[slot].pa = pa;
+    tlb[slot].ps = ps;
+    tlb[slot].pte = pte;
+    tlb[slot].perm = perm;
+    tlb[slot].ar = ar;
+    tlb[slot].pl = pl;
+    tlb[slot].valid = 1;
+    tlb[slot].is_tr = 1;
+    tlb[slot].pending_purge = 0;
+    tlb[slot].rid = rid;
+    tlb[slot].key = key;
+    tlb[slot].slot = slot;
+    if (slot >= *cnt) {
+        *cnt = slot + 1;
+    }
+    qemu_log_mask(CPU_LOG_MMU,
+                  "ia64 itr.%c slot=%u va=0x%016" PRIx64
+                  " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
+                  " ps=0x%016" PRIx64 " pte=0x%016" PRIx64 "\n",
+                  is_data ? 'd' : 'i', slot, va, rid, pa, ps, pte);
+    tlb_flush(cs);
+    if (!is_data) {
+        ia64_defer_itlb_tb_flush(env);
     }
 }
 
@@ -4209,7 +4592,6 @@ uint64_t helper_tpa(CPUIA64State *env, uint64_t va)
     uint8_t vhpt_size;
     bool vhpt_long_format;
     bool vhpt_enabled;
-    static unsigned tpa_logs;
     uint64_t pte;
     uint32_t key;
     const IA64TlbEntry *entry;
@@ -4231,31 +4613,12 @@ uint64_t helper_tpa(CPUIA64State *env, uint64_t va)
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
-            if (tpa_logs++ < 128) {
-                qemu_log_mask(CPU_LOG_MMU,
-                              "ia64 tpa va=0x%016" PRIx64
-                              " pa=0x%016" PRIx64
-                              " dtlb psr=0x%016" PRIx64
-                              " ip=0x%016" PRIx64 "\n",
-                              va, pa, env->psr, env->ip);
-            }
-            return pa;
-        }
-        if (ia64_kernel_direct_data_pa(env->psr, env->rr[ia64_rr_index(va)],
-                                       va, &pa)) {
-            if (tpa_logs++ < 128) {
-                qemu_log_mask(CPU_LOG_MMU,
-                              "ia64 tpa va=0x%016" PRIx64
-                              " pa=0x%016" PRIx64
-                              " direct psr=0x%016" PRIx64
-                              " ip=0x%016" PRIx64 "\n",
-                              va, pa, env->psr, env->ip);
-            }
             return pa;
         }
         pte = 0;
         key = 0;
-        if (ia64_vhpt_walk_full(env, va, rid, false, &pa, &perm, &pte,
+        if (ia64_vhpt_walk_full(env, va, rid, false, false,
+                                ia64_psr_cpl(env->psr), &pa, &perm, &pte,
                                 &key)) {
             entry = ia64_tlb_find(env->tlb_data, env->tlb_data_count, va,
                                   rid, false);
@@ -4268,35 +4631,19 @@ uint64_t helper_tpa(CPUIA64State *env, uint64_t va)
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
-            if (tpa_logs++ < 128) {
-                qemu_log_mask(CPU_LOG_MMU,
-                              "ia64 tpa va=0x%016" PRIx64
-                              " pa=0x%016" PRIx64
-                              " vhpt psr=0x%016" PRIx64
-                              " ip=0x%016" PRIx64 "\n",
-                              va, pa, env->psr, env->ip);
-            }
             return pa;
         }
         if (ia64_sal_boot_identity_pa(env, va, &pa)) {
-            if (tpa_logs++ < 128) {
-                qemu_log_mask(CPU_LOG_MMU,
-                              "ia64 tpa va=0x%016" PRIx64
-                              " pa=0x%016" PRIx64
-                              " sal-identity psr=0x%016" PRIx64
-                              " ip=0x%016" PRIx64 "\n",
-                              va, pa, env->psr, env->ip);
-            }
             return pa;
         }
-        vhpt_enabled = ia64_vhpt_walker_enabled(env, va, false,
+        vhpt_enabled = ia64_vhpt_walker_enabled(env, va, false, false,
                                                 &vhpt_size,
                                                 &vhpt_long_format);
         if (ia64_data_nested_tlb_active(env)) {
             excp = IA64_EXCP_DATA_NESTED_TLB;
         } else if (ia64_vhpt_walk_miss_reports_data_tlb(env, vhpt_enabled)) {
             excp = IA64_EXCP_DTLB_FAULT;
-        } else if (!ia64_vhpt_entry_accessible(env, va, false,
+        } else if (!ia64_vhpt_entry_accessible(env, va, false, false,
                                                &env->cr_iha)) {
             excp = IA64_EXCP_VHPT_FAULT;
         } else if (vhpt_enabled) {
@@ -4312,14 +4659,6 @@ uint64_t helper_tpa(CPUIA64State *env, uint64_t va)
                                              false, false, false);
         if (excp != IA64_EXCP_NONE) {
             goto tpa_fault;
-        }
-        if (tpa_logs++ < 128) {
-            qemu_log_mask(CPU_LOG_MMU,
-                          "ia64 tpa va=0x%016" PRIx64
-                          " pa=0x%016" PRIx64
-                          " phys-dtlb psr=0x%016" PRIx64
-                          " ip=0x%016" PRIx64 "\n",
-                          va, pa, env->psr, env->ip);
         }
         return pa;
     } else {
@@ -5334,6 +5673,7 @@ void helper_alloc_rse(CPUIA64State *env, uint32_t r1,
     env->cfm_sol = sol & 0x7f;
     env->cfm_sor = sor & 0x1f;
     env->cfm_rrb_gr = rrb & 0x1f;
+    ia64_rse_mask_current_frame_nat(env);
     ia64_rse_refresh_cumulative(env);
     ia64_invalidate_stacked_alat(env);
     if (env->rse_cumulative_words > IA64_STACKED_GR_COUNT) {
@@ -5360,6 +5700,8 @@ void helper_cover_rse(CPUIA64State *env)
                sizeof(env->rse_cover_gr[depth]));
         env->rse_cover_nat[depth][0] = env->nat[0];
         env->rse_cover_nat[depth][1] = env->nat[1];
+        ia64_rse_mask_nat_to_words(env->rse_cover_nat[depth],
+                                   env->cfm_sof);
         env->rse_cover_sof[depth] = env->cfm_sof;
         env->rse_cover_bsp[depth] = env->ar_bsp;
         env->rse_cover_is_loadrs[depth] = false;
@@ -5371,6 +5713,7 @@ void helper_cover_rse(CPUIA64State *env)
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
+    ia64_rse_mask_current_frame_nat(env);
     ia64_rse_refresh_cumulative(env);
     ia64_invalidate_stacked_alat(env);
 }
@@ -5382,6 +5725,7 @@ void helper_flushrs_rse(CPUIA64State *env)
     uint64_t rnat;
     uint32_t i;
 
+    ia64_rse_mask_current_frame_nat(env);
     dirty = ia64_rse_dirty_words(env);
     if (dirty == 0) {
         env->ar_bspstore = env->ar_bsp;
@@ -5402,21 +5746,19 @@ void helper_flushrs_rse(CPUIA64State *env)
         uint64_t value = 0;
         int nat_bit = 0;
 
-        if (((bspstore >> 3) & 0x3f) == 0x3f) {
+        if (ia64_rse_is_rnat_slot(bspstore)) {
             ia64_rse_write_u64(env, bspstore, rnat);
             bspstore += 8;
             rnat = 0;
         }
 
         ia64_rse_dirty_word_at(env, bspstore, &value, &nat_bit);
-        if (nat_bit) {
-            rnat |= (1ULL << ((bspstore >> 3) & 0x3f));
-        }
-        rnat &= ~(1ULL << 63);
+        rnat = ia64_rse_rnat_assign(rnat, bspstore, nat_bit);
 
         ia64_rse_write_u64(env, bspstore, value);
         bspstore += 8;
     }
+    rnat = ia64_rse_spill_trailing_rnat(env, bspstore, rnat);
 
     env->ar_bspstore = env->ar_bsp;
     env->ar_rnat = rnat;
@@ -5523,6 +5865,7 @@ void helper_loadrs_rse(CPUIA64State *env)
 
         env->rse_cover_nat[depth][0] = env->nat[0];
         env->rse_cover_nat[depth][1] = env->nat[1];
+        ia64_rse_mask_nat_to_words(env->rse_cover_nat[depth], count);
         env->rse_cover_sof[depth] = count;
         env->rse_cover_bsp[depth] = tear;
         env->rse_cover_is_loadrs[depth] = true;
@@ -5530,6 +5873,15 @@ void helper_loadrs_rse(CPUIA64State *env)
     }
 
     env->ar_bspstore = tear;
+    /*
+     * loadrs makes the architecturally visible RNAT value undefined.  Seed
+     * the model's next partial collection from backing memory at the new
+     * store pointer; the loaded dirty registers keep their NaT state in the
+     * loadrs snapshot and later spills overwrite bits from the tear point
+     * upward.
+     */
+    env->ar_rnat = ia64_rse_backing_rnat_for_addr(env, tear) &
+                   ia64_rse_rnat_defined_mask(tear);
     env->rse_spill_base = tear;
     env->rse_spill_words = 0;
     env->rse_cumulative_words =
@@ -5687,24 +6039,6 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
         return excp == IA64_EXCP_NONE ? 1 : 0;
     }
 
-    if (!is_ifetch && !walk_vhpt &&
-        ia64_vhpt_pte_not_present(env, va, false, NULL)) {
-        /*
-         * Speculative loads suppress the memory reference when the data
-         * translation has a deferrable fault.  A region-6 direct physical
-         * alias is only a fallback for a true miss; an explicit VHPT
-         * not-present PTE must make the speculative load produce NaT instead
-         * of falling through to a normal load that raises Page Not Present.
-         */
-        return 0;
-    }
-
-    if (!is_ifetch &&
-        ia64_kernel_direct_data_pa(env->psr, env->rr[ia64_rr_index(va)],
-                                   va, &pa)) {
-        return 1;
-    }
-
     if (!walk_vhpt) {
         if (ia64_sal_boot_identity_pa(env, va, &pa)) {
             return 1;
@@ -5716,8 +6050,8 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
         uint64_t pte = 0;
         uint32_t key = 0;
 
-        if (!ia64_vhpt_walk_full(env, va, rid, is_ifetch, &pa, &perm,
-                                 &pte, &key)) {
+        if (!ia64_vhpt_walk_full(env, va, rid, is_ifetch, false,
+                                 access_level, &pa, &perm, &pte, &key)) {
             if (ia64_sal_boot_identity_pa(env, va, &pa)) {
                 return 1;
             }
@@ -5776,13 +6110,9 @@ static IA64Exception ia64_data_reference_exception(CPUIA64State *env,
         ia64_tlb_entry_translate(entry, va, access_level, &pa, &perm);
         pte = entry->pte;
         found = true;
-    } else if (ia64_kernel_direct_data_pa(env->psr,
-                                          env->rr[ia64_rr_index(va)],
-                                          va, &pa)) {
-        return IA64_EXCP_NONE;
     } else if (walk_vhpt) {
-        found = ia64_vhpt_walk_full(env, va, rid, false, &pa, &perm, &pte,
-                                    &key);
+        found = ia64_vhpt_walk_full(env, va, rid, false, false,
+                                    access_level, &pa, &perm, &pte, &key);
         if (found) {
             entry = ia64_tlb_find(env->tlb_data, env->tlb_data_count, va,
                                   rid, false);
@@ -5806,15 +6136,15 @@ static IA64Exception ia64_data_reference_exception(CPUIA64State *env,
     if (ia64_data_nested_tlb_active(env)) {
         return IA64_EXCP_DATA_NESTED_TLB;
     }
-    if (ia64_vhpt_pte_not_present(env, va, false, NULL)) {
+    if (ia64_vhpt_pte_not_present(env, va, false, false, NULL)) {
         return IA64_EXCP_PAGE_NOT_PRESENT;
     }
-    vhpt_enabled = ia64_vhpt_walker_enabled(env, va, false, &vhpt_size,
-                                            &vhpt_long_format);
+    vhpt_enabled = ia64_vhpt_walker_enabled(env, va, false, false,
+                                            &vhpt_size, &vhpt_long_format);
     if (ia64_vhpt_walk_miss_reports_data_tlb(env, vhpt_enabled)) {
         return IA64_EXCP_DTLB_FAULT;
     }
-    if (!ia64_vhpt_entry_accessible(env, va, false, &pa)) {
+    if (!ia64_vhpt_entry_accessible(env, va, false, false, &pa)) {
         return IA64_EXCP_VHPT_FAULT;
     }
 
@@ -6029,6 +6359,8 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
 {
     bool itlb_ed;
     IA64Exception excp;
+    uint64_t pa;
+    IA64MemorySpeculation spec;
 
     if (env->psr & IA64_PSR_ED) {
         return 0;
@@ -6042,7 +6374,7 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
                                   ia64_psr_cpl(env->psr), false);
     } else {
         if (!(env->psr & IA64_PSR_IC) &&
-            ia64_vhpt_pte_not_present(env, va, false, NULL)) {
+            ia64_vhpt_pte_not_present(env, va, false, false, NULL)) {
             return 0;
         }
         excp = ia64_data_reference_exception(
@@ -6051,6 +6383,11 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
     }
 
     if (excp == IA64_EXCP_NONE) {
+        if (!is_ifetch &&
+            ia64_data_address_to_phys_attr(env, va, &pa, &spec) &&
+            !ia64_memory_allows_control_speculation(spec)) {
+            return 0;
+        }
         return 1;
     }
     if (ia64_speculative_exception_deferrable(env, excp, itlb_ed)) {
@@ -6060,6 +6397,23 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
     ia64_raise_data_reference_exception(env, va, is_write, false, false,
                                         excp, true, itlb_ed);
     g_assert_not_reached();
+}
+
+uint64_t helper_advanced_load_allowed(CPUIA64State *env, uint64_t va)
+{
+    uint64_t pa;
+    IA64MemorySpeculation spec;
+    IA64Exception excp;
+
+    excp = ia64_data_reference_exception(env, va, false, false,
+                                         ia64_psr_cpl(env->psr), true);
+    if (excp != IA64_EXCP_NONE) {
+        return 1;
+    }
+    if (!ia64_data_address_to_phys_attr(env, va, &pa, &spec)) {
+        return 1;
+    }
+    return ia64_memory_allows_advanced_load(spec) ? 1 : 0;
 }
 
 void helper_ldfe(CPUIA64State *env, uint32_t r1, uint64_t addr)
@@ -6160,7 +6514,8 @@ uint64_t helper_tak(CPUIA64State *env, uint64_t va)
     }
 
     if ((env->psr & IA64_PSR_DT) &&
-        ia64_vhpt_walk_full(env, va, rid, false, &pa, &perm, &pte, NULL) &&
+        ia64_vhpt_walk_full(env, va, rid, false, false,
+                            ia64_psr_cpl(env->psr), &pa, &perm, &pte, NULL) &&
         (pte & IA64_PTE_PRESENT)) {
         entry = ia64_tlb_find(env->tlb_data, env->tlb_data_count, va, rid,
                               false);
@@ -6188,6 +6543,15 @@ static uint8_t ia64_region_preferred_ps(CPUIA64State *env, uint64_t va)
                     IA64_ITIR_PS_MASK;
 
     return rr_ps < 12 ? 12 : rr_ps;
+}
+
+static bool ia64_vhpt_preferred_page_size_supported(CPUIA64State *env,
+                                                    uint64_t va)
+{
+    uint8_t rr_ps = (env->rr[ia64_rr_index(va)] >> IA64_ITIR_PS_SHIFT) &
+                    IA64_ITIR_PS_MASK;
+
+    return ia64_page_shift_insertable(rr_ps);
 }
 
 static uint64_t ia64_vhpt_hpn(CPUIA64State *env, uint64_t va)
@@ -6225,7 +6589,7 @@ static uint64_t ia64_vhpt_short_hash_address(CPUIA64State *env, uint64_t va,
 }
 
 static uint64_t ia64_vhpt_long_hash_address(CPUIA64State *env, uint64_t va,
-                                            uint8_t size)
+                                            uint8_t size, uint64_t *hash_out)
 {
     uint64_t base = env->cr_pta & IA64_PTA_BASE_MASK;
     uint64_t entries = 1ULL << (size - 5);
@@ -6235,6 +6599,9 @@ static uint64_t ia64_vhpt_long_hash_address(CPUIA64State *env, uint64_t va,
     uint64_t offset = hash << 5;
     uint64_t mask = (1ULL << size) - 1;
 
+    if (hash_out) {
+        *hash_out = hash;
+    }
     return (base & ~mask) | (offset & mask);
 }
 
@@ -6251,7 +6618,7 @@ uint64_t ia64_vhpt_hash_address(CPUIA64State *env, uint64_t va)
         return ia64_vhpt_short_hash_address(env, va, size);
     }
 
-    return ia64_vhpt_long_hash_address(env, va, size);
+    return ia64_vhpt_long_hash_address(env, va, size, NULL);
 }
 
 uint64_t helper_ttag(CPUIA64State *env, uint64_t va)
@@ -6286,40 +6653,42 @@ static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
                           rid, false);
     if (entry) {
         IA64Exception excp;
+        uint8_t ma = (entry->pte & IA64_PTE_MA_MASK) >> IA64_PTE_MA_SHIFT;
 
         ia64_tlb_entry_translate(entry, entry_va, 0, entry_pa, &perm);
         excp = ia64_tlb_exception_for_access(env, entry, perm, IA64_TLB_R,
                                              false, false, false);
-        if (excp == IA64_EXCP_NONE) {
+        if (excp == IA64_EXCP_NONE && ma == 0) {
             return IA64_VHPT_ENTRY_TRANSLATED;
         }
         qemu_log_mask(CPU_LOG_MMU,
                       "ia64 vhpt entry abort va=0x%016" PRIx64
                       " rid=0x%06" PRIx32
-                      " pte=0x%016" PRIx64 " excp=%u\n",
-                      entry_va, rid, entry->pte, excp);
+                      " pte=0x%016" PRIx64 " ma=%u excp=%u\n",
+                      entry_va, rid, entry->pte, ma, excp);
         return IA64_VHPT_ENTRY_ABORT;
-    }
-
-    if (ia64_region6_uncached_pa(entry_va, entry_pa) ||
-        ia64_region7_identity_pa(entry_va, entry_pa)) {
-        return IA64_VHPT_ENTRY_TRANSLATED;
     }
 
     return IA64_VHPT_ENTRY_TLB_MISS;
 }
 
 bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,
-                                bool is_ifetch, uint64_t *entry_va)
+                                bool is_ifetch, bool is_rse,
+                                uint64_t *entry_va)
 {
     uint64_t entry_pa;
     bool long_format;
     uint8_t size;
 
-    if (!ia64_vhpt_walker_enabled(env, va, is_ifetch, &size, &long_format)) {
+    if (!ia64_vhpt_walker_enabled(env, va, is_ifetch, is_rse,
+                                  &size, &long_format)) {
         return true;
     }
-    *entry_va = long_format ? ia64_vhpt_long_hash_address(env, va, size) :
+    if (!ia64_vhpt_preferred_page_size_supported(env, va)) {
+        return true;
+    }
+    *entry_va = long_format ? ia64_vhpt_long_hash_address(env, va, size,
+                                                          NULL) :
                 ia64_vhpt_short_hash_address(env, va, size);
     /*
      * A present-but-faulting translation for the VHPT entry makes the walker
@@ -6330,16 +6699,59 @@ bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,
            IA64_VHPT_ENTRY_TLB_MISS;
 }
 
+static uint64_t ia64_vhpt_load_u64(CPUIA64State *env, uint64_t pa)
+{
+    uint8_t buf[8];
+
+    cpu_physical_memory_read(pa, buf, sizeof(buf));
+    return env->cr_dcr & IA64_DCR_BE ? ldq_be_p(buf) : ldq_le_p(buf);
+}
+
+static void ia64_vhpt_load_long_entry(CPUIA64State *env, uint64_t pa,
+                                      uint64_t *pte, uint64_t *itir,
+                                      uint64_t *tag)
+{
+    *pte = ia64_vhpt_load_u64(env, pa);
+    *itir = ia64_vhpt_load_u64(env, pa + 8);
+    *tag = ia64_vhpt_load_u64(env, pa + 16);
+}
+
+static bool ia64_vhpt_pte_valid(uint64_t pte)
+{
+    uint8_t ma;
+
+    if (!(pte & IA64_PTE_PRESENT)) {
+        return true;
+    }
+    ma = (pte & IA64_PTE_MA_MASK) >> IA64_PTE_MA_SHIFT;
+    return !(pte & IA64_PTE_RESERVED_MASK) && (ma == 0 || ma >= 4);
+}
+
+static bool ia64_vhpt_itir_valid(uint64_t pte, uint64_t itir)
+{
+    uint8_t page_shift = (itir >> IA64_ITIR_PS_SHIFT) & IA64_ITIR_PS_MASK;
+    uint64_t reserved_mask = IA64_ITIR_RESERVED_MASK;
+
+    if (!(pte & IA64_PTE_PRESENT)) {
+        reserved_mask &= 3;
+    }
+    return !(itir & reserved_mask) &&
+           ia64_page_shift_insertable(page_shift);
+}
+
 static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
-                                 bool is_ifetch, uint64_t *pte,
+                                 bool is_ifetch, bool is_rse, uint64_t *pte,
                                  uint64_t *entry_va)
 {
     uint8_t size;
     bool long_format;
     uint64_t entry_pa;
-    uint32_t rid = ia64_region_rid(env, va);
 
-    if (!ia64_vhpt_walker_enabled(env, va, is_ifetch, &size, &long_format)) {
+    if (!ia64_vhpt_walker_enabled(env, va, is_ifetch, is_rse,
+                                  &size, &long_format)) {
+        return false;
+    }
+    if (!ia64_vhpt_preferred_page_size_supported(env, va)) {
         return false;
     }
 
@@ -6349,42 +6761,32 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
             IA64_VHPT_ENTRY_TRANSLATED) {
             return false;
         }
-        cpu_physical_memory_read(entry_pa, pte, 8);
-        return true;
+        *pte = ia64_vhpt_load_u64(env, entry_pa);
+        return ia64_vhpt_pte_valid(*pte);
     }
 
     {
-        uint64_t entries = 1ULL << (size - 5);
-        uint64_t hpn = ia64_vhpt_hpn(env, va);
-        uint64_t hash = (hpn ^ (hpn >> 7) ^ rid) & (entries - 1);
         uint64_t expected_tag = ia64_vhpt_long_tag(env, va);
-        uint64_t base = env->cr_pta & IA64_PTA_BASE_MASK;
-        uint64_t table_mask = (1ULL << size) - 1;
+        uint64_t itir;
+        uint64_t tag;
 
-        for (uint32_t i = 0; i < 4; i++) {
-            uint64_t tag;
-            uint64_t entry_index = (hash + i) & (entries - 1);
-            uint64_t entry_offset = entry_index << 5;
-
-            *entry_va = (base & ~table_mask) | (entry_offset & table_mask);
-            if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa) !=
-                IA64_VHPT_ENTRY_TRANSLATED) {
-                return false;
-            }
-            cpu_physical_memory_read(entry_pa + 16, &tag, 8);
-            if ((tag & (1ULL << 63)) || tag != expected_tag) {
-                continue;
-            }
-            cpu_physical_memory_read(entry_pa, pte, 8);
-            return true;
+        *entry_va = ia64_vhpt_long_hash_address(env, va, size, NULL);
+        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa) !=
+            IA64_VHPT_ENTRY_TRANSLATED) {
+            return false;
         }
+        ia64_vhpt_load_long_entry(env, entry_pa, pte, &itir, &tag);
+        if ((tag & (1ULL << 63)) || tag != expected_tag) {
+            return false;
+        }
+        return ia64_vhpt_pte_valid(*pte) &&
+               ia64_vhpt_itir_valid(*pte, itir);
     }
-
-    return false;
 }
 
 bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
-                               bool is_ifetch, uint64_t *entry_va)
+                               bool is_ifetch, bool is_rse,
+                               uint64_t *entry_va)
 {
     uint64_t local_entry_va;
     uint64_t pte;
@@ -6393,7 +6795,8 @@ bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
         entry_va = &local_entry_va;
     }
 
-    return ia64_vhpt_lookup_pte(env, va, is_ifetch, &pte, entry_va) &&
+    return ia64_vhpt_lookup_pte(env, va, is_ifetch, is_rse,
+                                &pte, entry_va) &&
            !(pte & IA64_PTE_PRESENT);
 }
 
@@ -6448,14 +6851,12 @@ static void ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
 /* ---- VHPT walker ---- */
 
 bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
-                         bool is_ifetch, uint64_t *pa, uint8_t *perm,
-                         uint64_t *pte, uint32_t *access_key)
+                         bool is_ifetch, bool is_rse, uint8_t access_level,
+                         uint64_t *pa, uint8_t *perm, uint64_t *pte,
+                         uint32_t *access_key)
 {
     uint64_t vhpt_base;
-    uint64_t vhpt_entries;
     uint64_t hash;
-    uint64_t hpn;
-    uint32_t i;
     uint64_t tag;
     uint64_t expected_tag;
     uint64_t translation;
@@ -6466,13 +6867,21 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
     uint8_t size;
     bool long_format;
 
-    if (!ia64_vhpt_walker_enabled(env, va, is_ifetch, &size, &long_format)) {
+    if (!ia64_vhpt_walker_enabled(env, va, is_ifetch, is_rse,
+                                  &size, &long_format)) {
         qemu_log_mask(CPU_LOG_MMU,
                       "ia64 vhpt disabled %c va=0x%016" PRIx64
                       " rid=0x%06" PRIx32 " pta=0x%016" PRIx64
                       " rr=0x%016" PRIx64 " psr=0x%016" PRIx64 "\n",
                       is_ifetch ? 'i' : 'd', va, rid, env->cr_pta,
                       env->rr[ia64_rr_index(va)], env->psr);
+        return false;
+    }
+    if (!ia64_vhpt_preferred_page_size_supported(env, va)) {
+        qemu_log_mask(CPU_LOG_MMU,
+                      "ia64 vhpt unsupported preferred page size %c"
+                      " va=0x%016" PRIx64 " rid=0x%06" PRIx32 "\n",
+                      is_ifetch ? 'i' : 'd', va, rid);
         return false;
     }
 
@@ -6491,7 +6900,15 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
             return false;
         }
 
-        cpu_physical_memory_read(entry_pa, &translation, 8);
+        translation = ia64_vhpt_load_u64(env, entry_pa);
+        if (!ia64_vhpt_pte_valid(translation)) {
+            qemu_log_mask(CPU_LOG_MMU,
+                          "ia64 vhpt short reserved translation %c"
+                          " va=0x%016" PRIx64 " rid=0x%06" PRIx32
+                          " pte=0x%016" PRIx64 "\n",
+                          is_ifetch ? 'i' : 'd', va, rid, translation);
+            return false;
+        }
         if (pte) {
             *pte = translation;
         }
@@ -6502,7 +6919,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
             uint8_t ar = ia64_pte_ar(translation);
             uint8_t pl = ia64_pte_pl(translation);
 
-            *perm = ia64_pte_perm(translation, ia64_psr_cpl(env->psr));
+            *perm = ia64_pte_perm(translation, access_level);
             page_mask = (1ULL << page_shift) - 1;
             *pa = ((translation & IA64_PTE_PPN_MASK) & ~page_mask) |
                   (va & page_mask);
@@ -6545,20 +6962,10 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
         return true;
     }
 
-    {
-        vhpt_entries = 1ULL << (size - 5);
-        vhpt_base = env->cr_pta & IA64_PTA_BASE_MASK;
-    }
-
-    hpn = ia64_vhpt_hpn(env, va);
-    hash = (hpn ^ (hpn >> 7) ^ rid) & (vhpt_entries - 1);
+    vhpt_base = env->cr_pta & IA64_PTA_BASE_MASK;
     expected_tag = ia64_vhpt_long_tag(env, va);
-    for (i = 0; i < 4; i++) {
-        uint64_t entry_index = (hash + i) & (vhpt_entries - 1);
-        uint64_t entry_offset = entry_index << 5;
-        uint64_t table_mask = (1ULL << size) - 1;
-
-        entry_va = (vhpt_base & ~table_mask) | (entry_offset & table_mask);
+    {
+        entry_va = ia64_vhpt_long_hash_address(env, va, size, &hash);
         if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             qemu_log_mask(CPU_LOG_MMU,
@@ -6569,14 +6976,21 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
             return false;
         }
 
-        cpu_physical_memory_read(entry_pa, &translation, 8);
-        cpu_physical_memory_read(entry_pa + 8, &itir, 8);
-        cpu_physical_memory_read(entry_pa + 16, &tag, 8);
+        ia64_vhpt_load_long_entry(env, entry_pa, &translation, &itir, &tag);
         if (tag & (1ULL << 63)) {
-            continue;
+            goto long_miss;
         }
         if (tag != expected_tag) {
-            continue;
+            goto long_miss;
+        }
+        if (!ia64_vhpt_pte_valid(translation) ||
+            !ia64_vhpt_itir_valid(translation, itir)) {
+            qemu_log_mask(CPU_LOG_MMU,
+                          "ia64 vhpt reserved translation %c"
+                          " va=0x%016" PRIx64 " rid=0x%06" PRIx32
+                          " pte=0x%016" PRIx64 " itir=0x%016" PRIx64 "\n",
+                          is_ifetch ? 'i' : 'd', va, rid, translation, itir);
+            return false;
         }
         if (pte) {
             *pte = translation;
@@ -6587,9 +7001,6 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
             uint8_t long_page_shift =
                 (itir >> IA64_ITIR_PS_SHIFT) & IA64_ITIR_PS_MASK;
 
-            if (long_page_shift < 12) {
-                long_page_shift = 12;
-            }
             page_mask = (1ULL << long_page_shift) - 1;
             {
                 uint8_t ar = ia64_pte_ar(translation);
@@ -6600,7 +7011,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
                 if (access_key) {
                     *access_key = entry_key;
                 }
-                *perm = ia64_pte_perm(translation, ia64_psr_cpl(env->psr));
+                *perm = ia64_pte_perm(translation, access_level);
                 *pa = ((translation & IA64_PTE_PPN_MASK) & ~page_mask) |
                       (va & page_mask);
                 ia64_vhpt_install_tc(env, va, rid, is_ifetch, *pa,
@@ -6644,6 +7055,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
             return true;
         }
     }
+long_miss:
     qemu_log_mask(CPU_LOG_MMU,
                   "ia64 vhpt miss %c va=0x%016" PRIx64
                   " rid=0x%06" PRIx32 " base=0x%016" PRIx64
@@ -6653,10 +7065,11 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
 }
 
 bool ia64_vhpt_walk(CPUIA64State *env, uint64_t va, uint32_t rid,
-                    bool is_ifetch, uint64_t *pa, uint8_t *perm)
+                    bool is_ifetch, bool is_rse, uint8_t access_level,
+                    uint64_t *pa, uint8_t *perm)
 {
-    return ia64_vhpt_walk_full(env, va, rid, is_ifetch, pa, perm, NULL,
-                               NULL);
+    return ia64_vhpt_walk_full(env, va, rid, is_ifetch, is_rse, access_level,
+                               pa, perm, NULL, NULL);
 }
 
 /* ---- ITC insert helper (software-managed TLB insert) ---- */
@@ -6739,7 +7152,13 @@ void helper_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data)
 uint64_t helper_mov_psrgr_read(CPUIA64State *env, uint32_t unused)
 {
     (void)unused;
-    return env->psr;
+    /*
+     * PSR.ri is only defined as an rfi restart selector and becomes
+     * undefined after the restarted IA-64 instruction begins execution.
+     * The translator keeps it live internally to select a nonzero TB entry
+     * slot, so expose the chosen architectural undefined value of zero.
+     */
+    return env->psr & ~IA64_PSR_RI_MASK;
 }
 
 /* ---- mov to PSR helper ---- */
@@ -6773,28 +7192,9 @@ void helper_mov_grrr_write(CPUIA64State *env, uint64_t rr_addr, uint64_t value)
 {
     uint32_t rr_num = (rr_addr >> 61) & 7;
 
-    if (rr_num < 8) {
-        bool inst_purged = false;
-        env->rr[rr_num] = value;
-        uint16_t i;
-        for (i = 0; i < env->tlb_data_count; i++) {
-            if (!env->tlb_data[i].is_tr &&
-                ia64_rr_index(env->tlb_data[i].va) == rr_num) {
-                env->tlb_data[i].valid = 0;
-            }
-        }
-        for (i = 0; i < env->tlb_inst_count; i++) {
-            if (!env->tlb_inst[i].is_tr &&
-                ia64_rr_index(env->tlb_inst[i].va) == rr_num) {
-                env->tlb_inst[i].valid = 0;
-                inst_purged = true;
-            }
-        }
-        tlb_flush(env_cpu(env));
-        if (inst_purged) {
-            ia64_defer_itlb_tb_flush(env);
-        }
-    }
+    env->rr[rr_num] = value;
+    tlb_flush(env_cpu(env));
+    ia64_defer_itlb_tb_flush(env);
 }
 
 /* ---- mov from PKR helper ---- */
@@ -6882,9 +7282,11 @@ static void ia64_set_alat(CPUIA64State *env, uint32_t reg, uint64_t addr,
                           uint32_t size, bool fp)
 {
     uint64_t pa;
+    IA64MemorySpeculation spec;
     int i;
 
-    if (!ia64_data_address_to_phys(env, addr, &pa)) {
+    if (!ia64_data_address_to_phys_attr(env, addr, &pa, &spec) ||
+        !ia64_memory_allows_advanced_load(spec)) {
         return;
     }
 

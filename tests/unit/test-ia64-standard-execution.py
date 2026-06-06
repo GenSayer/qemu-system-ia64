@@ -40,10 +40,12 @@ ACPI_FADT_FLAG_WBINVD = 1 << 0
 ACPI_FADT_FLAG_PWR_BUTTON = 1 << 4
 ACPI_FADT_FLAG_SLP_BUTTON = 1 << 5
 ACPI_FADT_FLAG_TMR_VAL_EXT = 1 << 8
+ACPI_FADT_FLAG_SW_CPU_SLP = 1 << 13
 ACPI_FADT_EXPECTED_FLAGS = (
     ACPI_FADT_FLAG_WBINVD |
     ACPI_FADT_FLAG_SLP_BUTTON |
-    ACPI_FADT_FLAG_TMR_VAL_EXT
+    ACPI_FADT_FLAG_TMR_VAL_EXT |
+    ACPI_FADT_FLAG_SW_CPU_SLP
 )
 PCI_CONFIG_ECAM_BASE = 0x7FF0000000
 PCI_MMIO_BASE = 0xC1000000
@@ -722,7 +724,7 @@ def test_sal_efi_firmware_boot_contract(qemu, firmware):
     returncode, output = run_firmware(qemu, firmware)
     required = [
         "UEFI Time Services:   GetTime/SetTime/GetWakeupTime verified",
-        "Memory Map Test:      descriptor boundaries verified",
+        "Memory Map Test:      descriptor and pool placement verified",
         "Console Out Test:     text output contracts verified",
         "Console In:           Serial/PS2 WaitForKey ready",
         "Console In Buffer:    WaitForKey preserves keystrokes",

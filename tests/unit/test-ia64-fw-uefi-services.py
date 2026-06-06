@@ -75,6 +75,9 @@ def main():
         "mPoolAllocations",
         "bs_load_image",
         "bs_start_image",
+        "fw_call_efi_entry",
+        "fw_efi_entry_abi_probe",
+        "efi_entry_handoff_selftest",
         "bs_exit_boot_services",
         "rs_get_time",
         "mRuntimeTimeBase",
@@ -122,6 +125,7 @@ def main():
         "mOpticalSimpleFsProto",
         "fat_file_read",
         "bs_install_configuration_table",
+        "uefi_configuration_table_selftest",
         "mFacs",
         "mDsdt",
         "graphics_select_mode",
@@ -271,6 +275,11 @@ def main():
          "missing IA-64 nonlocal stack save helper"),
         ("__ia64_nonlocal_goto" in objdump.stdout,
          "missing IA-64 nonlocal goto helper"),
+        ("adds r12=-16,r12" in text and
+         "st8 [r12]=r33" in text and
+         "st8 [r14]=r34" in text and
+         "mov r12=r41" in text,
+         "EFI image entry P64 stack arguments are not prepared"),
     ]
     handoff_failed = [msg for ok, msg in handoff_checks if not ok]
     if handoff_failed:
@@ -336,9 +345,11 @@ def main():
     expected_lines = [
         "Memory Map:           low RAM end=0x0000000040000000",
         "I/O Port Space:       0x0000800010000000-0x0000800013FFFFFF",
-        "Memory Map Test:      descriptor boundaries verified",
+        "Memory Map Test:      descriptor and pool placement verified",
         "UEFI Time Services:   GetTime/SetTime/GetWakeupTime verified",
         "Loaded Image Paths:   protocol storage verified",
+        "EFI Image Handoff:    P64 register/stack arguments verified",
+        "PE Runtime Relocation: base adjustment/fixup log verified",
         "SMBIOS Table:         published",
         "SMBIOS Table Checks:  entry point verified",
     ]
@@ -471,14 +482,17 @@ def main():
         text=True,
     )
     expected_banner = (
-        "Graphics Output:      GOP/UGA stdvga BGRx PixelBitMask "
+        "Graphics Output:      GOP/UGA stdvga "
+        "PixelBlueGreenRedReserved8BitPerColor "
         "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
         "1280x1024x32 @ 0xc2000000"
     )
-    expected_setmode = "GOP SetMode Test:"
+    expected_setmode_label = "GOP SetMode Test:"
+    expected_setmode_result = "BGRx enum framebuffer cleared"
     if (strings.returncode != 0 or gop_size != 0xb4 or
             expected_banner not in strings.stdout or
-            expected_setmode not in strings.stdout):
+            expected_setmode_label not in strings.stdout or
+            expected_setmode_result not in strings.stdout):
         print("not ok 6 - firmware GOP multi-mode table")
         if strings.returncode != 0:
             print("# strings failed for firmware ELF")
@@ -486,8 +500,10 @@ def main():
             print(f"# expected mGopModeInfo size 0xb4, got 0x{gop_size:x}")
         if expected_banner not in strings.stdout:
             print(f"# missing banner: {expected_banner}")
-        if expected_setmode not in strings.stdout:
-            print(f"# missing banner token: {expected_setmode}")
+        if expected_setmode_label not in strings.stdout:
+            print(f"# missing banner token: {expected_setmode_label}")
+        if expected_setmode_result not in strings.stdout:
+            print(f"# missing banner token: {expected_setmode_result}")
         return 1
 
     print("ok 6 - firmware GOP multi-mode table")

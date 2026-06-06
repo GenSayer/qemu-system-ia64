@@ -176,7 +176,7 @@ def main():
         "Optical Raw Device Path: whole-media ATAPI path verified",
         "Console Out Test:     text output contracts verified",
         "Console Handles:      graphics output handle verified",
-        "Loaded Image Options: SourceBuffer contract verified",
+        "Loaded Image Options: type and ownership contracts verified",
         "Block I/O Read Test:  media ID/range/bulk reads verified",
         "Disk Block I/O Test:  primary ATA read/zero-write verified",
         "Block I/O: locating \\EFI\\BOOT\\BOOTIA64.EFI...",
