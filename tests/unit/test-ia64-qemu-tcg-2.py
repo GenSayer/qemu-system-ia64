@@ -120,13 +120,16 @@ IA64_PKR_VALID = 1 << 0
 IA64_PKR_WD = 1 << 1
 IA64_PKR_RD = 1 << 2
 IA64_PKR_XD = 1 << 3
-IA64_TR_COUNT = 8
-IA64_TLB_MAX = 256
+IA64_TR_COUNT = 64
+IA64_TLB_MAX = 128
 IA64_REGION_BITS = 3
 IA64_IMPL_PA_BITS = 50
 IA64_IMPL_VA_MSB = 60
 IA64_IMPL_VA_BITS = IA64_IMPL_VA_MSB + 1 + IA64_REGION_BITS
 IA64_PAL_IMPL_VA_MSB = IA64_IMPL_VA_MSB
+LONG_VHPT_RID2_TAG = 2 << (IA64_IMPL_VA_MSB + 1 - 12)
+LONG_VHPT_RID2_TAG_BYTE_SWAPPED = int.from_bytes(
+    LONG_VHPT_RID2_TAG.to_bytes(8, "little"), "big")
 IA64_FIRMWARE_IVT_BASE = 0x10000
 PAL_PROC_ENTRY = 0x100060
 
@@ -177,13 +180,13 @@ PAL_VERSION_VALUE = ((2 << 40) | (0x23 << 32) | (1 << 24) |
 PAL_INSERTABLE_PAGE_SIZE_MASK = ((1 << 12) | (1 << 13) | (1 << 14) |
                                  (1 << 16) | (1 << 18) | (1 << 20) |
                                  (1 << 22) | (1 << 24) | (1 << 26) |
-                                 (1 << 28))
-PAL_PURGE_PAGE_SIZE_MASK = PAL_INSERTABLE_PAGE_SIZE_MASK | (1 << 32)
+                                 (1 << 28) | (1 << 30) | (1 << 32))
+PAL_PURGE_PAGE_SIZE_MASK = PAL_INSERTABLE_PAGE_SIZE_MASK
 PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_PKR_COUNT - 1) << 16) |
                          (8 << 24) | ((IA64_TR_COUNT - 1) << 32) |
-                         ((IA64_TR_COUNT - 1) << 40) | (2 << 48) |
-                         (1 << 56))
+                         ((IA64_TR_COUNT - 1) << 40) | (4 << 48) |
+                         (2 << 56))
 PAL_VM_SUMMARY_INFO_2 = IA64_PAL_IMPL_VA_MSB | (24 << 8)
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_4_1 = (4 << 32) | 1
@@ -197,8 +200,9 @@ PAL_CACHE_INFO_L0_2 = 16384 | (6 << 32) | (12 << 40) | (31 << 48)
 PAL_CACHE_INFO_L1_U_1 = (1 | (1 << 1) | (8 << 8) | (7 << 16) |
                          (7 << 24) | (1 << 32) | (1 << 40))
 PAL_CACHE_INFO_L1_U_2 = (262144 | (7 << 32) | (12 << 40) | (35 << 48))
-PAL_VM_INFO_L0_I = (2 | (128 << 8) | (IA64_TLB_MAX << 16) |
-                    (1 << 32) | (1 << 34))
+PAL_VM_INFO_L0 = 1 | (32 << 8) | (32 << 16)
+PAL_VM_INFO_L1 = (1 | (128 << 8) | (128 << 16) |
+                  (1 << 32) | (1 << 34))
 PAL_CACHE_PROT_DATA_NONE = 64
 PAL_CACHE_PROT_TAG_NONE_L0 = (1 << 30) | (12 << 8) | (31 << 14)
 PAL_PLATFORM_INTERRUPT_BLOCK = 0
@@ -2753,6 +2757,26 @@ def br_cond(source, target, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def br_wexit(source, target, qp):
+    field = branch_target_field(source, target)
+    return (
+        op(4)
+        | bitfield(field & 0xfffff, 13, 20)
+        | bitfield((field >> 20) & 1, 36, 1)
+        | bitfield(2, 6, 3)
+        | bitfield(qp, 0, 6)
+    )
+
+def br_wtop(source, target, qp):
+    field = branch_target_field(source, target)
+    return (
+        op(4)
+        | bitfield(field & 0xfffff, 13, 20)
+        | bitfield((field >> 20) & 1, 36, 1)
+        | bitfield(3, 6, 3)
+        | bitfield(qp, 0, 6)
+    )
+
 def brl_call_mlx(b1, source, target, qp=0, ignored_l=0):
     field = long_branch_target_field(source, target)
     l_slot = (
@@ -3353,6 +3377,26 @@ test_rse_call_ret_preserves_caller_local = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 8,
         "cfm_sol": 6,
+    }, entry=0x10)
+
+test_rse_call_preserves_same_bundle_local_write = require_registers(
+    "rse_call_preserves_same_bundle_local_write", [
+        (0x10, 0x00, nop_m(), alloc(53, 29, 23, 0, 0), nop_i()),
+        (0x20, *movl_mlx(12, 0x1000)),
+        (0x30, 0x00, nop_m(), adds(47, 66, 12), nop_i()),
+        (0x40, 0x10, nop_m(), adds(47, 32, 12),
+         br_call(0, 0x40, 0x100)),
+        (0x50, 0x00, nop_m(), adds(8, 0, 47), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_cond(0x60, 0x60)),
+        (0x100, 0x00, nop_m(), alloc(32, 8, 6, 0, 0), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x60,
+        "r8": 0x1020,
+        "r47": 0x1020,
+        "cfm_sof": 29,
+        "cfm_sol": 23,
     }, entry=0x10)
 
 test_rse_cover_skips_trailing_rnat_slot = require_registers(
@@ -4443,48 +4487,6 @@ test_rse_rfi_same_iip_preserves_interrupted_call_nat = require_registers(
         "cfm_sol": 6,
     }, entry=0x10)
 
-test_rse_rfi_invalid_ifs_bspstore_rebase_preserves_retry = require_registers(
-    "rse_rfi_invalid_ifs_bspstore_rebase_preserves_retry", [
-        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
-        (0x20, *movl_mlx(2, HIGH_TR_BASE + 0x20000)),
-        (0x30, *movl_mlx(19, (1 << 13) | (1 << 17))),
-        (0x40, *movl_mlx(3, 0x100000)),
-        (0x50, 0x00, mov_ar(3, 18), nop_i(),
-         nop_i()),
-        (0x60, 0x10, mov_gr_psr_full(19), nop_i(),
-         br_cond(0x60, 0x70)),
-        (0x70, 0x00, nop_m(), alloc(36, 7, 6, 0, 0),
-         nop_i()),
-        (0x80, *movl_mlx(37, 0x123456789abcdef0)),
-        (0x90, 0x10, nop_m(), nop_i(),
-         br_call(0, 0x90, 0x100)),
-        (0xa0, 0x00, nop_m(), adds(8, 0, 37),
-         nop_i()),
-        (0xb0, 0x10, nop_m(), nop_i(),
-         br_cond(0xb0, 0xb0)),
-        (0x100, 0x00, ld8(40, 2), nop_i(),
-         nop_i()),
-        (0x110, 0x10, nop_m(), nop_i(),
-         br_ret(0)),
-        (IA64_ALT_DTLB_VECTOR, 0x18, nop_m(), nop_m(),
-         cover_b()),
-        (IA64_ALT_DTLB_VECTOR + 0x10, *movl_mlx(3, 0x200000)),
-        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00, mov_ar(3, 18), nop_i(),
-         nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, mov_m_gr_cr(0, 23), nop_i(),
-         nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x40, 0x00, itc_d(18), nop_i(),
-         nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x50, 0x10, nop_m(), nop_i(),
-         rfi_b()),
-    ], {
-        "ip": 0xb0,
-        "exception": IA64_EXCP_NONE,
-        "r8": 0x123456789abcdef0,
-        "cfm_sof": 7,
-        "cfm_sol": 6,
-    }, entry=0x10)
-
 test_rse_rfi_bspstore_advanced_iip_spills_parent_frame = require_registers(
     "rse_rfi_bspstore_advanced_iip_spills_parent_frame", [
         (0x10, *movl_mlx(2, 1 << 13)),
@@ -4774,8 +4776,9 @@ test_rse_rfi_repeated_cover_spills_latest_exception_frame = require_registers(
         "cfm_sol": 0,
     }, entry=0x10)
 
-test_rse_rfi_advanced_iip_bspstore_switch_keeps_current_frame = require_registers(
-    "rse_rfi_advanced_iip_bspstore_switch_keeps_current_frame", [
+test_rse_rfi_advanced_iip_bspstore_switch_loads_external_frame = \
+    require_registers(
+        "rse_rfi_advanced_iip_bspstore_switch_loads_external_frame", [
         (0x10, *movl_mlx(2, 1 << 13)),
         (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
          br_cond(0x20, 0x40)),
@@ -4790,7 +4793,7 @@ test_rse_rfi_advanced_iip_bspstore_switch_keeps_current_frame = require_register
          nop_i()),
         (0xa0, 0x00, nop_m(), adds(8, 0, 33),
          nop_i()),
-        (0xb0, 0x00, nop_m(), adds(9, 0, 34),
+        (0xb0, 0x00, mov_m_ar_gr(10, 17), adds(9, 0, 34),
          nop_i()),
         (0xc0, 0x10, nop_m(), nop_i(),
          br_cond(0xc0, 0xc0)),
@@ -4809,8 +4812,9 @@ test_rse_rfi_advanced_iip_bspstore_switch_keeps_current_frame = require_register
     ], {
         "ip": 0xc0,
         "exception": IA64_EXCP_NONE,
-        "r8": 0x123456789abcdef0,
-        "r9": 0x0fedcba987654321,
+        "r8": 0,
+        "r9": 0,
+        "r10": 0x1fff98,
         "cfm_sof": 12,
         "cfm_sol": 4,
     }, entry=0x10)
@@ -4933,6 +4937,56 @@ test_rse_manual_rfi_loadrs_restores_current_frame_base = require_registers(
         "cfm_sof": 9,
         "cfm_sol": 3,
     }, entry=0x10)
+
+test_rse_manual_rfi_smaller_frame_restores_current_frame_base = \
+    require_registers(
+        "rse_manual_rfi_smaller_frame_restores_current_frame_base", [
+            (0x10, *movl_mlx(3, 0x100000)),
+            (0x20, 0x00, mov_ar(3, 18), nop_i(),
+             nop_i()),
+            (0x30, 0x00, alloc(2, 5, 0, 0, 0), nop_i(),
+             nop_i()),
+            (0x40, *movl_mlx(32, 0x1111222233334444)),
+            (0x50, *movl_mlx(33, 0x5555666677778888)),
+            (0x60, *movl_mlx(34, 0x9999aaaabbbbcccc)),
+            (0x70, *movl_mlx(35, 0xddddeeeeffff0000)),
+            (0x80, *movl_mlx(36, 0x123456789abcdef0)),
+            (0x90, 0x18, nop_m(), nop_m(),
+             cover_b()),
+            (0xa0, 0x00, alloc(2, 8, 6, 0, 0), nop_i(),
+             nop_i()),
+            (0xb0, *movl_mlx(32, 0xa1a2a3a4a5a6a7a8)),
+            (0xc0, *movl_mlx(33, 0xb1b2b3b4b5b6b7b8)),
+            (0xd0, *movl_mlx(20, 0x200)),
+            (0xe0, 0x00, mov_m_gr_cr(0, 16), nop_i(),
+             nop_i()),
+            (0xf0, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+             nop_i()),
+            (0x100, *movl_mlx(20, (1 << 63) | 5)),
+            (0x110, 0x00, mov_m_gr_cr(20, 23), nop_i(),
+             nop_i()),
+            (0x120, 0x10, nop_m(), nop_i(),
+             rfi_b()),
+            (0x200, 0x00, nop_m(), adds(8, 0, 32),
+             adds(9, 0, 33)),
+            (0x210, 0x00, nop_m(), adds(10, 0, 34),
+             adds(11, 0, 35)),
+            (0x220, 0x00, mov_m_ar_gr(13, 17), adds(12, 0, 36),
+             nop_i()),
+            (0x230, 0x10, nop_m(), nop_i(),
+             br_cond(0x230, 0x230)),
+        ], {
+            "ip": 0x230,
+            "exception": IA64_EXCP_NONE,
+            "r8": 0x1111222233334444,
+            "r9": 0x5555666677778888,
+            "r10": 0x9999aaaabbbbcccc,
+            "r11": 0xddddeeeeffff0000,
+            "r12": 0x123456789abcdef0,
+            "r13": 0x100000,
+            "cfm_sof": 5,
+            "cfm_sol": 0,
+        }, entry=0x10)
 
 test_rse_rfi_loadrs_preserves_high_sol_caller_local = require_registers(
     "rse_rfi_loadrs_preserves_high_sol_caller_local", [
@@ -5527,6 +5581,36 @@ test_rse_exception_loadrs_preserves_interrupted_call = require_registers(
         "r8": 0x5a,
     }, entry=0x10)
 
+test_rse_rfi_invalid_ifs_unchanged_stack_restores_call = require_registers(
+    "rse_rfi_invalid_ifs_unchanged_stack_restores_call", [
+        (0x10, *movl_mlx(2, 1 << 13)),
+        (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
+         br_cond(0x20, 0x40)),
+        (0x40, 0x00, alloc(41, 22, 15, 0, 0), addl(43, 0x5a, 0),
+         nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x50, 0x100)),
+        (0x60, 0x00, nop_m(), adds(8, 0, 43),
+         nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0x70)),
+        (0x100, 0x00, break_m(0x42), nop_i(),
+         nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+        (IA64_BREAK_VECTOR, *movl_mlx(20, 0x110)),
+        (IA64_BREAK_VECTOR + 0x10, 0x00, mov_m_gr_cr(20, 19),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x20, 0x00, mov_m_gr_cr(0, 23),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x5a,
+    }, entry=0x10)
+
 test_rse_exception_restores_snapshot_arrays = require_registers(
     "rse_exception_restores_snapshot_arrays", [
         (0x10, *movl_mlx(2, 1 << 13)),
@@ -5749,6 +5833,85 @@ test_rse_rfi_invalid_ifs_context_switch_drops_snapshot = require_registers(
         "ip": 0x250,
         "exception": IA64_EXCP_NONE,
         "r8": 0x2222,
+    }, entry=0x10)
+
+test_rse_rfi_invalid_ifs_same_bspstore_keeps_guest_gr = require_registers(
+    "rse_rfi_invalid_ifs_same_bspstore_keeps_guest_gr", [
+        (0x10, *movl_mlx(2, 1 << 13)),
+        (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
+         br_cond(0x20, 0x40)),
+        (0x40, *movl_mlx(3, 0x100000)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x60, 0x00, alloc(1, 5, 5, 0, 0), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(32, 0x1111)),
+        (0x80, 0x00, break_m(0x42), nop_i(),
+         nop_i()),
+        (0x200, 0x00, nop_m(), adds(8, 0, 32),
+         nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(),
+         br_cond(0x210, 0x210)),
+        (IA64_BREAK_VECTOR, *movl_mlx(32, 0x2222)),
+        (IA64_BREAK_VECTOR + 0x10, *movl_mlx(20, 0x200)),
+        (IA64_BREAK_VECTOR + 0x20, 0x00, mov_m_gr_cr(20, 19),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x30, 0x00, mov_m_gr_cr(0, 23),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+    ], {
+        "ip": 0x210,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x2222,
+        "r32": 0x2222,
+        "cfm_sof": 5,
+        "cfm_sol": 5,
+    }, entry=0x10)
+
+test_rse_rfi_invalid_ifs_exact_iip_keeps_guest_gr = require_registers(
+    "rse_rfi_invalid_ifs_exact_iip_keeps_guest_gr", [
+        (0x10, *movl_mlx(2, HIGH_TR_BASE + 0x20000)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x30, *movl_mlx(3, 0x100000)),
+        (0x40, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x50, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0x50, 0x60)),
+        (0x60, 0x00, alloc(1, 5, 5, 0, 0), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(32, 0x1111)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x100)),
+        (0x100, 0x00, ld8(4, 2), adds(8, 0, 32),
+         nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(),
+         br_cond(0x110, 0x110)),
+        (IA64_ALT_DTLB_VECTOR, 0x00, ssm(IA64_PSR_IC),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, srlz_d(),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00, break_m(0x43),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR, *movl_mlx(32, 0x2222)),
+        (IA64_BREAK_VECTOR + 0x10,
+         *movl_mlx(20, IA64_PSR_IC | IA64_PSR_DT | (1 << 41))),
+        (IA64_BREAK_VECTOR + 0x20, *movl_mlx(21, 0x100)),
+        (IA64_BREAK_VECTOR + 0x30, 0x00, mov_m_gr_cr(20, 16),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x40, 0x00, mov_m_gr_cr(21, 19),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x50, 0x00, mov_m_gr_cr(0, 23),
+         nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x60, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+    ], {
+        "ip": 0x110,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x2222,
+        "r32": 0x2222,
+        "cfm_sof": 5,
+        "cfm_sol": 5,
     }, entry=0x10)
 
 test_rfi_unmatched_context_keeps_interruption_resources = require_registers(
@@ -6014,6 +6177,83 @@ test_rse_bspstore_write_rebases_dirty_partition = require_registers(
         "ip": 0x80,
         "r8": 0x1111,
         "r9": 0x2222,
+    }, entry=0x10)
+
+test_rse_bspstore_rebase_discards_clean_cover_prefix = require_registers(
+    "rse_bspstore_rebase_discards_clean_cover_prefix", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(2, 8, 0, 0, 0),
+         nop_i()),
+        (0x40, *movl_mlx(32, 0x1111222233334444)),
+        (0x50, *movl_mlx(33, 0x2222333344445555)),
+        (0x60, *movl_mlx(34, 0x3333444455556666)),
+        (0x70, *movl_mlx(35, 0x4444555566667777)),
+        (0x80, *movl_mlx(36, 0x5555666677778888)),
+        (0x90, *movl_mlx(37, 0x6666777788889999)),
+        (0xa0, *movl_mlx(38, 0x777788889999aaaa)),
+        (0xb0, *movl_mlx(39, 0x88889999aaaabbbb)),
+        (0xc0, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0xd0, *movl_mlx(3, 0x3000e8)),
+        (0xe0, *movl_mlx(4, 0xaaaabbbbccccdddd)),
+        (0xf0, 0x00, st8(3, 4), nop_i(),
+         nop_i()),
+        (0x100, *movl_mlx(3, 0x3000f0)),
+        (0x110, 0x00, st8(3, 4), nop_i(),
+         nop_i()),
+        (0x120, *movl_mlx(3, 0x3000f8)),
+        (0x130, 0x00, st8(3, 4), nop_i(),
+         nop_i()),
+        (0x140, 0x00, mov_m_gr_cr(0, 16), nop_i(),
+         nop_i()),
+        (0x150, *movl_mlx(20, 0x200)),
+        (0x160, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+         nop_i()),
+        (0x170, *movl_mlx(20, (1 << 63) | 5)),
+        (0x180, 0x00, mov_m_gr_cr(20, 23), nop_i(),
+         nop_i()),
+        (0x190, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+        (0x200, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0x210, *movl_mlx(3, 0x300100)),
+        (0x220, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x230, 0x00, mov_m_gr_cr(0, 16), nop_i(),
+         nop_i()),
+        (0x240, *movl_mlx(20, 0x300)),
+        (0x250, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+         nop_i()),
+        (0x260, *movl_mlx(20, (1 << 63) | 8)),
+        (0x270, 0x00, mov_m_gr_cr(20, 23), nop_i(),
+         nop_i()),
+        (0x280, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+        (0x300, 0x00, nop_m(), adds(8, 0, 32),
+         adds(9, 0, 33)),
+        (0x310, 0x00, nop_m(), adds(10, 0, 34),
+         adds(11, 0, 35)),
+        (0x320, 0x00, nop_m(), adds(12, 0, 36),
+         adds(13, 0, 37)),
+        (0x330, 0x00, nop_m(), adds(14, 0, 38),
+         adds(15, 0, 39)),
+        (0x340, 0x10, nop_m(), nop_i(),
+         br_cond(0x340, 0x340)),
+    ], {
+        "ip": 0x340,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0xaaaabbbbccccdddd,
+        "r9": 0xaaaabbbbccccdddd,
+        "r10": 0xaaaabbbbccccdddd,
+        "r11": 0x4444555566667777,
+        "r12": 0x5555666677778888,
+        "r13": 0x6666777788889999,
+        "r14": 0x777788889999aaaa,
+        "r15": 0x88889999aaaabbbb,
+        "cfm_sof": 8,
+        "cfm_sol": 0,
     }, entry=0x10)
 
 test_rse_bspstore_rebase_spills_trailing_rnat = require_registers(
@@ -7065,6 +7305,45 @@ test_speculative_load_no_recovery_tlb_miss_faults = require_registers(
         "ip": IA64_ALT_DTLB_VECTOR + 0x10,
         "exception": IA64_EXCP_NONE,
         "r31": IA64_ISR_R | IA64_ISR_SP,
+    }, entry=0x10)
+
+test_speculative_load_handler_psr_ed_defers_retry = require_registers(
+    "speculative_load_handler_psr_ed_defers_retry", [
+        (0x10, *movl_mlx(2, 0xa000000100020000)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x50, 0x00, ld8_s_postinc(4, 2, 8), nop_i(),
+         nop_i()),
+        (0x60, 0x00, mov_m_psr_gr(8), tnat_z(1, 2, 4),
+         nop_i()),
+        (0x70, 0x00, nop_m(), addl(5, 1, 0, qp=1),
+         addl(6, 1, 0, qp=2)),
+        (0x80, 0x00, nop_m(), tbit_z(3, 4, 8, 43),
+         nop_i()),
+        (0x90, 0x00, nop_m(), addl(9, 1, 0, qp=3),
+         addl(10, 1, 0, qp=4)),
+        (0xa0, 0x10, nop_m(), nop_i(),
+         br_cond(0xa0, 0xa0)),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(20, 16),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, *movl_mlx(21, IA64_PSR_ED)),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00, nop_m(),
+         or_reg(20, 20, 21), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, mov_m_gr_cr(20, 16),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+    ], {
+        "ip": 0xa0,
+        "exception": IA64_EXCP_NONE,
+        "r2": 0xa000000100020008,
+        "r5": 0,
+        "r6": 1,
+        "r9": 1,
+        "r10": 0,
     }, entry=0x10)
 
 test_speculative_unaligned_no_recovery_faults = require_registers(
@@ -10312,7 +10591,7 @@ test_itr_i_reserved_slot_faults = require_exception(
         (0x10, *movl_mlx(18, 0x0010000004000661)),
         (0x20, 0x00, adds(7, 0x68, 0), nop_i(),
          nop_i()),
-        (0x30, 0x00, mov_m_gr_cr(7, 21), adds(5, 8, 0),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), adds(5, IA64_TR_COUNT, 0),
          nop_i()),
         (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(),
          nop_i()),
@@ -12433,7 +12712,7 @@ test_itr_d_reserved_slot_faults = require_exception(
         (0x10, *movl_mlx(18, 0x0010000004000661)),
         (0x20, 0x00, adds(7, 0x68, 0), nop_i(),
          nop_i()),
-        (0x30, 0x00, mov_m_gr_cr(7, 21), adds(5, 8, 0),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), adds(5, IA64_TR_COUNT, 0),
          nop_i()),
         (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(),
          nop_i()),
@@ -13163,7 +13442,7 @@ test_ifetch_page_not_present_fallthrough_records_faulting_iip = \
             (0x4000150, 0x00, srlz_i(), nop_i(), nop_i()),
             (0x4000160, 0x00, nop_m(), mov_br_gr(7, 23), nop_i()),
             (0x4000170, 0x10, nop_m(), nop_i(), br_call_indirect(6, 7)),
-            (0x4001ff0, 0x00, nop_m(), nop_i(), nop_i()),
+            (0x4001ff0, 0x00, nop_m(), adds(28, 0x5a, 0), nop_i()),
             (0x4000000 + IA64_PAGE_NOT_PRESENT_VECTOR, 0x00,
              mov_m_cr_gr(30, 19), nop_i(), nop_i()),
             (0x4000000 + IA64_PAGE_NOT_PRESENT_VECTOR + 0x10, 0x00,
@@ -13177,6 +13456,7 @@ test_ifetch_page_not_present_fallthrough_records_faulting_iip = \
         ], {
             "ip": IA64_PAGE_NOT_PRESENT_VECTOR + 0x30,
             "exception": IA64_EXCP_NONE,
+            "r28": 0x5a,
             "r29": IA64_ISR_X,
             "r30": IFETCH_PNP_NEXT_PAGE,
             "r31": IFETCH_PNP_NEXT_PAGE,
@@ -13716,7 +13996,7 @@ test_long_vhpt_walk_uses_standard_entry_layout = require_registers(
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x0010000004000661)),
         (0x40, *movl_mlx(19, 0x230)),
-        (0x50, *movl_mlx(20, 0x4000000000000)),
+        (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
         (0x60, *movl_mlx(21, 0x100040)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
@@ -13750,7 +14030,7 @@ test_long_vhpt_walk_uses_dcr_byte_order = require_registers(
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x6106000400001000)),
         (0x40, *movl_mlx(19, 0x3002000000000000)),
-        (0x50, *movl_mlx(20, 0x400)),
+        (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG_BYTE_SWAPPED)),
         (0x60, *movl_mlx(21, 0x100040)),
         (0x70, *movl_mlx(22, IA64_DCR_BE)),
         (0x80, 0x00, st8(21, 18), adds(23, 8, 21),
@@ -13787,7 +14067,7 @@ test_long_vhpt_not_present_ignores_software_fields = require_registers(
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0xfffffffffffffffe)),
         (0x40, *movl_mlx(19, 0xdeadbeef00000030)),
-        (0x50, *movl_mlx(20, 0x4000000000000)),
+        (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
         (0x60, *movl_mlx(21, 0x100040)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
@@ -13826,7 +14106,7 @@ test_long_vhpt_unsupported_page_size_aborts_to_dtlb_miss = require_registers(
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x0010000004000661)),
         (0x40, *movl_mlx(19, 0x23c)),
-        (0x50, *movl_mlx(20, 0x4000000000000)),
+        (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
         (0x60, *movl_mlx(21, 0x100040)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
@@ -13865,7 +14145,7 @@ test_long_vhpt_walker_does_not_search_collision_chain = require_registers(
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x0010000004000661)),
         (0x40, *movl_mlx(19, 0x230)),
-        (0x50, *movl_mlx(20, 0x4000000000000)),
+        (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
         (0x60, *movl_mlx(21, 0x100060)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
@@ -13904,7 +14184,7 @@ test_long_vhpt_walker_ignores_uncacheable_table = require_registers(
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x0010000004000661)),
         (0x40, *movl_mlx(19, 0x230)),
-        (0x50, *movl_mlx(20, 0x4000000000000)),
+        (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
         (0x60, *movl_mlx(21, 0x100040)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
@@ -14455,7 +14735,12 @@ test_firmware_identity_under_translation = require_registers(
 def test_firmware_debug_tables(qemu):
     memory_mb = 192
     low_ram_end = memory_mb * 1024 * 1024
+    boot_stack_base = low_ram_end - 4 * 1024 * 1024
     system_table_pointer_base = (low_ram_end - 1) & ~((4 * 1024 * 1024) - 1)
+    if system_table_pointer_base >= boot_stack_base:
+        system_table_pointer_base = (
+            boot_stack_base - 0x1000
+        ) & ~((4 * 1024 * 1024) - 1)
     estp_fd, estp_path = tempfile.mkstemp(prefix="ia64-estp-", suffix=".bin")
     low_fd, low_path = tempfile.mkstemp(prefix="ia64-low-", suffix=".bin")
     os.close(estp_fd)
@@ -15616,30 +15901,36 @@ test_pal_ptce_info_reserved_arg = require_registers(
 test_pal_vm_info = require_registers("pal_vm_info",
     pal_call_program(PAL_VM_INFO, [(29, 0), (30, 1), (31, 0)]),
     {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
-     "r9": PAL_VM_INFO_L0_I, "r10": PAL_INSERTABLE_PAGE_SIZE_MASK,
+     "r9": PAL_VM_INFO_L0, "r10": 1 << 12,
      "r11": 0}, entry=0x10)
 
 test_pal_vm_info_l0_data = require_registers("pal_vm_info_l0_data",
     pal_call_program(PAL_VM_INFO, [(29, 0), (30, 2), (31, 0)]),
     {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
-     "r9": PAL_VM_INFO_L0_I, "r10": PAL_INSERTABLE_PAGE_SIZE_MASK,
+     "r9": PAL_VM_INFO_L0, "r10": 1 << 12,
      "r11": 0}, entry=0x10)
 
-test_pal_vm_info_l1_invalid = require_registers("pal_vm_info_l1_invalid",
+test_pal_vm_info_l1_data = require_registers("pal_vm_info_l1_data",
     pal_call_program(PAL_VM_INFO, [(29, 1), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
+     "r9": PAL_VM_INFO_L1, "r10": PAL_INSERTABLE_PAGE_SIZE_MASK,
+     "r11": 0}, entry=0x10)
+
+test_pal_vm_info_l1_instruction = require_registers(
+    "pal_vm_info_l1_instruction",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
+     "r9": PAL_VM_INFO_L1, "r10": PAL_INSERTABLE_PAGE_SIZE_MASK,
+     "r11": 0}, entry=0x10)
+
+test_pal_vm_info_l2_invalid = require_registers("pal_vm_info_l2_invalid",
+    pal_call_program(PAL_VM_INFO, [(29, 2), (30, 2), (31, 0)]),
     {"ip": 0x60, "r28": PAL_VM_INFO,
      "r8": -2 & 0xffffffffffffffff, "r9": 0, "r10": 0,
      "r11": 0}, entry=0x10)
 
 test_pal_vm_info_invalid = require_registers("pal_vm_info_invalid",
     pal_call_program(PAL_VM_INFO, [(29, 0), (30, 4), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_VM_INFO,
-     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
-    entry=0x10)
-
-test_pal_vm_info_unified_bad_type = require_registers(
-    "pal_vm_info_unified_bad_type",
-    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 1), (31, 0)]),
     {"ip": 0x60, "r28": PAL_VM_INFO,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
@@ -17068,6 +17359,30 @@ test_br_ctop_rotates_floating_registers = require_registers(
          br_cond(0x40, 0x40)),
     ], {"ip": 0x40, "r4": 0x12345678}, entry=0x10)
 
+test_br_wtop_false_predicate_drains_epilog = require_registers(
+    "br_wtop_false_predicate_drains_epilog", [
+        (0x10, 0x00, mov_m_imm_ar(66, 2), nop_i(), nop_i()),
+        (0x20, 0x13, nop_m(), nop_b(), br_wtop(0x20, 0x50, qp=16)),
+        (0x30, 0x00, adds(4, 0x11, 0), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x80)),
+        (0x50, 0x00, adds(4, 0x5a, 0), nop_i(), nop_i()),
+        (0x60, 0x13, nop_m(), nop_b(), br_wtop(0x60, 0x50, qp=16)),
+        (0x70, 0x00, mov_m_ar_gr(5, 66), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {"ip": 0x80, "r4": 0x5a, "r5": 0}, entry=0x10)
+
+test_br_wexit_false_predicate_drains_epilog = require_registers(
+    "br_wexit_false_predicate_drains_epilog", [
+        (0x10, 0x00, mov_m_imm_ar(66, 2), nop_i(), nop_i()),
+        (0x20, 0x13, nop_m(), nop_b(), br_wexit(0x20, 0x70, qp=16)),
+        (0x30, 0x00, mov_m_ar_gr(4, 66), nop_i(), nop_i()),
+        (0x40, 0x13, nop_m(), nop_b(), br_wexit(0x40, 0x70, qp=16)),
+        (0x50, 0x00, adds(6, 0x11, 0), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x80)),
+        (0x70, 0x00, mov_m_ar_gr(5, 66), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {"ip": 0x80, "r4": 1, "r5": 0, "r6": 0}, entry=0x10)
+
 test_pmc_pmd_registers_are_independent = require_registers("pmc_pmd_registers_are_independent", [
     (0x10, 0x00, adds(9, 1, 0), adds(20, 0x77, 0),
      nop_i()),
@@ -17312,6 +17627,8 @@ TEST_NAMES = {
     "speculative_load_defers_psr_ed": test_speculative_load_defers_psr_ed,
     "speculative_load_no_recovery_tlb_miss_faults":
         test_speculative_load_no_recovery_tlb_miss_faults,
+    "speculative_load_handler_psr_ed_defers_retry":
+        test_speculative_load_handler_psr_ed_defers_retry,
     "speculative_unaligned_no_recovery_faults":
         test_speculative_unaligned_no_recovery_faults,
     "speculative_recovery_dcr_dm_defers_tlb_miss":
@@ -17781,6 +18098,8 @@ TEST_NAMES = {
     "rse_bsp_is_current_frame_base": test_rse_bsp_is_current_frame_base,
     "rse_call_ret_updates_bsp_base": test_rse_call_ret_updates_bsp_base,
     "rse_call_ret_preserves_caller_local": test_rse_call_ret_preserves_caller_local,
+    "rse_call_preserves_same_bundle_local_write":
+        test_rse_call_preserves_same_bundle_local_write,
     "rse_cover_skips_trailing_rnat_slot": test_rse_cover_skips_trailing_rnat_slot,
     "rse_bspstore_preserves_dirty_partition_across_rnat":
         test_rse_bspstore_preserves_dirty_partition_across_rnat,
@@ -17831,7 +18150,6 @@ TEST_NAMES = {
     "rse_rfi_bspstore_rebase_preserves_interrupted_call": test_rse_rfi_bspstore_rebase_preserves_interrupted_call,
     "rse_rfi_same_iip_preserves_interrupted_call_nat":
         test_rse_rfi_same_iip_preserves_interrupted_call_nat,
-    "rse_rfi_invalid_ifs_bspstore_rebase_preserves_retry": test_rse_rfi_invalid_ifs_bspstore_rebase_preserves_retry,
     "rse_rfi_bspstore_advanced_iip_spills_parent_frame": test_rse_rfi_bspstore_advanced_iip_spills_parent_frame,
     "rse_rfi_spill_clears_stale_rnat": test_rse_rfi_spill_clears_stale_rnat,
     "rse_rfi_spills_trailing_rnat": test_rse_rfi_spills_trailing_rnat,
@@ -17840,20 +18158,29 @@ TEST_NAMES = {
         test_rse_rfi_repeated_cover_uses_latest_current_frame,
     "rse_rfi_repeated_cover_spills_latest_exception_frame":
         test_rse_rfi_repeated_cover_spills_latest_exception_frame,
-    "rse_rfi_advanced_iip_bspstore_switch_keeps_current_frame": test_rse_rfi_advanced_iip_bspstore_switch_keeps_current_frame,
+    "rse_rfi_advanced_iip_bspstore_switch_loads_external_frame":
+        test_rse_rfi_advanced_iip_bspstore_switch_loads_external_frame,
     "rse_rfi_advanced_iip_preserves_nested_call_locals": test_rse_rfi_advanced_iip_preserves_nested_call_locals,
     "rse_manual_rfi_loadrs_restores_current_frame_base": test_rse_manual_rfi_loadrs_restores_current_frame_base,
+    "rse_manual_rfi_smaller_frame_restores_current_frame_base":
+        test_rse_manual_rfi_smaller_frame_restores_current_frame_base,
     "rse_rfi_loadrs_preserves_high_sol_caller_local": test_rse_rfi_loadrs_preserves_high_sol_caller_local,
     "rse_rfi_loadrs_preserves_low_sol_caller_local": test_rse_rfi_loadrs_preserves_low_sol_caller_local,
     "rse_rfi_loadrs_preserves_caller_locals_after_nested_return": test_rse_rfi_loadrs_preserves_caller_locals_after_nested_return,
     "rse_rfi_loadrs_preserves_caller_locals_after_syscall_error": test_rse_rfi_loadrs_preserves_caller_locals_after_syscall_error,
     "rse_rfi_loadrs_preserves_gp_save_after_syscall_error": test_rse_rfi_loadrs_preserves_gp_save_after_syscall_error,
     "rse_exception_loadrs_preserves_interrupted_call": test_rse_exception_loadrs_preserves_interrupted_call,
+    "rse_rfi_invalid_ifs_unchanged_stack_restores_call":
+        test_rse_rfi_invalid_ifs_unchanged_stack_restores_call,
     "rse_exception_restores_snapshot_arrays": test_rse_exception_restores_snapshot_arrays,
     "rse_exception_flushrs_preserves_high_local": test_rse_exception_flushrs_preserves_high_local,
     "rse_exception_bspstore_restore_skips_unrelated_frame": test_rse_exception_bspstore_restore_skips_unrelated_frame,
     "rse_rfi_context_switch_drops_empty_frame_snapshots": test_rse_rfi_context_switch_drops_empty_frame_snapshots,
     "rse_rfi_invalid_ifs_context_switch_drops_snapshot": test_rse_rfi_invalid_ifs_context_switch_drops_snapshot,
+    "rse_rfi_invalid_ifs_same_bspstore_keeps_guest_gr":
+        test_rse_rfi_invalid_ifs_same_bspstore_keeps_guest_gr,
+    "rse_rfi_invalid_ifs_exact_iip_keeps_guest_gr":
+        test_rse_rfi_invalid_ifs_exact_iip_keeps_guest_gr,
     "rse_rfi_unmatched_context_keeps_guest_interruption_resources":
         test_rfi_unmatched_context_keeps_interruption_resources,
     "rse_loadrs_clamps_stacked_grs": test_rse_loadrs_clamps_stacked_grs,
@@ -17865,6 +18192,8 @@ TEST_NAMES = {
     "rse_return_growth_keeps_dirty_bsp_distance":
         test_rse_return_growth_keeps_dirty_bsp_distance,
     "rse_bspstore_write_rebases_dirty_partition": test_rse_bspstore_write_rebases_dirty_partition,
+    "rse_bspstore_rebase_discards_clean_cover_prefix":
+        test_rse_bspstore_rebase_discards_clean_cover_prefix,
     "rse_bspstore_rebase_spills_trailing_rnat":
         test_rse_bspstore_rebase_spills_trailing_rnat,
     "rse_br_ret_fill_ignores_rsc_mode": test_rse_br_ret_fill_ignores_rsc_mode,
@@ -17886,9 +18215,10 @@ TEST_NAMES = {
     "pal_ptce_info_reserved_arg": test_pal_ptce_info_reserved_arg,
     "pal_vm_info": test_pal_vm_info,
     "pal_vm_info_l0_data": test_pal_vm_info_l0_data,
-    "pal_vm_info_l1_invalid": test_pal_vm_info_l1_invalid,
+    "pal_vm_info_l1_data": test_pal_vm_info_l1_data,
+    "pal_vm_info_l1_instruction": test_pal_vm_info_l1_instruction,
+    "pal_vm_info_l2_invalid": test_pal_vm_info_l2_invalid,
     "pal_vm_info_invalid": test_pal_vm_info_invalid,
-    "pal_vm_info_unified_bad_type": test_pal_vm_info_unified_bad_type,
     "pal_vm_tr_read_dtr": test_pal_vm_tr_read_dtr,
     "pal_vm_tr_read_max_dtr": test_pal_vm_tr_read_max_dtr,
     "pal_vm_tr_read_empty": test_pal_vm_tr_read_empty,
@@ -18017,6 +18347,10 @@ TEST_NAMES = {
         test_reserved_ip_relative_branch_btype_illegal,
     "br_ctop_rotating_pipeline": test_br_ctop_rotating_pipeline,
     "br_ctop_rotates_floating_registers": test_br_ctop_rotates_floating_registers,
+    "br_wtop_false_predicate_drains_epilog":
+        test_br_wtop_false_predicate_drains_epilog,
+    "br_wexit_false_predicate_drains_epilog":
+        test_br_wexit_false_predicate_drains_epilog,
     "exception_break": test_exception_break,
     "exception_break_f": test_exception_break_f,
     "exception_break_x": test_exception_break_x,

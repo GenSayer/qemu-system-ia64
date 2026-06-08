@@ -131,7 +131,7 @@ def main():
         "Console Out Test:     text output contracts verified",
         "Console In:           Serial/PS2 WaitForKey ready",
         "Console In Buffer:    WaitForKey preserves keystrokes",
-        "GOP SetMode Test:     BGRx enum framebuffer cleared",
+        "GOP SetMode Test:     BGRx bitmask framebuffer cleared",
         "Protocol Notify:      LocateProtocol registration verified",
         "Protocol Database:    NULL interface markers verified",
         "PCI Root Bridge Test: config/resources verified",

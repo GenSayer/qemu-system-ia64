@@ -5300,7 +5300,14 @@ static TCGLabel *ia64_gen_predicate_skip(const Ia64Instruction *insn,
 {
     TCGLabel *skip;
 
-    if (insn->qp == 0) {
+    /*
+     * For while-loop branches, PR[qp] is the kernel loop condition rather
+     * than a predicate that nullifies the instruction.  A false condition
+     * must still drain the software pipeline while AR.EC is nonzero.
+     */
+    if (insn->qp == 0 ||
+        insn->opcode == IA64_OP_BR_WEXIT ||
+        insn->opcode == IA64_OP_BR_WTOP) {
         return NULL;
     }
 
@@ -8710,6 +8717,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_PTR_D:
         ia64_gen_check_nat_register(insn, insn->r3);
         ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_ptr_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(1));
@@ -8718,6 +8726,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_PTR_I:
         ia64_gen_check_nat_register(insn, insn->r3);
         ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_ptr_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(0));
@@ -8744,6 +8753,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_PTC_L:
         ia64_gen_check_nat_register(insn, insn->r3);
         ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_ptc_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(0));
@@ -8752,6 +8762,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_PTC_G:
         ia64_gen_check_nat_register(insn, insn->r3);
         ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_ptc_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(1));
@@ -8759,6 +8770,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     case IA64_OP_PTC_E:
         ia64_gen_check_nat_register(insn, insn->r3);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_ptc_purge(tcg_env, ia64_gr_src(insn->r3),
                               tcg_constant_i64(0),
                               tcg_constant_i32(2));
@@ -8767,6 +8779,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_PTC_GA:
         ia64_gen_check_nat_register(insn, insn->r3);
         ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_ptc_purge(tcg_env, ia64_gr_src(insn->r3),
                               ia64_gr_src(insn->r2),
                               tcg_constant_i32(3));
@@ -10953,6 +10966,8 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
             frame->rse_spill_base = cpu->env.rse_spill_base;
             frame->rse_bspstore_switched = cpu->env.rse_bspstore_switched;
             frame->rse_flushed = cpu->env.rse_flushed;
+            frame->rse_zero_loadrs_for_rfi =
+                cpu->env.rse_zero_loadrs_for_rfi;
             frame->rse_frame_depth = cpu->env.rse_frame_depth;
             frame->rse_cover_depth = cpu->env.rse_cover_depth;
             memcpy(frame->rse_frame_gr, cpu->env.rse_frame_gr,
@@ -11027,9 +11042,9 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
             cpu->env.cr_isr |= IA64_ISR_NI;
         }
     }
-
     /* Interruption delivery clears the RSE current-frame load enable state. */
     cpu->env.rse_current_frame_load = IA64_RSE_CURRENT_FRAME_LOAD_NONE;
+    cpu->env.rse_zero_loadrs_for_rfi = false;
     ia64_set_psr(&cpu->env, ia64_interruption_psr(&cpu->env));
     cpu->env.psr_ic_inflight = false;
 
@@ -11500,8 +11515,9 @@ static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
     IA64CPU *cpu = IA64_CPU(cs);
     int i;
 
-    qemu_fprintf(f, "IP: 0x%016" PRIx64 "  PSR: 0x%016" PRIx64 "\n",
-                 cpu->env.ip, cpu->env.psr);
+    qemu_fprintf(f, "IP: 0x%016" PRIx64 "  PSR: 0x%016" PRIx64
+                 "  HALTED: %u\n",
+                 cpu->env.ip, cpu->env.psr, cs->halted);
     qemu_fprintf(f, "exception: %" PRIu32 " fault_ip: 0x%016" PRIx64
                  " fault_imm: 0x%016" PRIx64 " fault_tmpl: 0x%016" PRIx64 "\n",
                  cpu->env.exception, cpu->env.fault_ip,
@@ -11958,6 +11974,13 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
     /* Preserve translator_io_start() requests for timer register accesses. */
     if (ctx->exit_after_bundle) {
         db->is_jmp = DISAS_EXIT;
+    } else if (!translator_is_same_page(db, db->pc_next)) {
+        /*
+         * Bundles are 16-byte aligned and cannot straddle a 4 KiB target
+         * page.  Do not fetch the next page until all bundles from this page
+         * have executed; a translation fault there must not discard them.
+         */
+        db->is_jmp = DISAS_TOO_MANY;
     }
 }
 

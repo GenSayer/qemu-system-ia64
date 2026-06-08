@@ -34,7 +34,8 @@ EFI_IA64_RUNTIME_DESCRIPTOR_ALIGN = 8192
 RSDP_SIGNATURE = b"RSD PTR "
 ACPI_RECLAIM_BASE = 0x00800000
 ACPI_RECLAIM_END = 0x00820000
-ACPI_PM_BASE = 0x80112000
+ACPI_PM_IO_BASE = 0x2000
+ACPI_GAS_SYSTEM_IO = 1
 ACPI_SCI_IRQ = 9
 ACPI_FADT_FLAG_WBINVD = 1 << 0
 ACPI_FADT_FLAG_PWR_BUTTON = 1 << 4
@@ -50,6 +51,10 @@ ACPI_FADT_EXPECTED_FLAGS = (
 PCI_CONFIG_ECAM_BASE = 0x7FF0000000
 PCI_MMIO_BASE = 0xC1000000
 PCI_MMIO_SIZE = 0x10000000
+FW_HIGH_RAM_BASE = 0x80200000
+FW_HIGH_RAM_AFTER_PCI_BASE = PCI_MMIO_BASE + PCI_MMIO_SIZE
+FW_FIRMWARE_ADDRESS_SPACE_BASE = 0xFF000000
+FW_FIRMWARE_ADDRESS_SPACE_SIZE = 0x01000000
 PCI_IO_SIZE = 0x1000000
 PCI_IO_SPARSE_SIZE = 0x4000000
 LEGACY_IO_BASE = 0x800010000000
@@ -73,9 +78,24 @@ EFI_RUNTIME_SERVICES_DATA = 6
 EFI_ACPI_RECLAIM_MEMORY = 9
 EFI_MEMORY_MAPPED_IO = 11
 EFI_MEMORY_MAPPED_IO_PORT_SPACE = 12
+EFI_RESERVED_MEMORY_TYPE = 0
+EFI_BOOT_SERVICES_DATA = 4
+EFI_CONVENTIONAL_MEMORY = 7
 EFI_MEMORY_UC = 0x1
 EFI_MEMORY_RUNTIME = 0x8000000000000000
 EFI_MEMORY_WB = 0x8
+SAL_REVISION = 0x0340
+SAL_HANDOFF_PSR = (1 << 3) | (1 << 13) | (1 << 44)
+SAL_DCR_LC = 1 << 2
+SAL_IVT_BASE = 0x10000
+SAL_TR_PAGE_SHIFT = 22
+SAL_TR_ITIR = SAL_TR_PAGE_SHIFT << 2
+SAL_RR_FIRST_RID = 0x1000
+FW_BOOT_STACK_SIZE = 0x00400000
+IA64_EFI_MIN_STACK_BYTES = 0x20000
+IA64_EFI_MIN_BACKING_BYTES = 0x4000
+SAL_BACKING_STORE_BASE = 0x80000
+SAL_BACKING_STORE_END = 0xA0000
 EFI_ACPI20_TABLE_GUID = bytes.fromhex(
     "71 e8 68 88 f1 e4 d3 11 bc 22 00 80 c7 3c 88 81"
 )
@@ -411,22 +431,29 @@ def symbol_bytes(elf_path, symbols, name):
     return bytes(data[:size])
 
 
-def qemu_physical_bytes(qemu, firmware, ranges, machine="ia64-vpc"):
+def qemu_physical_bytes(qemu, firmware, ranges, machine="ia64-vpc",
+                        memory_mib=None):
     commands = []
     for addr, size in ranges.values():
         commands.append(f"xp /{size}xb 0x{addr:x}")
     input_text = "\n".join(commands + ["quit", ""])
 
+    args = [
+        qemu,
+        "-machine", machine,
+        "-smp", "1",
+    ]
+    if memory_mib is not None:
+        args += ["-m", f"{memory_mib}M"]
+    args += [
+        "-bios", firmware,
+        "-display", "none",
+        "-serial", "none",
+        "-monitor", "stdio",
+    ]
+
     proc = subprocess.Popen(
-        [
-            qemu,
-            "-machine", machine,
-            "-smp", "1",
-            "-bios", firmware,
-            "-display", "none",
-            "-serial", "none",
-            "-monitor", "stdio",
-        ],
+        args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -476,13 +503,44 @@ def qemu_physical_bytes(qemu, firmware, ranges, machine="ia64-vpc"):
     return result
 
 
-def qemu_runtime_symbol_bytes(qemu, firmware, symbols, names):
+def qemu_monitor_output(qemu, firmware, command, delay=4.0):
+    proc = subprocess.Popen(
+        [
+            qemu,
+            "-machine", "ia64-vpc",
+            "-smp", "1",
+            "-bios", firmware,
+            "-display", "none",
+            "-serial", "none",
+            "-monitor", "stdio",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        time.sleep(delay)
+        proc.stdin.write(command + "\nquit\n")
+        proc.stdin.flush()
+        output, _ = proc.communicate(timeout=8)
+    except Exception:
+        proc.kill()
+        output, _ = proc.communicate()
+        raise RuntimeError("qemu monitor command failed\n" + output)
+    if proc.returncode != 0:
+        raise RuntimeError("qemu monitor exited nonzero\n" + output)
+    return output
+
+
+def qemu_runtime_symbol_bytes(qemu, firmware, symbols, names, memory_mib=None):
     ranges = {}
     for name in names:
         if name not in symbols:
             raise RuntimeError(f"missing firmware symbol {name}")
         ranges[name] = symbols[name]
-    return qemu_physical_bytes(qemu, firmware, ranges)
+    return qemu_physical_bytes(qemu, firmware, ranges,
+                               memory_mib=memory_mib)
 
 
 def parse_efi_memory_map(data, entries):
@@ -499,14 +557,49 @@ def parse_efi_memory_map(data, entries):
     return descriptors
 
 
+def parse_fw_ram_ranges(data, count):
+    return [(u64(data, index * 16), u64(data, index * 16 + 8))
+            for index in range(count)]
+
+
 def efi_descriptor_contains(desc, addr, size):
     start = desc["physical_start"]
     end = start + desc["pages"] * EFI_PAGE_SIZE
     return addr >= start and addr + size <= end
 
 
+def efi_range_has_type(memory_map, memory_type, addr, size, required_attr=0):
+    cursor = addr
+    end = addr + size
+
+    for desc in memory_map:
+        desc_start = desc["physical_start"]
+        desc_end = desc_start + desc["pages"] * EFI_PAGE_SIZE
+
+        if desc_end <= cursor:
+            continue
+        if desc_start > cursor:
+            return False
+        if (desc["type"] != memory_type or
+                (desc["attribute"] & required_attr) != required_attr):
+            return False
+        cursor = min(desc_end, end)
+        if cursor == end:
+            return True
+    return False
+
+
 def ia64_sparse_io_offset(port):
     return ((port & 0xfffc) << 10) | (port & 0xfff)
+
+
+def ia64_sparse_io_port(encoded):
+    group = encoded >> 12
+    low = encoded & 0xfff
+
+    if (group & 0x3ff) == (low >> 2):
+        return (group << 2) | (low & 3)
+    return encoded
 
 
 def c_define_integer(source, name):
@@ -547,12 +640,19 @@ def test_inputs(root, qemu, firmware):
         raise RuntimeError("missing inputs: " + ", ".join(missing))
     if LEGACY_IO_BASE & (PCI_IO_SPARSE_SIZE - 1):
         raise RuntimeError("legacy PCI I/O base must be aligned for sparse I/O")
-    for port in [0x60, 0x1f0, 0x3f6, 0x800, 0x80a, 0xc000, 0xffff]:
+    for port in [
+            0x60, 0x1f0, 0x3f6, 0x800, 0x80a,
+            ACPI_PM_IO_BASE, ACPI_PM_IO_BASE + 4, ACPI_PM_IO_BASE + 8,
+            0xc000, 0xffff]:
         sparse = ia64_sparse_io_offset(port)
         if sparse >= PCI_IO_SPARSE_SIZE:
             raise RuntimeError(f"sparse I/O port 0x{port:x} exceeds aperture")
         if (LEGACY_IO_BASE | sparse) != LEGACY_IO_BASE + sparse:
             raise RuntimeError(f"sparse I/O port 0x{port:x} aliases base bits")
+        if ia64_sparse_io_port(sparse) != port:
+            raise RuntimeError(f"sparse I/O port 0x{port:x} does not decode")
+    if ia64_sparse_io_port(ACPI_PM_IO_BASE + 4) != ACPI_PM_IO_BASE + 4:
+        raise RuntimeError("runtime ACPI PM1 control address needs dense fallback")
 
     with open(os.path.join(root, "hw/ia64/ia64_iosapic.c"),
               encoding="utf-8") as f:
@@ -745,6 +845,7 @@ def test_sal_efi_firmware_boot_contract(qemu, firmware):
         "SAL Set Vectors:      argument checks verified",
         "SAL Frequency Base:   optional clocks verified",
         "SAL State Info:       no-log paths verified",
+        "SAL Loader Handoff:   registers/stack/TR verified",
         "SMBIOS Table:         published",
         "SMBIOS Table Checks:  entry point verified",
         "ACPI RSDP/RSDT/XSDT/FADT: published",
@@ -772,15 +873,30 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     symbols = objdump_symbols(elf_path)
     runtime_names = [
         "mSystemTable", "mConfigTables", "mSalSystemTable",
+        "mSalHandoffProbe",
         "mDebugImageInfoHeader",
         "mSmbiosEntryPoint", "mSmbiosTable", "mSmbiosTableLength",
         "mSmbiosStructureCount", "mSmbiosMaxStructureSize",
         "mMemoryMapEntries", "mMemoryMap",
+        "mBootStackBase", "mBootStackTop", "mGuestRamSize",
+        "mGuestLowRamEnd", "mGuestHighRam", "mGuestHighRamCount",
+        "mAcpiSrat",
     ]
     runtime = qemu_runtime_symbol_bytes(qemu, firmware, symbols, runtime_names)
     memory_map = parse_efi_memory_map(
         runtime["mMemoryMap"], u64(runtime["mMemoryMapEntries"], 0)
     )
+    guest_ram_size = u64(runtime["mGuestRamSize"], 0)
+    guest_low_ram_end = u64(runtime["mGuestLowRamEnd"], 0)
+    guest_high_ranges = parse_fw_ram_ranges(
+        runtime["mGuestHighRam"], u64(runtime["mGuestHighRamCount"], 0)
+    )
+    boot_stack_base = u64(runtime["mBootStackBase"], 0)
+    boot_stack_top = u64(runtime["mBootStackTop"], 0)
+    if (guest_ram_size != 0x80000000 or guest_high_ranges or
+            boot_stack_top != guest_low_ram_end or
+            boot_stack_top - boot_stack_base != FW_BOOT_STACK_SIZE):
+        raise RuntimeError("default-RAM EFI boot stack placement mismatch")
     if any(
             memory_map[index - 1]["physical_start"] >
             memory_map[index]["physical_start"]
@@ -816,14 +932,19 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         if guid in config:
             raise RuntimeError(f"{guid_name} GUID must not be an EFI configuration table")
 
-    def find_efi_descriptor(name, memory_type, addr, size,
-                            required_attr=0):
-        for desc in memory_map:
+    def find_efi_descriptor_in(target_map, name, memory_type, addr, size,
+                               required_attr=0):
+        for desc in target_map:
             if (desc["type"] == memory_type and
                     (desc["attribute"] & required_attr) == required_attr and
                     efi_descriptor_contains(desc, addr, size)):
                 return desc
         raise RuntimeError(f"{name} is not covered by the expected EFI memory type")
+
+    def find_efi_descriptor(name, memory_type, addr, size,
+                            required_attr=0):
+        return find_efi_descriptor_in(memory_map, name, memory_type, addr,
+                                      size, required_attr)
 
     runtime_data_attr = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME
     find_efi_descriptor(
@@ -850,6 +971,11 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         "PCI MMIO window", EFI_MEMORY_MAPPED_IO,
         PCI_MMIO_BASE, PCI_MMIO_SIZE, EFI_MEMORY_UC,
     )
+    find_efi_descriptor(
+        "PAL/SAL firmware address space", EFI_MEMORY_MAPPED_IO,
+        FW_FIRMWARE_ADDRESS_SPACE_BASE, FW_FIRMWARE_ADDRESS_SPACE_SIZE,
+        EFI_MEMORY_UC,
+    )
     io_port_descs = [
         desc for desc in memory_map
         if desc["type"] == EFI_MEMORY_MAPPED_IO_PORT_SPACE
@@ -861,11 +987,24 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
             io_port_desc["pages"] * EFI_PAGE_SIZE != PCI_IO_SPARSE_SIZE or
             (io_port_desc["attribute"] &
              (EFI_MEMORY_UC | EFI_MEMORY_RUNTIME)) !=
-            (EFI_MEMORY_UC | EFI_MEMORY_RUNTIME)):
+             (EFI_MEMORY_UC | EFI_MEMORY_RUNTIME)):
         raise RuntimeError("PCI sparse I/O port window descriptor mismatch")
+    acpi_pm_cpu_address = LEGACY_IO_BASE + ACPI_PM_IO_BASE
+    io_port_end = (io_port_desc["physical_start"] +
+                   io_port_desc["pages"] * EFI_PAGE_SIZE)
+    if not (io_port_desc["physical_start"] <= acpi_pm_cpu_address and
+            acpi_pm_cpu_address + 12 <= io_port_end):
+        raise RuntimeError("ACPI PM ports are outside the EFI I/O port window")
     find_efi_descriptor(
-        "runtime ACPI PM window", EFI_MEMORY_MAPPED_IO,
-        ACPI_PM_BASE, 0x2000, EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
+        "runtime SAL PCI configuration window", EFI_MEMORY_MAPPED_IO,
+        PCI_CONFIG_ECAM_BASE, 0x10000000,
+        EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
+    )
+    find_efi_descriptor(
+        "EFI boot stack", EFI_BOOT_SERVICES_DATA,
+        boot_stack_base,
+        boot_stack_top - boot_stack_base,
+        EFI_MEMORY_WB,
     )
 
     smbios_ep = runtime["mSmbiosEntryPoint"]
@@ -926,58 +1065,73 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         raise RuntimeError("SMBIOS parsed structure count mismatch")
     if max(len(entry) for entry in smbios) != smbios_max_struct_size:
         raise RuntimeError("SMBIOS parsed maximum structure size mismatch")
-    smbios_by_type = {entry[0]: entry for entry in smbios}
+    smbios_by_type = {}
+    for entry in smbios:
+        smbios_by_type.setdefault(entry[0], []).append(entry)
     required_smbios_types = {0, 1, 2, 3, 4, 16, 17, 19, 32, 127}
     if set(smbios_by_type) != required_smbios_types:
         raise RuntimeError("SMBIOS required type set mismatch")
+    for single_type in required_smbios_types - {19}:
+        if len(smbios_by_type[single_type]) != 1:
+            raise RuntimeError(f"SMBIOS Type {single_type} count mismatch")
 
-    t0 = smbios_by_type[0]
+    def smbios_type19_range(entry):
+        if (entry[1] != 0x1f or u16(entry, 0x0c) != 0x1000 or
+                entry[0x0e] != 1):
+            raise RuntimeError("SMBIOS Type 19 memory array mapping mismatch")
+        if u32(entry, 4) != 0xffffffff or u32(entry, 8) != 0xffffffff:
+            return (u32(entry, 4) * 1024, (u32(entry, 8) + 1) * 1024)
+        return (u64(entry, 0x0f), u64(entry, 0x17) + 1)
+
+    t0 = smbios_by_type[0][0]
     if (t0[1] != 0x18 or t0[4] != 1 or t0[5] != 2 or
             t0[8] != 3 or u64(t0, 0x0a) != 0x08 or t0[0x13] != 0x18):
         raise RuntimeError("SMBIOS Type 0 BIOS information mismatch")
     if smbios_strings(t0) != [b"QEMU", b"ia64-firmware", b"01/01/2026"]:
         raise RuntimeError("SMBIOS Type 0 string set mismatch")
 
-    t1 = smbios_by_type[1]
+    t1 = smbios_by_type[1][0]
     if t1[1] != 0x1b or t1[0x18] != 0x06:
         raise RuntimeError("SMBIOS Type 1 system information mismatch")
     if smbios_strings(t1)[:2] != [b"QEMU", b"IA-64 Virtual Platform"]:
         raise RuntimeError("SMBIOS Type 1 identity strings mismatch")
 
-    t4 = smbios_by_type[4]
+    t4 = smbios_by_type[4][0]
     if (t4[1] != 0x2a or t4[5] != 0x03 or t4[6] != 0x82 or
             t4[0x18] != 0x41 or u16(t4, 0x28) != 0x0082 or
             u16(t4, 0x26) != 0x0004):
         raise RuntimeError("SMBIOS Type 4 IA-64 processor fields mismatch")
 
-    t16 = smbios_by_type[16]
+    t16 = smbios_by_type[16][0]
     if (t16[1] != 0x17 or t16[4] != 0x03 or t16[5] != 0x03 or
             t16[6] != 0x03 or u16(t16, 0x0b) != 0xfffe or
-            u16(t16, 0x0d) != 1):
+            u16(t16, 0x0d) != 1 or
+            u32(t16, 7) != guest_ram_size // 1024):
         raise RuntimeError("SMBIOS Type 16 physical memory array mismatch")
 
-    t17 = smbios_by_type[17]
+    t17 = smbios_by_type[17][0]
     if (t17[1] != 0x22 or u16(t17, 4) != 0x1000 or
             u16(t17, 6) != 0xfffe or u16(t17, 8) != 64 or
             u16(t17, 0x0a) != 64 or t17[0x0e] != 0x09 or
             t17[0x12] != 0x07 or u16(t17, 0x13) != 0x0002):
         raise RuntimeError("SMBIOS Type 17 memory device mismatch")
+    guest_ram_mb = (guest_ram_size + 0xfffff) >> 20
+    if guest_ram_mb < 0x7fff:
+        if u16(t17, 0x0c) != guest_ram_mb or u32(t17, 0x1c) != 0:
+            raise RuntimeError("SMBIOS Type 17 memory device size mismatch")
+    elif u16(t17, 0x0c) != 0x7fff or u32(t17, 0x1c) != guest_ram_mb:
+        raise RuntimeError("SMBIOS Type 17 memory device size mismatch")
 
-    t19 = smbios_by_type[19]
-    if (t19[1] != 0x1f or u32(t19, 4) != 0 or
-            u16(t19, 0x0c) != 0x1000 or t19[0x0e] != 1):
-        raise RuntimeError("SMBIOS Type 19 memory array mapping mismatch")
-    mapped_mb = (u32(t19, 8) + 1) >> 10
-    if mapped_mb < 0x7fff and u16(t17, 0x0c) != mapped_mb:
-        raise RuntimeError("SMBIOS memory device size and mapped range mismatch")
-    if mapped_mb >= 0x7fff and (
-            u16(t17, 0x0c) != 0x7fff or u32(t17, 0x1c) != mapped_mb):
-        raise RuntimeError("SMBIOS memory device size and mapped range mismatch")
+    t19_ranges = [smbios_type19_range(entry)
+                  for entry in smbios_by_type[19]]
+    expected_t19_ranges = [(0, guest_low_ram_end)] + guest_high_ranges
+    if t19_ranges != expected_t19_ranges:
+        raise RuntimeError("SMBIOS Type 19 memory array ranges mismatch")
 
-    t32 = smbios_by_type[32]
+    t32 = smbios_by_type[32][0]
     if t32[1] != 0x0b or t32[4:10] != b"\0" * 6 or t32[0x0a] != 0:
         raise RuntimeError("SMBIOS Type 32 boot status mismatch")
-    if smbios_by_type[127][1] != 4:
+    if smbios_by_type[127][0][1] != 4:
         raise RuntimeError("SMBIOS Type 127 end-of-table mismatch")
 
     def require_acpi_reclaim(name, addr, size, align=8):
@@ -1063,12 +1217,19 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         raise RuntimeError("FADT IA-64 profile or SCI IRQ mismatch")
     if u32(fadt, 112) != ACPI_FADT_EXPECTED_FLAGS:
         raise RuntimeError("FADT fixed feature flags mismatch")
-    if fadt[149] != 32 or gas_address(fadt, 148) != ACPI_PM_BASE:
-        raise RuntimeError("FADT X_PM1a_EVT_BLK address mismatch")
-    if fadt[173] != 16 or gas_address(fadt, 172) != ACPI_PM_BASE + 4:
-        raise RuntimeError("FADT X_PM1a_CNT_BLK address mismatch")
-    if fadt[209] != 32 or gas_address(fadt, 208) != ACPI_PM_BASE + 8:
-        raise RuntimeError("FADT X_PM_TMR_BLK address mismatch")
+    for off in (56, 60, 64, 68, 72, 76, 80, 84):
+        if u32(fadt, off) != 0:
+            raise RuntimeError("FADT legacy fixed register fields must be zero")
+    expected_pm_gas = [
+        (148, 32, ACPI_PM_IO_BASE, "X_PM1a_EVT_BLK"),
+        (172, 16, ACPI_PM_IO_BASE + 4, "X_PM1a_CNT_BLK"),
+        (208, 32, ACPI_PM_IO_BASE + 8, "X_PM_TMR_BLK"),
+    ]
+    for off, width, address, label in expected_pm_gas:
+        if (fadt[off] != ACPI_GAS_SYSTEM_IO or fadt[off + 1] != width or
+                fadt[off + 2] != 0 or fadt[off + 3] != 0 or
+                gas_address(fadt, off) != address):
+            raise RuntimeError(f"FADT {label} System I/O GAS mismatch")
 
     fadt_children = qemu_physical_bytes(qemu, firmware, {
         "mFacs": (facs_addr, symbols["mFacs"][1]),
@@ -1170,10 +1331,107 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     srat = table_data["mSrat"]
     if u32(srat, 36) != 1:
         raise RuntimeError("SRAT table revision mismatch")
-    if srat[48] != 1 or srat[49] != 40 or u32(srat, 76) != 1:
-        raise RuntimeError("SRAT memory affinity entry mismatch")
-    if srat[88] != 0 or srat[89] != 16 or u32(srat, 92) != 1:
+    srat_memory_entries = []
+    for index in range(4):
+        off = 48 + index * 40
+        if srat[off] != 1 or srat[off + 1] != 40:
+            raise RuntimeError("SRAT memory affinity entry mismatch")
+        base = u32(srat, off + 8) | (u32(srat, off + 12) << 32)
+        length = u32(srat, off + 16) | (u32(srat, off + 20) << 32)
+        flags = u32(srat, off + 28)
+        srat_memory_entries.append((base, base + length, flags))
+    expected_srat_ranges = [(0, guest_low_ram_end)] + guest_high_ranges
+    for index, entry in enumerate(srat_memory_entries):
+        if index < len(expected_srat_ranges):
+            if entry != (*expected_srat_ranges[index], 1):
+                raise RuntimeError("SRAT memory affinity range mismatch")
+        elif entry != (0, 0, 0):
+            raise RuntimeError("SRAT disabled memory affinity mismatch")
+    processor_off = 48 + 4 * 40
+    if (srat[processor_off] != 0 or srat[processor_off + 1] != 16 or
+            u32(srat, processor_off + 4) != 1):
         raise RuntimeError("SRAT processor affinity entry mismatch")
+
+    high_runtime = qemu_runtime_symbol_bytes(
+        qemu, firmware, symbols, runtime_names, memory_mib=4096
+    )
+    high_memory_map = parse_efi_memory_map(
+        high_runtime["mMemoryMap"],
+        u64(high_runtime["mMemoryMapEntries"], 0),
+    )
+    high_guest_ram_size = u64(high_runtime["mGuestRamSize"], 0)
+    high_low_ram_end = u64(high_runtime["mGuestLowRamEnd"], 0)
+    high_guest_ranges = parse_fw_ram_ranges(
+        high_runtime["mGuestHighRam"],
+        u64(high_runtime["mGuestHighRamCount"], 0),
+    )
+    expected_high_ranges = [
+        (FW_HIGH_RAM_BASE, PCI_MMIO_BASE),
+        (FW_HIGH_RAM_AFTER_PCI_BASE, FW_FIRMWARE_ADDRESS_SPACE_BASE),
+    ]
+    if (high_guest_ram_size != 0x100000000 or
+            high_low_ram_end != 0x80000000 or
+            high_guest_ranges != expected_high_ranges):
+        raise RuntimeError("4 GiB guest RAM range split mismatch")
+    for start, end in expected_high_ranges:
+        find_efi_descriptor_in(
+            high_memory_map, "4 GiB high conventional memory",
+            EFI_CONVENTIONAL_MEMORY, start, end - start, EFI_MEMORY_WB,
+        )
+    find_efi_descriptor_in(
+        high_memory_map, "4 GiB PCI MMIO window",
+        EFI_MEMORY_MAPPED_IO, PCI_MMIO_BASE, PCI_MMIO_SIZE, EFI_MEMORY_UC,
+    )
+    find_efi_descriptor_in(
+        high_memory_map, "4 GiB PAL/SAL firmware address space",
+        EFI_MEMORY_MAPPED_IO,
+        FW_FIRMWARE_ADDRESS_SPACE_BASE, FW_FIRMWARE_ADDRESS_SPACE_SIZE,
+        EFI_MEMORY_UC,
+    )
+
+    high_srat_addr = u64(high_runtime["mAcpiSrat"], 0)
+    high_srat = qemu_physical_bytes(
+        qemu, firmware,
+        {"mSrat": (high_srat_addr, symbols["mSrat"][1])},
+        memory_mib=4096,
+    )["mSrat"]
+    validate_sdt("4 GiB mSrat", high_srat, "SRAT", 1)
+    for index, (start, end) in enumerate(
+            [(0, high_low_ram_end)] + expected_high_ranges):
+        off = 48 + index * 40
+        if (high_srat[off] != 1 or high_srat[off + 1] != 40 or
+                (u32(high_srat, off + 8) |
+                 (u32(high_srat, off + 12) << 32)) != start or
+                (u32(high_srat, off + 16) |
+                 (u32(high_srat, off + 20) << 32)) != end - start or
+                u32(high_srat, off + 28) != 1):
+            raise RuntimeError("4 GiB SRAT memory affinity range mismatch")
+
+    high_smbios_ep = high_runtime["mSmbiosEntryPoint"]
+    high_smbios_len = u16(high_smbios_ep, 0x16)
+    high_smbios_count = u16(high_smbios_ep, 0x1c)
+    high_smbios = smbios_structures(
+        high_runtime["mSmbiosTable"][:high_smbios_len]
+    )
+    if len(high_smbios) != high_smbios_count:
+        raise RuntimeError("4 GiB SMBIOS structure count mismatch")
+    high_smbios_by_type = {}
+    for entry in high_smbios:
+        high_smbios_by_type.setdefault(entry[0], []).append(entry)
+    high_type19_ranges = [
+        smbios_type19_range(entry)
+        for entry in high_smbios_by_type.get(19, [])
+    ]
+    if high_type19_ranges != [(0, high_low_ram_end)] + expected_high_ranges:
+        raise RuntimeError("4 GiB SMBIOS Type 19 ranges mismatch")
+    high_t16 = high_smbios_by_type.get(16, [b""])[0]
+    high_t17 = high_smbios_by_type.get(17, [b""])[0]
+    if (len(high_t16) < 0x17 or u32(high_t16, 7) !=
+            high_guest_ram_size // 1024):
+        raise RuntimeError("4 GiB SMBIOS Type 16 capacity mismatch")
+    if (len(high_t17) < 0x22 or u16(high_t17, 0x0c) !=
+            high_guest_ram_size >> 20 or u32(high_t17, 0x1c) != 0):
+        raise RuntimeError("4 GiB SMBIOS Type 17 size mismatch")
 
     slit = table_data["mSlit"]
     if u64(slit, 36) != 1 or slit[44] != 10:
@@ -1209,12 +1467,98 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         raise RuntimeError("SAL table signature/length mismatch")
     if checksum8(sal) != 0:
         raise RuntimeError("SAL table checksum mismatch")
-    if u16(sal, 8) != 0x0330 or u16(sal, 10) != 2:
+    if u16(sal, 8) != SAL_REVISION or u16(sal, 10) != 3:
         raise RuntimeError("SAL revision or descriptor count mismatch")
     if sal[24:28] != b"QEMU" or sal[56:61] != b"IA-64":
         raise RuntimeError("SAL OEM/product identifiers mismatch")
-    if sal[96] != 0 or sal[144] != 2:
+    if sal[96] != 0 or sal[144] != 2 or sal[160] != 3:
         raise RuntimeError("SAL descriptor type sequence mismatch")
+    if (sal[161] != 0 or sal[162] != 0 or sal[163:168] != b"\0" * 5 or
+            u64(sal, 168) != 0 or u64(sal, 176) != SAL_TR_ITIR or
+            u64(sal, 184) != 0):
+        raise RuntimeError("SAL ITR0 descriptor mismatch")
+
+    probe = runtime["mSalHandoffProbe"]
+    sp = u64(probe, 40)
+    if (u64(probe, 0) != SAL_HANDOFF_PSR or
+            u64(probe, 8) != 0 or
+            u64(probe, 16) != SAL_DCR_LC or
+            u64(probe, 24) != SAL_IVT_BASE or
+            u64(probe, 32) != 0 or
+            sp < boot_stack_base + IA64_EFI_MIN_STACK_BYTES or
+            sp >= boot_stack_top):
+        raise RuntimeError("SAL loader PSR/RSC/CR/stack handoff mismatch")
+    bsp = u64(probe, 48)
+    bspstore = u64(probe, 56)
+    if (bsp < SAL_BACKING_STORE_BASE or
+            bsp + IA64_EFI_MIN_BACKING_BYTES > SAL_BACKING_STORE_END or
+            bspstore < SAL_BACKING_STORE_BASE or bspstore > bsp):
+        raise RuntimeError("SAL loader backing store handoff mismatch")
+    find_efi_descriptor(
+        "SAL backing store", EFI_RESERVED_MEMORY_TYPE,
+        bsp, IA64_EFI_MIN_BACKING_BYTES, EFI_MEMORY_WB,
+    )
+    for index in range(8):
+        expected_rr = ((SAL_RR_FIRST_RID + index) << 8) | (12 << 2)
+        if u64(probe, 64 + index * 8) != expected_rr:
+            raise RuntimeError(f"SAL loader RR{index} handoff mismatch")
+    if any(u64(probe, 128 + index * 8) != 0 for index in range(16)):
+        raise RuntimeError("SAL loader PKR handoff mismatch")
+
+    sparse_pm_timer = LEGACY_IO_BASE + ia64_sparse_io_offset(
+        ACPI_PM_IO_BASE + 8
+    )
+    registers = qemu_monitor_output(
+        qemu, firmware,
+        f"xp /1wx 0x{sparse_pm_timer:x}\n"
+        f"xp /1wx 0x{sparse_pm_timer:x}\n"
+        "info registers",
+    )
+    pm_timer_values = [
+        int(value, 16) for value in re.findall(
+            rf"(?m)^{sparse_pm_timer:x}: 0x([0-9a-f]+)$", registers
+        )
+    ]
+    if len(pm_timer_values) != 2:
+        raise RuntimeError(
+            f"ACPI PM timer reads missing at CPU address 0x{sparse_pm_timer:x}"
+        )
+    if any(value > 0xffffff for value in pm_timer_values):
+        raise RuntimeError("ACPI PM timer must return a 24-bit counter")
+    if ((pm_timer_values[1] - pm_timer_values[0]) & 0xffffff) >= 0x100000:
+        raise RuntimeError("ACPI PM timer did not advance monotonically")
+
+    tr_lines = [line for line in registers.splitlines() if " TR " in line]
+    expected_itr0 = (
+        "ITLB[0] TR va=0x0000000000000000 pa=0x0000000000000000 "
+        "ps=0x0000000000400000 rid=0x001000 key=0x000000 "
+        "ar=3 pl=0 perm=0x7 pte=0x0000000000000661"
+    )
+    if tr_lines != [expected_itr0]:
+        raise RuntimeError("SAL loader must expose only the specified ITR0\n" +
+                           "\n".join(tr_lines))
+    for token in [
+            "CR.DCR: 0x0000000000000004",
+            "IVA: 0x0000000000010000",
+            "PTA: 0x0000000000000000",
+            "RR0: 0x0000000000100030",
+            "RR5: 0x0000000000100530",
+            "RR6: 0x0000000000100630",
+            "RR7: 0x0000000000100730",
+            "ITIR: 0x0000000000000058"]:
+        if token not in registers:
+            raise RuntimeError(f"SAL loader runtime state missing: {token}")
+
+    if not efi_range_has_type(
+            memory_map, EFI_BOOT_SERVICES_DATA,
+            boot_stack_base, FW_BOOT_STACK_SIZE, EFI_MEMORY_WB):
+        raise RuntimeError("2 GiB EFI boot stack descriptor mismatch")
+    if not efi_range_has_type(
+            memory_map, EFI_CONVENTIONAL_MEMORY,
+            0x04000000, 0x04000000, EFI_MEMORY_WB):
+        raise RuntimeError(
+            "64-128 MiB loader image window is not conventional memory"
+        )
 
 
 def main():

@@ -9,6 +9,31 @@ import subprocess
 import sys
 
 
+def firmware_console(qemu, firmware, memory_mib, timeout=6):
+    proc = subprocess.Popen(
+        [
+            qemu,
+            "-machine", "ia64-vpc",
+            "-smp", "1",
+            "-m", f"{memory_mib}M",
+            "-bios", firmware,
+            "-display", "none",
+            "-serial", "stdio",
+            "-monitor", "none",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        console, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        console, _ = proc.communicate()
+    return console
+
+
 def main():
     if len(sys.argv) != 3:
         print(
@@ -76,8 +101,15 @@ def main():
         "bs_load_image",
         "bs_start_image",
         "fw_call_efi_entry",
+        "fw_boot_stack_top",
+        "mBootStackBase",
+        "mBootStackTop",
         "fw_efi_entry_abi_probe",
         "efi_entry_handoff_selftest",
+        "fw_prepare_sal_handoff_registers",
+        "fw_sal_handoff_probe",
+        "sal_loader_handoff_selftest",
+        "mSalHandoffProbe",
         "bs_exit_boot_services",
         "rs_get_time",
         "mRuntimeTimeBase",
@@ -253,6 +285,10 @@ def main():
         ("alloc r2=ar.pfs,16,13,0" in text, "alloc calling convention is incorrect"),
         ("mov r45=r1" in text and "mov r46=r12" in text and "mov r47=r3" in text,
          "firmware_main argument setup is incorrect"),
+        ("movl r12=0x8000000" in text,
+         "firmware bootstrap stack does not match minimum machine RAM"),
+        ("<fw_boot_stack_top>" in text and "mov r12=r8" in text,
+         "firmware does not select the installed-RAM boot stack"),
     ]
     failed = [msg for ok, msg in checks if not ok]
     if failed:
@@ -280,6 +316,15 @@ def main():
          "st8 [r14]=r34" in text and
          "mov r12=r41" in text,
          "EFI image entry P64 stack arguments are not prepared"),
+        ("mov cr.dcr=r14" in text and
+         "mov cr.iva=r14" in text and
+         "mov cr.pta=r0" in text and
+         "mov rr[r14]=r15" in text and
+         "mov pkr[r14]=r0" in text and
+         "itr.i itr[r14]=r16" in text and
+         "mov.m ar.rsc=r0" in text and
+         "mov psr.l=r36" in text,
+         "SAL loader register handoff is incomplete"),
     ]
     handoff_failed = [msg for ok, msg in handoff_checks if not ok]
     if handoff_failed:
@@ -320,40 +365,64 @@ def main():
 
     print("ok 4 - firmware StartImage protocol handoff")
 
-    proc = subprocess.Popen(
-        [
-            qemu,
-            "-machine", "ia64-vpc",
-            "-smp", "1",
-            "-m", "1024",
-            "-bios", firmware,
-            "-display", "none",
-            "-serial", "stdio",
-            "-monitor", "none",
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    try:
-        console, _ = proc.communicate(timeout=6)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        console, _ = proc.communicate()
+    console = firmware_console(qemu, firmware, 1024)
 
     expected_lines = [
         "Memory Map:           low RAM end=0x0000000040000000",
+        "Memory Map:           high RAM ranges=0000000000000000 total=0x0000000000000000",
+        "EFI Boot Stack:       0x000000003FC00000-0x0000000040000000",
         "I/O Port Space:       0x0000800010000000-0x0000800013FFFFFF",
         "Memory Map Test:      descriptor and pool placement verified",
         "UEFI Time Services:   GetTime/SetTime/GetWakeupTime verified",
         "Loaded Image Paths:   protocol storage verified",
         "EFI Image Handoff:    P64 register/stack arguments verified",
+        "SAL Loader Handoff:   registers/stack/TR verified",
         "PE Runtime Relocation: base adjustment/fixup log verified",
         "SMBIOS Table:         published",
         "SMBIOS Table Checks:  entry point verified",
     ]
     missing_lines = [line for line in expected_lines if line not in console]
+    minimum_console = firmware_console(qemu, firmware, 128)
+    for line in [
+            "Memory Map:           low RAM end=0x0000000008000000",
+            "Memory Map:           high RAM ranges=0000000000000000 total=0x0000000000000000",
+            "EFI Boot Stack:       0x0000000007C00000-0x0000000008000000",
+            "Memory Map Test:      descriptor and pool placement verified",
+            "SAL Loader Handoff:   registers/stack/TR verified"]:
+        if line not in minimum_console:
+            missing_lines.append("128 MiB: " + line)
+    high_console = firmware_console(qemu, firmware, 4096)
+    for line in [
+            "Memory Map:           low RAM end=0x0000000080000000",
+            "Memory Map:           high RAM ranges=0000000000000002 total=0x000000006EE00000",
+            "EFI Boot Stack:       0x000000007FC00000-0x0000000080000000",
+            "Memory Map Test:      descriptor and pool placement verified",
+            "SMBIOS Table Checks:  entry point verified",
+            "ACPI Table Checks:    checksums verified"]:
+        if line not in high_console:
+            missing_lines.append("4096 MiB: " + line)
+
+    undersized = subprocess.run(
+        [
+            qemu,
+            "-machine", "ia64-vpc",
+            "-m", "96M",
+            "-bios", firmware,
+            "-display", "none",
+            "-serial", "none",
+            "-monitor", "none",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=6,
+    )
+    if (undersized.returncode == 0 or
+            "Invalid RAM size, should be at least 128 MiB"
+            not in undersized.stdout):
+        missing_lines.append("96 MiB machine RAM rejection")
+
     if missing_lines:
         print("not ok 5 - firmware RAM handoff memory map")
         for line in missing_lines:
@@ -394,9 +463,14 @@ def main():
         ("0000000080110000-0000000080111fff" in mtree.stdout and
          "iosapic" in mtree.stdout,
          "IOSAPIC aperture is not two EFI pages"),
-        ("0000000080112000-0000000080113fff" in mtree.stdout and
+        ("0000800010002000-000080001000200f" in mtree.stdout and
          "ia64-acpi-pm" in mtree.stdout,
-         "ACPI PM aperture is not two EFI pages"),
+         "ACPI PM registers are not mapped in PCI I/O space"),
+        ("00000000ff000000-00000000ffffffff" in mtree.stdout and
+         "ia64-firmware-address-space" in mtree.stdout,
+         "PAL/SAL firmware address space is not decoded below 4 GiB"),
+        ("windows-loader-scratch" not in mtree.stdout,
+         "machine exposes hidden loader scratch RAM"),
     ]
     mtree_failed = [msg for ok, msg in mtree_checks if not ok]
     if mtree.returncode != 0 or mtree_failed:
@@ -482,13 +556,12 @@ def main():
         text=True,
     )
     expected_banner = (
-        "Graphics Output:      GOP/UGA stdvga "
-        "PixelBlueGreenRedReserved8BitPerColor "
+        "Graphics Output:      GOP/UGA stdvga BGRx PixelBitMask "
         "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
         "1280x1024x32 @ 0xc2000000"
     )
     expected_setmode_label = "GOP SetMode Test:"
-    expected_setmode_result = "BGRx enum framebuffer cleared"
+    expected_setmode_result = "BGRx bitmask framebuffer cleared"
     if (strings.returncode != 0 or gop_size != 0xb4 or
             expected_banner not in strings.stdout or
             expected_setmode_label not in strings.stdout or

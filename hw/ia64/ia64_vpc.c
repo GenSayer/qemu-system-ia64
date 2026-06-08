@@ -38,7 +38,10 @@
 
 #define IA64_UART_BASE  0x00000047f0000000ULL
 #define IA64_FW_BASE    0x0000000000100000ULL
-#define IA64_FW_LOW_RAM_MIN (96 * MiB)
+#define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
+#define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
+#define IA64_FW_BOOTSTRAP_STACK_TOP (128 * MiB)
+#define IA64_FW_LOW_RAM_MIN IA64_FW_BOOTSTRAP_STACK_TOP
 #define IA64_IVT_BASE   0x10000ULL
 #define IA64_IVT_SIZE   0x8000ULL
 #define IA64_IDE_DATA0_IO_BASE  0x00000800U
@@ -56,11 +59,9 @@
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #define IA64_IOSAPIC_BASE       0x0000000080110000ULL
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
-#define IA64_ACPI_PM_BASE       0x0000000080112000ULL
-#define IA64_ACPI_PM_SIZE       0x0000000000002000ULL
+#define IA64_ACPI_PM_IO_BASE    0x00002000U
+#define IA64_ACPI_PM_IO_SIZE    0x00000010U
 #define IA64_ACPI_SCI_IRQ       9
-#define IA64_WIN_LOADER_SCRATCH_BASE 0x0000000080200000ULL
-#define IA64_WIN_LOADER_SCRATCH_END  0x00000000c0000000ULL
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
 #define IA64_FW_HANDOFF_VERSION      3ULL
@@ -79,8 +80,8 @@ static MemoryRegion *ia64_vpc_vga_fb_alias;
 static MemoryRegion *ia64_vpc_vga_mmio_alias;
 static MemoryRegion *ia64_vpc_vga_legacy_alias;
 static Object *ia64_vpc_pci_fixup_reset;
-static MemoryRegion *ia64_vpc_win_loader_scratch;
 static MemoryRegion *ia64_vpc_lsapic_mmio;
+static MemoryRegion ia64_vpc_firmware_space;
 static MemoryRegion ia64_vpc_acpi_pm;
 static ACPIREGS ia64_vpc_acpi_regs;
 static qemu_irq ia64_vpc_acpi_sci_irq;
@@ -146,13 +147,14 @@ static void ia64_vpc_acpi_update_sci(ACPIREGS *ar)
     acpi_update_sci(ar, ia64_vpc_acpi_sci_irq);
 }
 
-static void ia64_vpc_init_acpi_pm(MachineState *machine, DeviceState *iosapic)
+static void ia64_vpc_init_acpi_pm(MachineState *machine, DeviceState *iosapic,
+                                  MemoryRegion *pci_io)
 {
     ia64_vpc_acpi_sci_irq = qdev_get_gpio_in(iosapic, IA64_ACPI_SCI_IRQ);
 
     memory_region_init(&ia64_vpc_acpi_pm, OBJECT(machine), "ia64-acpi-pm",
-                       IA64_ACPI_PM_SIZE);
-    memory_region_add_subregion(get_system_memory(), IA64_ACPI_PM_BASE,
+                       IA64_ACPI_PM_IO_SIZE);
+    memory_region_add_subregion(pci_io, IA64_ACPI_PM_IO_BASE,
                                 &ia64_vpc_acpi_pm);
 
     acpi_pm1_evt_init(&ia64_vpc_acpi_regs, ia64_vpc_acpi_update_sci,
@@ -259,35 +261,19 @@ static void ia64_vpc_map_lsapic(void)
                                 ia64_vpc_lsapic_mmio);
 }
 
-static void ia64_vpc_map_windows_loader_scratch(MachineState *machine)
+static void ia64_vpc_map_firmware_address_space(void)
 {
-    uint64_t scratch_start = IA64_WIN_LOADER_SCRATCH_BASE;
-    uint64_t scratch_size;
-
     /*
-     * Windows IA-64 SetupLDR uses SAL's boot-time identity TLB miss handling
-     * for private region-7 scratch addresses before it has taken over the
-     * firmware memory map.  Keep the aperture large enough for the loader
-     * heap and high stack pages observed below 3 GiB.
+     * IA-64 reserves the top 16 MiB below 4 GiB for PAL/SAL firmware
+     * resources.  Decode it so firmware identity mappings can use the
+     * platform address space directly.
      */
-    if (machine->ram_size >= IA64_WIN_LOADER_SCRATCH_END) {
-        return;
-    }
-
-    if (machine->ram_size > scratch_start) {
-        scratch_start = QEMU_ALIGN_UP(machine->ram_size, 4096);
-    }
-    if (scratch_start >= IA64_WIN_LOADER_SCRATCH_END) {
-        return;
-    }
-
-    scratch_size = IA64_WIN_LOADER_SCRATCH_END - scratch_start;
-    ia64_vpc_win_loader_scratch = g_new(MemoryRegion, 1);
-    memory_region_init_ram(ia64_vpc_win_loader_scratch, NULL,
-                           "ia64-vpc.windows-loader-scratch",
-                           scratch_size, &error_fatal);
-    memory_region_add_subregion(get_system_memory(), scratch_start,
-                                ia64_vpc_win_loader_scratch);
+    memory_region_init_ram(&ia64_vpc_firmware_space, NULL,
+                           "ia64-firmware-address-space",
+                           IA64_FIRMWARE_ADDRESS_SPACE_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(get_system_memory(),
+                                        IA64_FIRMWARE_ADDRESS_SPACE_BASE,
+                                        &ia64_vpc_firmware_space, 1);
 }
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
@@ -726,8 +712,8 @@ static void ia64_vpc_init(MachineState *machine)
     if (machine->ram) {
         memory_region_add_subregion(get_system_memory(), 0, machine->ram);
     }
+    ia64_vpc_map_firmware_address_space();
     ia64_vpc_write_firmware_handoff(machine);
-    ia64_vpc_map_windows_loader_scratch(machine);
 
     cpu_create(machine->cpu_type);
     ia64_vpc_map_lsapic();
@@ -735,7 +721,6 @@ static void ia64_vpc_init(MachineState *machine)
     iosapic = qdev_new(TYPE_IA64_IOSAPIC);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(iosapic), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(iosapic), 0, IA64_IOSAPIC_BASE);
-    ia64_vpc_init_acpi_pm(machine, iosapic);
 
     serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
                    qdev_get_gpio_in(iosapic, 4),
@@ -781,6 +766,7 @@ static void ia64_vpc_init(MachineState *machine)
     pci_ide_create_devs(ia64_vpc_ide_dev);
     ia64_vpc_configure_ide(ia64_vpc_ide_dev);
     pci_io = pci_address_space_io(ia64_vpc_ide_dev);
+    ia64_vpc_init_acpi_pm(machine, iosapic, pci_io);
 
     /*
      * Keep IDE as the firmware boot path, but expose a standards-based AHCI

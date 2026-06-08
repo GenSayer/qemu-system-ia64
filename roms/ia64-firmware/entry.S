@@ -7,13 +7,18 @@
  */
 
     .section .text._start, "ax"
+    .equ FW_BOOTSTRAP_STACK_TOP, 0x08000000
     .global _start
     .type _start, @function
     .proc _start
     .explicit
 _start:
-    /* r0=0 hardwired, r1=IA64_FW_BASE from machine model, r12=sp */
-    movl r12 = 0x08000000
+    /*
+     * Use the minimum-memory stack until the machine handoff has been
+     * validated.  start_after_pal moves to the selected RAM-top stack before
+     * entering the C firmware.
+     */
+    movl r12 = FW_BOOTSTRAP_STACK_TOP
     ;;
 
     br.cond.sptk.few start_after_pal
@@ -67,13 +72,21 @@ start_after_pal:
     movl r1 = __gp
     ;;
 
+    /*
+     * Preserve the reset return pointer across the ABI call, then move the
+     * firmware stack to the top of installed low RAM.
+     */
+    mov r4 = b0
+    ;;
+    br.call.sptk.many b0 = fw_boot_stack_top
+    ;;
+    mov r12 = r8
+    mov r3 = r4
+    ;;
+
     /* Alloc: 0 ins, 13 locals, 3 outs → output regs r45-r47
      * After br.call these become callee's input r32-r34. */
     alloc r2 = ar.pfs, 0, 13, 3, 0
-    ;;
-
-    /* Save return pointer */
-    mov r3 = b0
     ;;
 
     /* Pass args: gp, sp, boot_b0 */

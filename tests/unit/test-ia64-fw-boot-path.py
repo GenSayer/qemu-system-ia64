@@ -63,10 +63,10 @@ def main():
         "SAL Frequency Base:",
         "SAL State Info:",
         "Loaded Image Options:",
+        "Boot Manager:        trying Boot",
+        "BootOrder boot failed",
         "BOOT path:            ATA/ATAPI Block I/O + FAT resolver",
         "BOOTIA64.EFI",
-        "BootCurrent",
-        "Boot0000",
         "PlatformLangCodes",
         "ConOutDev",
     ]

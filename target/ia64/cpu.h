@@ -31,8 +31,8 @@
 #define IA64_PMD_COUNT   64
 #define IA64_PKR_COUNT   16
 #define IA64_MSR_COUNT   1024
-#define IA64_TR_COUNT    8
-#define IA64_TLB_MAX     256
+#define IA64_TR_COUNT    64
+#define IA64_TLB_MAX     128
 #define IA64_RSE_FRAME_MAX 128
 #define IA64_EXCP_FRAME_MAX 8
 
@@ -226,9 +226,9 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_INSERTABLE_PAGE_SIZE_MASK \
     ((1ULL << 12) | (1ULL << 13) | (1ULL << 14) | (1ULL << 16) | \
      (1ULL << 18) | (1ULL << 20) | (1ULL << 22) | (1ULL << 24) | \
-     (1ULL << 26) | (1ULL << 28))
+     (1ULL << 26) | (1ULL << 28) | (1ULL << 30) | (1ULL << 32))
 #define IA64_PURGEABLE_PAGE_SIZE_MASK \
-    (IA64_INSERTABLE_PAGE_SIZE_MASK | (1ULL << 32))
+    IA64_INSERTABLE_PAGE_SIZE_MASK
 
 /* ---- General exception codes ---- */
 #define IA64_GENEX_UNIMPL_DATA_ADDR 43
@@ -377,6 +377,7 @@ typedef struct IA64ExceptionFrame {
     uint64_t rse_spill_base;
     bool rse_bspstore_switched;
     bool rse_flushed;
+    bool rse_zero_loadrs_for_rfi;
     uint32_t rse_frame_depth;
     uint64_t rse_frame_gr[IA64_RSE_FRAME_MAX][IA64_GR_COUNT - 32];
     uint64_t rse_frame_nat[IA64_RSE_FRAME_MAX][2];
@@ -620,6 +621,7 @@ typedef struct CPUArchState {
     uint64_t rse_spill_base;       /* physical address where last spill started */
     bool rse_bspstore_switched;    /* BSPSTORE moved outside the last spill */
     bool rse_flushed;              /* flushrs executed since BSPSTORE write */
+    bool rse_zero_loadrs_for_rfi;  /* latest RSE op was zero-distance loadrs */
     uint32_t rse_frame_depth;
     uint64_t rse_frame_gr[IA64_RSE_FRAME_MAX][IA64_GR_COUNT - 32];
     uint64_t rse_frame_nat[IA64_RSE_FRAME_MAX][2];
