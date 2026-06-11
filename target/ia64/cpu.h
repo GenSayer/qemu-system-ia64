@@ -20,6 +20,8 @@
 #define NB_MMU_MODES     3
 
 #define IA64_GR_COUNT    128
+#define IA64_STACKED_GR_BASE   32
+#define IA64_STACKED_GR_COUNT  (IA64_GR_COUNT - IA64_STACKED_GR_BASE)
 #define IA64_PR_COUNT    64
 #define IA64_BR_COUNT    8
 #define IA64_AR_COUNT    128

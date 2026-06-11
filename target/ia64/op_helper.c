@@ -465,8 +465,6 @@ static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr)
 #define PAL_REGISTER_INFO   0x0027
 #define PAL_PREFETCH_VIS    0x0029
 
-#define IA64_STACKED_GR_BASE   32
-#define IA64_STACKED_GR_COUNT  (IA64_GR_COUNT - IA64_STACKED_GR_BASE)
 #define IA64_ROTATING_FR_BASE  32
 #define IA64_ROTATING_FR_COUNT (IA64_FR_COUNT - IA64_ROTATING_FR_BASE)
 #define PAL_COPY_PAL       0x0100
@@ -1093,6 +1091,9 @@ void helper_rfi(CPUIA64State *env)
                  ifm_match || advanced_dirty_frame_return);
 
             if (restore_frame && advanced_bspstore_return) {
+                restore_frame = false;
+            }
+            if (restore_frame && ifs_valid && frame->rse_flushed) {
                 restore_frame = false;
             }
 
@@ -5750,6 +5751,7 @@ void helper_alloc_rse(CPUIA64State *env, uint32_t r1,
     uint32_t new_sof = sof & 0x7f;
 
     env->rse_zero_loadrs_for_rfi = false;
+    env->rse_flushed = false;
     if (r1 != 0) {
         env->gr[r1] = env->ar_pfs;
         ia64_gr_nat_set(env, r1, false);
@@ -5772,32 +5774,44 @@ void helper_alloc_rse(CPUIA64State *env, uint32_t r1,
 void helper_cover_rse(CPUIA64State *env)
 {
     uint32_t depth = env->rse_cover_depth;
+    uint32_t old_sof = env->cfm_sof;
+    bool flushed_current_frame =
+        env->rse_flushed &&
+        ia64_rse_bsp_compare(env, env->ar_bspstore, env->ar_bsp) == 0;
 
     env->rse_zero_loadrs_for_rfi = false;
     if (!(env->psr & IA64_PSR_IC)) {
         env->cr_ifs = IA64_IFS_V | ia64_current_cfm(env);
     }
 
-    ia64_rse_redirty_current_frame(env);
+    if (!flushed_current_frame) {
+        ia64_rse_redirty_current_frame(env);
+    }
     if (depth == IA64_RSE_FRAME_MAX) {
         ia64_rse_evict_parent_frames(env);
         depth = env->rse_cover_depth;
     }
 
-    if (depth < IA64_RSE_FRAME_MAX && env->cfm_sof > 0) {
+    if (!flushed_current_frame &&
+        depth < IA64_RSE_FRAME_MAX && old_sof > 0) {
         memcpy(env->rse_cover_gr[depth], &env->gr[IA64_STACKED_GR_BASE],
                sizeof(env->rse_cover_gr[depth]));
         env->rse_cover_nat[depth][0] = env->nat[0];
         env->rse_cover_nat[depth][1] = env->nat[1];
         ia64_rse_mask_nat_to_words(env->rse_cover_nat[depth],
-                                   env->cfm_sof);
-        env->rse_cover_sof[depth] = env->cfm_sof;
+                                   old_sof);
+        env->rse_cover_sof[depth] = old_sof;
         env->rse_cover_bsp[depth] = env->ar_bsp;
         env->rse_cover_is_loadrs[depth] = false;
         env->rse_cover_depth = depth + 1;
     }
 
-    env->ar_bsp = ia64_rse_bsp_advance(env->ar_bsp, env->cfm_sof);
+    env->ar_bsp = ia64_rse_bsp_advance(env->ar_bsp, old_sof);
+    if (flushed_current_frame) {
+        env->ar_bspstore = env->ar_bsp;
+        env->rse_spill_base = env->ar_bspstore;
+        env->rse_spill_words = 0;
+    }
     env->cfm_sof = 0;
     env->cfm_sol = 0;
     env->cfm_sor = 0;

@@ -5868,12 +5868,21 @@ static bool ia64_clock_access_needs_io(const DisasContext *ctx)
     return tb_cflags(ctx->base.tb) & CF_USE_ICOUNT;
 }
 
+static void ia64_gen_note_stacked_gr_write(uint8_t reg)
+{
+    if (reg >= IA64_STACKED_GR_BASE) {
+        tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                        offsetof(CPUIA64State, rse_flushed));
+    }
+}
+
 static void ia64_gen_gr_nat_clear(uint8_t reg)
 {
     if (reg == 0) {
         return;
     }
 
+    ia64_gen_note_stacked_gr_write(reg);
     tcg_gen_andi_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                      ~(1ULL << (reg % 64)));
 }
@@ -5884,6 +5893,7 @@ static void ia64_gen_gr_nat_set(uint8_t reg)
         return;
     }
 
+    ia64_gen_note_stacked_gr_write(reg);
     tcg_gen_ori_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                     1ULL << (reg % 64));
 }
@@ -5910,6 +5920,7 @@ static void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit)
         return;
     }
 
+    ia64_gen_note_stacked_gr_write(reg);
     shifted = tcg_temp_new_i64();
     tcg_gen_andi_i64(shifted, bit, 1);
     tcg_gen_shli_i64(shifted, shifted, reg % 64);
@@ -6317,6 +6328,7 @@ static void ia64_gen_speculative_load(DisasContext *ctx,
     if (insn->r1 == 0) {
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         return;
     }
@@ -6361,6 +6373,7 @@ static void ia64_gen_speculative_load(DisasContext *ctx,
                                       increment_nat);
     } else if (insn->imm_base_update && insn->r3 != 0) {
         tcg_gen_addi_i64(cpu_gr[insn->r3], addr, insn->imm);
+        ia64_gen_note_stacked_gr_write(insn->r3);
     }
 }
 
@@ -6428,6 +6441,7 @@ static void ia64_gen_fp_load_base_update(const Ia64Instruction *insn,
                                       increment_nat);
     } else if (insn->imm_base_update && insn->r3 != 0) {
         tcg_gen_addi_i64(cpu_gr[insn->r3], addr, insn->imm);
+        ia64_gen_note_stacked_gr_write(insn->r3);
     }
 }
 
@@ -6611,6 +6625,7 @@ static void ia64_gen_fp_load_pair_base_update(const Ia64Instruction *insn,
 {
     if (insn->imm_base_update && insn->r3 != 0) {
         tcg_gen_addi_i64(cpu_gr[insn->r3], addr, insn->imm);
+        ia64_gen_note_stacked_gr_write(insn->r3);
     }
 }
 
@@ -7338,8 +7353,10 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         if (insn->hint_m_reg_increment && insn->r3 != 0) {
             tcg_gen_add_i64(cpu_gr[insn->r3], cpu_gr[insn->r3],
                             cpu_gr[insn->r2]);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         } else if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     case IA64_OP_CLRRRB:
@@ -8087,6 +8104,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                               base_nat, increment_nat);
             } else if (insn->imm_base_update && insn->r3 != 0) {
                 tcg_gen_addi_i64(cpu_gr[insn->r3], addr, insn->imm);
+                ia64_gen_note_stacked_gr_write(insn->r3);
             }
         }
         break;
@@ -8145,6 +8163,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                               base_nat, increment_nat);
             } else if (insn->imm_base_update && insn->r3 != 0) {
                 tcg_gen_addi_i64(cpu_gr[insn->r3], addr, insn->imm);
+                ia64_gen_note_stacked_gr_write(insn->r3);
             }
         }
         break;
@@ -8184,6 +8203,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                               base_nat, increment_nat);
             } else if (insn->imm_base_update && insn->r3 != 0) {
                 tcg_gen_addi_i64(cpu_gr[insn->r3], addr, insn->imm);
+                ia64_gen_note_stacked_gr_write(insn->r3);
             }
         }
         break;
@@ -8238,6 +8258,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                           increment_nat);
         } else if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], addr, insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     }
@@ -8320,6 +8341,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         }
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], addr, insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     }
@@ -8806,6 +8828,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 8);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     case IA64_OP_STFS:
@@ -8817,6 +8840,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 4);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     case IA64_OP_STF_SPILL: {
@@ -8828,6 +8852,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 16);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     }
@@ -8840,6 +8865,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 8);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     case IA64_OP_STFE:
@@ -8851,6 +8877,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 10);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
+            ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     case IA64_OP_FADD:
