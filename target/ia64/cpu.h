@@ -26,17 +26,16 @@
 #define IA64_BR_COUNT    8
 #define IA64_AR_COUNT    128
 #define IA64_CR_COUNT    128
-#define IA64_DBR_COUNT   8
+#define IA64_DBR_COUNT   16
 #define IA64_FR_COUNT    128
-#define IA64_IBR_COUNT   8
-#define IA64_PMC_COUNT   32
+#define IA64_IBR_COUNT   16
+#define IA64_PMC_COUNT   64
 #define IA64_PMD_COUNT   64
 #define IA64_PKR_COUNT   16
 #define IA64_MSR_COUNT   1024
-#define IA64_TR_COUNT    64
+/* Per translation-register bank: 16 instruction TRs and 16 data TRs. */
+#define IA64_TR_COUNT    16
 #define IA64_TLB_MAX     128
-#define IA64_RSE_FRAME_MAX 128
-#define IA64_EXCP_FRAME_MAX 8
 
 #define IA64_REGION_BITS 3
 #define IA64_IMPL_PA_BITS 50
@@ -54,6 +53,8 @@
 #define IA64_PAL_DISPATCH_EXIT_TB (1U << 1)
 
 #define IA64_FR_ONE      0x3ff0000000000000ULL
+/* Architected FP status expected by IA-64 firmware and OS hand-off. */
+#define IA64_FPSR_DEFAULT 0x0009804c0270033fULL
 
 /* ---- PSR bit definitions ---- */
 #define IA64_PSR_BE      (1ULL << 1)
@@ -73,6 +74,7 @@
 #define IA64_PSR_DI      (1ULL << 22)
 #define IA64_PSR_SI      (1ULL << 23)
 #define IA64_PSR_RT      (1ULL << 27)
+#define IA64_PSR_IS      (1ULL << 34)
 #define IA64_PSR_MC      (1ULL << 35)
 #define IA64_PSR_IT      (1ULL << 36)
 #define IA64_PSR_CPL_MASK (3ULL << 32)
@@ -189,13 +191,18 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_CFM_SOF_MASK     0x7f
 #define IA64_CFM_SOL_MASK     (0x7f << 7)
 #define IA64_CFM_SOL_SHIFT    7
-#define IA64_CFM_SOR_MASK     (0x1f << 14)
+#define IA64_CFM_SOR_MASK     (0x0f << 14)
 #define IA64_CFM_SOR_SHIFT    14
-#define IA64_CFM_RRB_GR_MASK  (0x1f << 18)
+#define IA64_CFM_RRB_GR_MASK  (0x7f << 18)
 #define IA64_CFM_RRB_GR_SHIFT 18
+#define IA64_CFM_RRB_FR_MASK  (0x7fULL << 25)
+#define IA64_CFM_RRB_FR_SHIFT 25
+#define IA64_CFM_RRB_PR_MASK  (0x3fULL << 32)
+#define IA64_CFM_RRB_PR_SHIFT 32
 #define IA64_IFS_V            (1ULL << 63)
 #define IA64_IFS_IFM_MASK     (IA64_CFM_SOF_MASK | IA64_CFM_SOL_MASK | \
-                               IA64_CFM_SOR_MASK | IA64_CFM_RRB_GR_MASK)
+                               IA64_CFM_SOR_MASK | IA64_CFM_RRB_GR_MASK | \
+                               IA64_CFM_RRB_FR_MASK | IA64_CFM_RRB_PR_MASK)
 
 /* ---- PFS field definitions ---- */
 #define IA64_PFS_PFM_MASK     ((1ULL << 38) - 1)
@@ -349,55 +356,6 @@ typedef struct IA64AlatEntry {
     bool     valid;
 } IA64AlatEntry;
 
-typedef enum IA64RSECurrentFrameLoadOrigin {
-    IA64_RSE_CURRENT_FRAME_LOAD_NONE,
-    IA64_RSE_CURRENT_FRAME_LOAD_RFI,
-    IA64_RSE_CURRENT_FRAME_LOAD_BR_RET,
-} IA64RSECurrentFrameLoadOrigin;
-
-typedef struct IA64ExceptionFrame {
-    uint32_t exception;
-    uint64_t gr[IA64_GR_COUNT - 32];
-    uint64_t nat[2];
-    uint64_t ipsr;
-    uint64_t iip;
-    uint64_t ifs;
-    uint64_t ifm;
-    uint64_t bsp;
-    uint64_t bspstore;
-    uint64_t ifa;
-    uint64_t isr;
-    uint64_t itir;
-    uint64_t iipa;
-    uint64_t iim;
-    uint64_t iha;
-    uint64_t interrupted_iip;
-    IA64RSECurrentFrameLoadOrigin interrupted_current_frame_load;
-    uint64_t rnat;
-    uint32_t rse_cumulative_words;
-    uint32_t rse_spill_words;
-    uint64_t rse_spill_base;
-    bool rse_bspstore_switched;
-    bool rse_flushed;
-    bool rse_zero_loadrs_for_rfi;
-    uint32_t rse_frame_depth;
-    uint64_t rse_frame_gr[IA64_RSE_FRAME_MAX][IA64_GR_COUNT - 32];
-    uint64_t rse_frame_nat[IA64_RSE_FRAME_MAX][2];
-    uint8_t rse_frame_sof[IA64_RSE_FRAME_MAX];
-    uint8_t rse_frame_sol[IA64_RSE_FRAME_MAX];
-    uint8_t rse_frame_sor[IA64_RSE_FRAME_MAX];
-    uint8_t rse_frame_rrb_gr[IA64_RSE_FRAME_MAX];
-    uint64_t rse_frame_bsp[IA64_RSE_FRAME_MAX];
-    uint64_t rse_frame_return_ip[IA64_RSE_FRAME_MAX];
-    uint32_t rse_frame_cumulative_words[IA64_RSE_FRAME_MAX];
-    uint32_t rse_cover_depth;
-    uint64_t rse_cover_gr[IA64_RSE_FRAME_MAX][IA64_GR_COUNT - 32];
-    uint64_t rse_cover_nat[IA64_RSE_FRAME_MAX][2];
-    uint8_t rse_cover_sof[IA64_RSE_FRAME_MAX];
-    uint64_t rse_cover_bsp[IA64_RSE_FRAME_MAX];
-    bool rse_cover_is_loadrs[IA64_RSE_FRAME_MAX];
-} IA64ExceptionFrame;
-
 /* ---- Exception type enum (internal IDs, not IVT vectors) ---- */
 typedef enum IA64Exception {
     IA64_EXCP_NONE = 0,
@@ -425,6 +383,12 @@ typedef enum IA64Exception {
     IA64_EXCP_KEY_PERMISSION = 22,
     IA64_EXCP_UNIMPL_DATA_ADDR = 23,
     IA64_EXCP_UNIMPL_INST_ADDR = 24,
+    IA64_EXCP_PRIVILEGED_OP = 25,
+    IA64_EXCP_PRIVILEGED_REG = 26,
+    IA64_EXCP_RESERVED_REG_FIELD = 27,
+    IA64_EXCP_FP_FAULT = 28,
+    IA64_EXCP_FP_TRAP = 29,
+    IA64_EXCP_DISABLED_ISA_TRANSITION = 30,
     IA64_EXCP_MAX,
 } IA64Exception;
 
@@ -590,6 +554,8 @@ typedef struct CPUArchState {
     uint8_t cfm_sol;
     uint8_t cfm_sor;
     uint8_t cfm_rrb_gr;
+    uint8_t cfm_rrb_fr;
+    uint8_t cfm_rrb_pr;
 
     /* TLB */
     IA64TlbEntry tlb_data[IA64_TLB_MAX];
@@ -616,33 +582,41 @@ typedef struct CPUArchState {
     uint64_t pal_interrupt_block_addr;
     uint64_t pal_io_block_addr;
 
-    /* RSE dirty-region and spill tracking */
-    IA64RSECurrentFrameLoadOrigin rse_current_frame_load;
-    uint32_t rse_cumulative_words; /* total stacked GR words across all frames */
-    uint32_t rse_spill_words;      /* words spilled by last flushrs */
-    uint64_t rse_spill_base;       /* physical address where last spill started */
-    bool rse_bspstore_switched;    /* BSPSTORE moved outside the last spill */
-    bool rse_flushed;              /* flushrs executed since BSPSTORE write */
-    bool rse_zero_loadrs_for_rfi;  /* latest RSE op was zero-distance loadrs */
-    uint32_t rse_frame_depth;
-    uint64_t rse_frame_gr[IA64_RSE_FRAME_MAX][IA64_GR_COUNT - 32];
-    uint64_t rse_frame_nat[IA64_RSE_FRAME_MAX][2];
-    uint8_t rse_frame_sof[IA64_RSE_FRAME_MAX];
-    uint8_t rse_frame_sol[IA64_RSE_FRAME_MAX];
-    uint8_t rse_frame_sor[IA64_RSE_FRAME_MAX];
-    uint8_t rse_frame_rrb_gr[IA64_RSE_FRAME_MAX];
-    uint64_t rse_frame_bsp[IA64_RSE_FRAME_MAX];
-    uint64_t rse_frame_return_ip[IA64_RSE_FRAME_MAX];
-    uint32_t rse_frame_cumulative_words[IA64_RSE_FRAME_MAX];
-    uint32_t rse_cover_depth;
-    uint64_t rse_cover_gr[IA64_RSE_FRAME_MAX][IA64_GR_COUNT - 32];
-    uint64_t rse_cover_nat[IA64_RSE_FRAME_MAX][2];
-    uint8_t rse_cover_sof[IA64_RSE_FRAME_MAX];
-    uint64_t rse_cover_bsp[IA64_RSE_FRAME_MAX];
-    bool rse_cover_is_loadrs[IA64_RSE_FRAME_MAX];
+    /*
+     * Register Stack Engine state (SDM Vol.2 ch.6).  The register
+     * stack backing store in guest memory is the authoritative home of
+     * stacked register values; the emulator keeps the architecture's
+     * physical stacked register file and its four partitions
+     * explicitly.  rse_pgr[]/rse_pgr_nat[] form the circular physical
+     * file and rse_bol is RSE.BOF, the physical index of the current
+     * frame's GR32.  env->gr[32..127] only cache the virtual
+     * (renamed/rotated) view of the current frame and are
+     * re-synchronized with the physical file whenever the frame
+     * mapping changes.
+     *
+     * Partition counters follow SDM Vol.2 6.3 (all counts in
+     * registers; the intervening NaT collection words of a partition
+     * are counted separately by the *_nat fields):
+     *   cfm_sof + rse_dirty + rse_clean + rse_invalid == 96
+     *   AR.BSPSTORE == AR.BSP - 8*(rse_dirty + rse_dirty_nat)
+     * rse_dirty/rse_dirty_nat go negative while the current frame is
+     * incomplete (mandatory RSE loads pending after br.ret/rfi,
+     * SDM Vol.2 6.8).  rse_cfle is RSE.CFLE (SDM Vol.2 table 6-1): it
+     * is set while a br.ret/rfi mandatory load sequence is in
+     * progress and cleared by interruption delivery or by completing
+     * the sequence.
+     */
+    uint64_t rse_pgr[IA64_STACKED_GR_COUNT];
+    uint8_t rse_pgr_nat[IA64_STACKED_GR_COUNT];
+    uint32_t rse_bol;
+    int32_t rse_dirty;
+    int32_t rse_dirty_nat;
+    int32_t rse_clean;
+    int32_t rse_clean_nat;
+    int32_t rse_invalid;
+    bool rse_cfle;
 
-    uint32_t excp_frame_depth;
-    IA64ExceptionFrame excp_frames[IA64_EXCP_FRAME_MAX];
+    bool instruction_group_start;  /* next instruction starts a new group */
 
     /* ALAT (Advanced Load Address Table) */
     IA64AlatEntry alat[IA64_ALAT_ENTRIES];
@@ -663,6 +637,26 @@ typedef struct CPUArchState {
     uint64_t fr_nat[2];
     /* FR value currently holds the IA-64 significand field directly. */
     uint64_t fr_sig[2];
+    /*
+     * Exact IA-64 register-format value retained for extended loads/fills.
+     * fr remains the float64 execution cache used by existing TCG paths.
+     */
+    uint64_t fr_ext_mant[IA64_FR_COUNT];
+    uint32_t fr_ext_exp[IA64_FR_COUNT];
+    uint64_t fr_ext_sign[2];
+    uint64_t fr_ext_valid[2];
+    uint64_t fr_int_value[IA64_FR_COUNT];
+    uint64_t fr_int_origin[2];
+    uint64_t fp_backup_fr[IA64_FR_COUNT];
+    uint64_t fp_backup_fr_nat[2];
+    uint64_t fp_backup_fr_sig[2];
+    uint64_t fp_backup_fr_ext_mant[IA64_FR_COUNT];
+    uint32_t fp_backup_fr_ext_exp[IA64_FR_COUNT];
+    uint64_t fp_backup_fr_ext_sign[2];
+    uint64_t fp_backup_fr_ext_valid[2];
+    uint64_t fp_backup_fr_int_value[IA64_FR_COUNT];
+    uint64_t fp_backup_fr_int_origin[2];
+    uint64_t fp_backup_pr[IA64_PR_COUNT];
     float_status fp_status;
 } CPUIA64State;
 
@@ -764,6 +758,33 @@ static inline uint64_t ia64_va_page_base(uint64_t va, uint64_t ps)
     return va & ia64_va_vpn_mask(ps);
 }
 
+static inline bool ia64_tlb_entry_covers_va_any_rid(const IA64TlbEntry *entry,
+                                                    uint64_t va)
+{
+    if (!entry->valid || entry->ps == 0) {
+        return false;
+    }
+    if (ia64_rr_index(entry->va) != ia64_rr_index(va)) {
+        return false;
+    }
+    return ia64_va_page_base(entry->va, entry->ps) ==
+           ia64_va_page_base(va, entry->ps);
+}
+
+static inline bool ia64_tlb_has_explicit_va_mapping(const IA64TlbEntry *tlb,
+                                                    uint16_t tlb_count,
+                                                    uint64_t va)
+{
+    uint16_t i;
+
+    for (i = 0; i < tlb_count; i++) {
+        if (ia64_tlb_entry_covers_va_any_rid(&tlb[i], va)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static inline bool ia64_page_shift_insertable(uint8_t page_shift)
 {
     return (IA64_INSERTABLE_PAGE_SIZE_MASK >> page_shift) & 1;
@@ -858,6 +879,20 @@ static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
         return false;
     }
 
+    /*
+     * This fallback models SAL's boot-time miss handler for otherwise
+     * unmapped identity accesses.  If firmware or the OS loader has already
+     * installed an explicit TR/TC for the same virtual range, a RID mismatch
+     * must remain an architectural TLB miss instead of silently falling back
+     * to a different identity physical address.
+     */
+    if (ia64_tlb_has_explicit_va_mapping(env->tlb_data, env->tlb_data_count,
+                                         va) ||
+        ia64_tlb_has_explicit_va_mapping(env->tlb_inst, env->tlb_inst_count,
+                                         va)) {
+        return false;
+    }
+
     phys = va & IA64_REGION7_PHYS_MASK;
     if (phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
         return false;
@@ -939,6 +974,7 @@ uint64_t ia64_vhpt_hash_address(CPUIA64State *env, uint64_t va);
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value);
 void ia64_set_psr_bn(CPUIA64State *env, bool bank1);
+void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
 void ia64_sapic_update_interrupt(CPUIA64State *env);

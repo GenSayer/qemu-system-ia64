@@ -51,6 +51,7 @@ typedef __SIZE_TYPE__    size_t;
 #define SAL_TR_ENCODED_PAGE_SIZE     (SAL_TR_PAGE_SHIFT << 2)
 #define SAL_RR_PREFERRED_PAGE_SHIFT  12U
 #define SAL_RR_FIRST_RID             0x1000U
+#define SAL_PTA_DISABLED_VALUE       (15ULL << 2)
 #define SAL_RR_VALUE(Rid) \
     (((UINT64)(Rid) << 8) | ((UINT64)SAL_RR_PREFERRED_PAGE_SHIFT << 2))
 #define SAL_BACKING_STORE_BASE       0x0000000000080000ULL
@@ -3710,7 +3711,9 @@ __asm__(
 "    movl r14 = 0x10000\n"
 "    ;;\n"
 "    mov cr.iva = r14\n"
-"    mov cr.pta = r0\n"
+"    movl r14 = 0x3c\n"
+"    ;;\n"
+"    mov cr.pta = r14\n"
 "    ;;\n"
 "    FW_SET_RR 0x0000000000000000, 0x100030\n"
 "    FW_SET_RR 0x2000000000000000, 0x100130\n"
@@ -3749,12 +3752,13 @@ __asm__(
 "fw_call_efi_entry:\n"
 "    .prologue\n"
 "    .save ar.pfs, r37\n"
-"    alloc r37 = ar.pfs, 5, 6, 2, 0\n"
+"    alloc r37 = ar.pfs, 5, 7, 2, 0\n"
 "    .save rp, r38\n"
 "    mov r38 = b0\n"
 "    mov r39 = gp\n"
 "    mov r40 = r35\n"
 "    mov r41 = sp\n"
+"    mov r43 = ar.rsc\n"
 "    adds sp = -16, sp\n"
 "    ;;\n"
 "    adds r14 = 8, sp\n"
@@ -3775,16 +3779,23 @@ __asm__(
 "    srlz.i\n"
 "    ;;\n"
 "3:\n"
+"    mov ar.rsc = r0\n"
+"    ;;\n"
 "    bsw.1\n"
 "    ;;\n"
-"    mov r43 = r33\n"
-"    mov r44 = r34\n"
+"    mov r44 = r33\n"
+"    mov r45 = r34\n"
 "    mov b6 = r15\n"
 "    br.call.sptk.many b0 = b6\n"
 "    ;;\n"
 "    mov r42 = r8\n"
+"    mov ar.rsc = r43\n"
 "    mov sp = r41\n"
 "    mov gp = r39\n"
+"    rsm psr.ic\n"
+"    ;;\n"
+"    srlz.d\n"
+"    ;;\n"
 "    movl r14 = 4f\n"
 "    ;;\n"
 "    mov cr.ipsr = r40\n"
@@ -3818,6 +3829,9 @@ __asm__(
 "    xor r16 = r16, r33\n"
 "    ;;\n"
 "    or r15 = r15, r16\n"
+"    mov r17 = ar.rsc\n"
+"    ;;\n"
+"    or r15 = r15, r17\n"
 "    ;;\n"
 "    cmp.eq p6, p7 = r15, r0\n"
 "    ;;\n"
@@ -3910,7 +3924,7 @@ static BOOLEAN __attribute__((noinline)) sal_loader_handoff_selftest(void)
         mSalHandoffProbe.Rsc != 0 ||
         mSalHandoffProbe.Dcr != IA64_DCR_LC ||
         mSalHandoffProbe.Iva != SAL_IVT_BASE ||
-        mSalHandoffProbe.Pta != 0 ||
+        mSalHandoffProbe.Pta != SAL_PTA_DISABLED_VALUE ||
         mSalHandoffProbe.Sp < mBootStackBase +
                               IA64_EFI_MIN_STACK_BYTES ||
         mSalHandoffProbe.Sp >= mBootStackTop ||
@@ -4140,6 +4154,87 @@ static void uart_put_hex64(UINT64 value)
      ((UINT64)(d) << 15) | ((UINT64)(e) << 20) | \
      ((UINT64)(f) << 25) | ((UINT64)(g) << 30))
 
+static UINT8 text_unicode_to_cp437(CHAR16 Ch)
+{
+    static const CHAR16 cp437_unicode[256] = {
+        0x0000U, 0x263aU, 0x263bU, 0x2665U,
+        0x2666U, 0x2663U, 0x2660U, 0x2022U,
+        0x25d8U, 0x25cbU, 0x25d9U, 0x2642U,
+        0x2640U, 0x266aU, 0x266bU, 0x263cU,
+        0x25baU, 0x25c4U, 0x2195U, 0x203cU,
+        0x00b6U, 0x00a7U, 0x25acU, 0x21a8U,
+        0x2191U, 0x2193U, 0x2192U, 0x2190U,
+        0x221fU, 0x2194U, 0x25b2U, 0x25bcU,
+        0x0020U, 0x0021U, 0x0022U, 0x0023U,
+        0x0024U, 0x0025U, 0x0026U, 0x0027U,
+        0x0028U, 0x0029U, 0x002aU, 0x002bU,
+        0x002cU, 0x002dU, 0x002eU, 0x002fU,
+        0x0030U, 0x0031U, 0x0032U, 0x0033U,
+        0x0034U, 0x0035U, 0x0036U, 0x0037U,
+        0x0038U, 0x0039U, 0x003aU, 0x003bU,
+        0x003cU, 0x003dU, 0x003eU, 0x003fU,
+        0x0040U, 0x0041U, 0x0042U, 0x0043U,
+        0x0044U, 0x0045U, 0x0046U, 0x0047U,
+        0x0048U, 0x0049U, 0x004aU, 0x004bU,
+        0x004cU, 0x004dU, 0x004eU, 0x004fU,
+        0x0050U, 0x0051U, 0x0052U, 0x0053U,
+        0x0054U, 0x0055U, 0x0056U, 0x0057U,
+        0x0058U, 0x0059U, 0x005aU, 0x005bU,
+        0x005cU, 0x005dU, 0x005eU, 0x005fU,
+        0x0060U, 0x0061U, 0x0062U, 0x0063U,
+        0x0064U, 0x0065U, 0x0066U, 0x0067U,
+        0x0068U, 0x0069U, 0x006aU, 0x006bU,
+        0x006cU, 0x006dU, 0x006eU, 0x006fU,
+        0x0070U, 0x0071U, 0x0072U, 0x0073U,
+        0x0074U, 0x0075U, 0x0076U, 0x0077U,
+        0x0078U, 0x0079U, 0x007aU, 0x007bU,
+        0x007cU, 0x007dU, 0x007eU, 0x2302U,
+        0x00c7U, 0x00fcU, 0x00e9U, 0x00e2U,
+        0x00e4U, 0x00e0U, 0x00e5U, 0x00e7U,
+        0x00eaU, 0x00ebU, 0x00e8U, 0x00efU,
+        0x00eeU, 0x00ecU, 0x00c4U, 0x00c5U,
+        0x00c9U, 0x00e6U, 0x00c6U, 0x00f4U,
+        0x00f6U, 0x00f2U, 0x00fbU, 0x00f9U,
+        0x00ffU, 0x00d6U, 0x00dcU, 0x00a2U,
+        0x00a3U, 0x00a5U, 0x20a7U, 0x0192U,
+        0x00e1U, 0x00edU, 0x00f3U, 0x00faU,
+        0x00f1U, 0x00d1U, 0x00aaU, 0x00baU,
+        0x00bfU, 0x2310U, 0x00acU, 0x00bdU,
+        0x00bcU, 0x00a1U, 0x00abU, 0x00bbU,
+        0x2591U, 0x2592U, 0x2593U, 0x2502U,
+        0x2524U, 0x2561U, 0x2562U, 0x2556U,
+        0x2555U, 0x2563U, 0x2551U, 0x2557U,
+        0x255dU, 0x255cU, 0x255bU, 0x2510U,
+        0x2514U, 0x2534U, 0x252cU, 0x251cU,
+        0x2500U, 0x253cU, 0x255eU, 0x255fU,
+        0x255aU, 0x2554U, 0x2569U, 0x2566U,
+        0x2560U, 0x2550U, 0x256cU, 0x2567U,
+        0x2568U, 0x2564U, 0x2565U, 0x2559U,
+        0x2558U, 0x2552U, 0x2553U, 0x256bU,
+        0x256aU, 0x2518U, 0x250cU, 0x2588U,
+        0x2584U, 0x258cU, 0x2590U, 0x2580U,
+        0x03b1U, 0x00dfU, 0x0393U, 0x03c0U,
+        0x03a3U, 0x03c3U, 0x00b5U, 0x03c4U,
+        0x03a6U, 0x0398U, 0x03a9U, 0x03b4U,
+        0x221eU, 0x03c6U, 0x03b5U, 0x2229U,
+        0x2261U, 0x00b1U, 0x2265U, 0x2264U,
+        0x2320U, 0x2321U, 0x00f7U, 0x2248U,
+        0x00b0U, 0x2219U, 0x00b7U, 0x221aU,
+        0x207fU, 0x00b2U, 0x25a0U, 0x00a0U
+    };
+    UINTN code;
+
+    if (Ch >= 0x20U && Ch <= 0x7eU) {
+        return (UINT8)Ch;
+    }
+    for (code = 1; code < 256U; code++) {
+        if (cp437_unicode[code] == Ch) {
+            return (UINT8)code;
+        }
+    }
+    return (UINT8)'?';
+}
+
 static UINT64 text_glyph5x7(CHAR16 Ch)
 {
     switch (Ch) {
@@ -4297,7 +4392,15 @@ static UINT64 text_glyph5x7(CHAR16 Ch)
     case 0x25c4: return GLYPH7(1, 3, 7, 15, 7, 3, 1);
     case 0x2191: return GLYPH7(4, 14, 21, 4, 4, 4, 4);
     case 0x2193: return GLYPH7(4, 4, 4, 4, 21, 14, 4);
-    default: return GLYPH7(14, 17, 1, 2, 4, 0, 4);
+    default:
+        if (Ch >= 0xb3U && Ch <= 0xdaU) {
+            return GLYPH7(31, 17, 17, 17, 17, 17, 31);
+        }
+        if ((Ch >= 0xb0U && Ch <= 0xb2U) ||
+            (Ch >= 0xdbU && Ch <= 0xdfU)) {
+            return GLYPH7(31, 31, 31, 31, 31, 31, 31);
+        }
+        return GLYPH7(14, 17, 1, 2, 4, 0, 4);
     }
 }
 
@@ -4387,13 +4490,12 @@ static void text_draw_graphics_cell(UINTN X0, UINTN Y0, UINT64 Glyph,
     }
 }
 
-static void text_write_legacy_cell(UINTN Column, UINTN Row)
+static void text_write_legacy_cell(UINTN Column, UINTN Row, UINT8 Ch)
 {
     volatile UINT16 *fb = (volatile UINT16 *)(UINTN)VGA_TEXT_FB_BASE;
-    UINT16 ch = (UINT16)(mTextChars[Row][Column] & 0xffU);
     UINT16 attr = (UINT16)mTextAttrs[Row][Column] << 8;
 
-    fb[Row * VGA_TEXT_COLUMNS + Column] = attr | ch;
+    fb[Row * VGA_TEXT_COLUMNS + Column] = attr | (UINT16)Ch;
 }
 
 static void text_draw_cell(UINTN Column, UINTN Row)
@@ -4403,9 +4505,10 @@ static void text_draw_cell(UINTN Column, UINTN Row)
     UINT8 attr = mTextAttrs[Row][Column];
     UINT32 fg = text_efi_color(attr & 0x0fU);
     UINT32 bg = text_efi_color((attr >> 4) & 0x07U);
-    UINT64 glyph = text_glyph5x7(mTextChars[Row][Column]);
+    UINT8 ch = text_unicode_to_cp437(mTextChars[Row][Column]);
+    UINT64 glyph = text_glyph5x7((CHAR16)ch);
 
-    text_write_legacy_cell(Column, Row);
+    text_write_legacy_cell(Column, Row, ch);
 
     if (!mGraphicsActive) {
         return;
@@ -4481,24 +4584,13 @@ static void text_advance_line(void)
 
 static BOOLEAN efi_conout_char_supported(CHAR16 Ch)
 {
-    if ((Ch >= 0x20U && Ch <= 0x7eU) ||
-        Ch == 0 || Ch == '\r' || Ch == '\n' || Ch == '\b' || Ch == '\t') {
+    if (Ch == 0 || Ch == '\r' || Ch == '\n' || Ch == '\b' || Ch == '\t') {
         return 1;
     }
-    if (Ch == 0xb3U || Ch == 0xb4U || Ch == 0xbfU || Ch == 0xc0U ||
-        Ch == 0xc1U || Ch == 0xc2U || Ch == 0xc3U || Ch == 0xc4U ||
-        Ch == 0xc5U || Ch == 0xd9U || Ch == 0xdaU ||
-        Ch == 0x2500U || Ch == 0x2502U || Ch == 0x250cU ||
-        Ch == 0x2510U || Ch == 0x2514U || Ch == 0x2518U ||
-        Ch == 0x251cU || Ch == 0x2524U || Ch == 0x252cU ||
-        Ch == 0x2534U || Ch == 0x253cU ||
-        (Ch >= 0x2550U && Ch <= 0x256cU)) {
+    if (Ch == '?') {
         return 1;
     }
-    return Ch == 0x2588U || Ch == 0x2591U ||
-           Ch == 0x25b2U || Ch == 0x25baU ||
-           Ch == 0x25bcU || Ch == 0x25c4U ||
-           Ch == 0x2191U || Ch == 0x2193U;
+    return text_unicode_to_cp437(Ch) != (UINT8)'?';
 }
 
 static void text_put_char(CHAR16 Ch)
@@ -4591,6 +4683,7 @@ EFI_STATUS efi_conout_string(VOID *This, CHAR16 *String)
     while (*String) {
         if (!efi_conout_char_supported(*String)) {
             st = EFI_WARN_UNKNOWN_GLYPH;
+            text_put_char('?');
             String++;
             continue;
         }
@@ -8876,6 +8969,11 @@ EFI_STATUS bs_exit_boot_services(EFI_HANDLE ImageHandle, UINTN MapKey)
     if (!mGraphicsClientActive) {
         graphics_select_text_mode();
     }
+    /*
+     * The loader owns RR/TR state by this point.  Windows setup, for example,
+     * installs RID=1 region-7 TR mappings before ExitBootServices(); resetting
+     * to the firmware SAL RR values here makes those TRs unreachable.
+     */
     mBootServicesExited = 1;
     return EFI_SUCCESS;
 }

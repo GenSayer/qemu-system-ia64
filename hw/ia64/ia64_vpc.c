@@ -590,7 +590,7 @@ static void ia64_vpc_reset(void *opaque)
     ia64_itc_write(env, 0);
 
     /* FPSR */
-    env->ar_fpsr = 0x0001003fULL;
+    env->ar_fpsr = IA64_FPSR_DEFAULT;
 
     /* FP status */
     set_float_rounding_mode(float_round_nearest_even, &env->fp_status);

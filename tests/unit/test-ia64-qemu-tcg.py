@@ -258,13 +258,15 @@ def fetchadd4_acq(r1, r3, inc, qp=0):
 
 
 def store_post_imm(x6a, r3, r2, imm, qp=0):
+    encoded = imm & 0x1ff
     return (
         op(5)
         | bitfield(x6a, 30, 6)
         | bitfield(r3, 20, 7)
         | bitfield(r2, 13, 7)
-        | bitfield(imm & 0x7f, 6, 7)
-        | bitfield((imm >> 7) & 1, 36, 1)
+        | bitfield(encoded & 0x7f, 6, 7)
+        | bitfield((encoded >> 7) & 1, 27, 1)
+        | bitfield((encoded >> 8) & 1, 36, 1)
         | bitfield(qp, 0, 6)
     )
 
@@ -296,14 +298,16 @@ def stf_spill_nta(r3, f2, qp=0):
 
 
 def stf_spill_nta_post(r3, f2, imm, qp=0):
+    encoded = imm & 0x1ff
     return (
         op(7)
         | bitfield(3, 28, 2)
         | bitfield(0x3B, 30, 6)
         | bitfield(r3, 20, 7)
         | bitfield(f2, 13, 7)
-        | bitfield(imm & 0x7F, 6, 7)
-        | bitfield((imm >> 7) & 1, 36, 1)
+        | bitfield(encoded & 0x7F, 6, 7)
+        | bitfield((encoded >> 7) & 1, 27, 1)
+        | bitfield((encoded >> 8) & 1, 36, 1)
         | bitfield(qp, 0, 6)
     )
 
@@ -1004,25 +1008,29 @@ def ldf_fill(f1, r3, qp=0):
 
 
 def ldf_fill_post(f1, r3, imm, qp=0):
+    encoded = imm & 0x1ff
     return (
         op(7)
         | bitfield(0x1B, 30, 6)
         | bitfield(r3, 20, 7)
-        | bitfield(imm & 0x7F, 13, 7)
-        | bitfield((imm >> 7) & 1, 36, 1)
+        | bitfield(encoded & 0x7F, 13, 7)
+        | bitfield((encoded >> 7) & 1, 27, 1)
+        | bitfield((encoded >> 8) & 1, 36, 1)
         | bitfield(f1, 6, 7)
         | bitfield(qp, 0, 6)
     )
 
 
 def ldf_fill_nta_post(f1, r3, imm, qp=0):
+    encoded = imm & 0x1ff
     return (
         op(7)
         | bitfield(3, 28, 2)
         | bitfield(0x1B, 30, 6)
         | bitfield(r3, 20, 7)
-        | bitfield(imm & 0x7F, 13, 7)
-        | bitfield((imm >> 7) & 1, 36, 1)
+        | bitfield(encoded & 0x7F, 13, 7)
+        | bitfield((encoded >> 7) & 1, 27, 1)
+        | bitfield((encoded >> 8) & 1, 36, 1)
         | bitfield(f1, 6, 7)
         | bitfield(qp, 0, 6)
     )
@@ -1158,13 +1166,12 @@ def fcvt_fxu(f1, f2, qp=0):
 
 def alloc(r1, sof, sol, sor, rrb, qp=0):
     return (
-        op(0xA)
-        | bitfield(1, 33, 1)
-        | bitfield(0, 34, 2)
-        | bitfield(rrb, 32, 4)
-        | bitfield(sor, 27, 5)
-        | bitfield(sol, 20, 7)
-        | bitfield(sof, 13, 7)
+        op(1)
+        | bitfield(6, 33, 3)
+        | bitfield(rrb & 1, 32, 1)
+        | bitfield(sor & 0x0f, 27, 4)
+        | bitfield(sol & 0x7f, 20, 7)
+        | bitfield(sof & 0x7f, 13, 7)
         | bitfield(r1, 6, 7)
         | bitfield(qp, 0, 6)
     )
@@ -1195,10 +1202,9 @@ def movl_mlx(r1, imm64, qp=0):
 
 def mov_from_cr(r1, cr_num, qp=0):
     return (
-        bitfield(0xb, 37, 4)
-        | bitfield(0, 33, 1)
-        | bitfield(0, 34, 2)
-        | bitfield(cr_num & 0x7f, 13, 7)
+        op(1)
+        | bitfield(0x24, 27, 6)
+        | bitfield(cr_num & 0x7f, 20, 7)
         | bitfield(r1 & 0x7f, 6, 7)
         | bitfield(qp & 0x3f, 0, 6)
     )
@@ -1206,11 +1212,10 @@ def mov_from_cr(r1, cr_num, qp=0):
 
 def mov_to_cr(r1, cr_num, qp=0):
     return (
-        bitfield(0xb, 37, 4)
-        | bitfield(0, 33, 1)
-        | bitfield(1, 34, 2)
-        | bitfield(cr_num & 0x7f, 13, 7)
-        | bitfield(r1 & 0x7f, 6, 7)
+        op(1)
+        | bitfield(0x2c, 27, 6)
+        | bitfield(cr_num & 0x7f, 20, 7)
+        | bitfield(r1 & 0x7f, 13, 7)
         | bitfield(qp & 0x3f, 0, 6)
     )
 
@@ -1902,8 +1907,8 @@ def test_mov_grbr_sptk_hint_updates_branch_register(qemu):
         qemu,
         "mov.sptk b=gr updates branch register",
         [
-            (0x10, *movl_mlx(56, 0x40)),
-            (0x20, 0x01, nop_m(), mov_grbr_sptk(0, 56), adds(1, 1, 0)),
+            (0x10, *movl_mlx(14, 0x40)),
+            (0x20, 0x01, nop_m(), mov_grbr_sptk(0, 14), adds(1, 1, 0)),
             (0x30, 0x11, nop_m(), nop_i(), br_ret(0)),
             (0x40, 0x11, nop_m(), adds(2, 2, 0), br_cond(0x40, 0x40)),
         ],
@@ -1949,17 +1954,19 @@ def test_mov_current_ip(qemu):
     )
 
 
-def test_mov_ip_system_encoding(qemu):
+def test_iip_control_register_roundtrip(qemu):
     require_registers(
         qemu,
-        "mov ip system encoding",
+        "iip control-register roundtrip",
         [
             (0x10, 0x00, nop_m(), adds(3, 0x70, 0), nop_i()),
+            # CR19 is IIP.  This exercises mov cr=gr/mov gr=cr; mov r=ip
+            # current-IP capture is covered by test_mov_current_ip above.
             (0x20, 0x00, mov_to_cr(3, 19), nop_i(), nop_i()),
             (0x30, 0x00, mov_from_cr(1, 19), nop_i(), nop_i()),
             (0x40, 0x11, nop_m(), nop_i(), br_cond(0x40, 0x40)),
         ],
-        {"ip": 0x40, "r1": 0x30},
+        {"ip": 0x40, "r1": 0x70},
     )
 
 
@@ -2127,7 +2134,7 @@ def test_float_spill_fill(qemu):
             (0x30, 0x09, setf_sig(2, 1), nop_m(), nop_i()),
             (0x40, 0x09, stf_spill(16, 2), stf8(18, 2), nop_i()),
             (0x50, 0x09, ldf_fill(3, 16), nop_m(), nop_i()),
-            (0x60, 0x00, nop_m(), getf_sig(2, 3), addl(17, 0x108, 0)),
+            (0x60, 0x09, nop_m(), getf_sig(2, 3), addl(17, 0x108, 0)),
             (0x70, 0x08, ld8(4, 17), ld8(5, 18), nop_i()),
             (0x80, 0x11, nop_m(), nop_i(), br_cond(0x80, 0x80)),
         ],
@@ -2161,7 +2168,7 @@ def test_ldf_fill_post_increment(qemu):
             (0x30, 0x09, setf_sig(2, 1), nop_m(), nop_i()),
             (0x40, 0x09, stf_spill(16, 2), nop_m(), nop_i()),
             (0x50, 0x09, ldf_fill_post(3, 16, 32), nop_m(), nop_i()),
-            (0x60, 0x00, nop_m(), getf_sig(2, 3), nop_i()),
+            (0x60, 0x09, nop_m(), getf_sig(2, 3), nop_i()),
             (0x70, 0x11, nop_m(), nop_i(), br_cond(0x70, 0x70)),
         ],
         {"ip": 0x70, "r2": 0x35, "r16": 0x120},
@@ -2178,7 +2185,7 @@ def test_ldf_fill_nta_post_increment(qemu):
             (0x30, 0x09, setf_sig(2, 1), nop_m(), nop_i()),
             (0x40, 0x09, stf_spill(16, 2), nop_m(), nop_i()),
             (0x50, 0x09, ldf_fill_nta_post(3, 16, 32), nop_m(), nop_i()),
-            (0x60, 0x00, nop_m(), getf_sig(2, 3), nop_i()),
+            (0x60, 0x09, nop_m(), getf_sig(2, 3), nop_i()),
             (0x70, 0x11, nop_m(), nop_i(), br_cond(0x70, 0x70)),
         ],
         {"ip": 0x70, "r2": 0x35, "r16": 0x120},
@@ -2218,11 +2225,11 @@ def test_xmpy_hu(qemu):
     )
 
 
-def test_setf_getf_sig(qemu):
+def test_setf_sig_xma_frcpa_predicate(qemu):
     tmpl, s0, s1, s2 = movl_mlx(1, 7)
     require_registers(
         qemu,
-        "setf/getf sig and xma.l",
+        "setf/getf sig, xma.l, and frcpa predicate",
         [
             (0x10, tmpl, s0, s1, s2),
             (0x20, 0x09, setf_sig(8, 1), nop_m(), nop_i()),
@@ -2233,12 +2240,16 @@ def test_setf_getf_sig(qemu):
             (0x70, 0x09, setf_sig(14, 0), nop_m(), nop_i()),
             (0x80, 0x0d, nop_m(), fnorm(12, 14), nop_i()),
             (0x90, 0x09, getf_sig(5, 12), nop_m(), nop_i()),
+            # r6 observes frcpa's predicate result: frcpa sets p6 for a
+            # usable approximation, then the predicated adds copies 6 to r6.
             (0xA0, 0x0d, nop_m(), frcpa(10, 6, 8, 9), nop_i()),
             (0xB0, 0x00, nop_m(), adds(6, 6, 0, qp=6), nop_i()),
+            # fcvt.fxu is retained as no-fault coverage here. Its setf.sig
+            # payload behavior is asserted directly in test-ia64-qemu-tcg-2.
             (0xC0, 0x0d, nop_m(), fcvt_fxu(11, 10), nop_i()),
             (0xD0, 0x11, nop_m(), nop_i(), br_cond(0xD0, 0xD0)),
         ],
-        {"ip": 0xD0, "r4": 22, "r5": 0, "r6": 0},
+        {"ip": 0xD0, "r4": 22, "r5": 0, "r6": 6},
     )
 
 
@@ -2505,9 +2516,39 @@ def test_itv_mask_blocks_pending_timer(qemu):
     )
 
 
+def test_aliases(name, fn):
+    aliases = {name, fn.__name__}
+    if fn.__name__.startswith("test_"):
+        aliases.add(fn.__name__[5:])
+    return aliases
+
+
+def select_tests(tests, selectors):
+    if not selectors:
+        return tests, []
+
+    by_alias = {}
+    for test in tests:
+        name, fn = test
+        for alias in test_aliases(name, fn):
+            by_alias[alias] = test
+
+    selected = []
+    missing = []
+    for selector in selectors:
+        test = by_alias.get(selector)
+        if test is None:
+            missing.append(selector)
+        else:
+            selected.append(test)
+
+    return selected, missing
+
+
 def main():
-    if len(sys.argv) != 2:
-        print("Bail out! usage: test-ia64-qemu-tcg.py QEMU_SYSTEM_IA64")
+    if len(sys.argv) < 2:
+        print("Bail out! usage: test-ia64-qemu-tcg.py "
+              "QEMU_SYSTEM_IA64 [TEST_NAME ...]")
         return 1
 
     qemu = sys.argv[1]
@@ -2549,7 +2590,7 @@ def main():
         ("M-unit opcode 0 x3=7 remains chk.a", test_m_unit_x3_7_decodes_chk_a_fp),
         ("indirect branch", test_indirect_branch),
         ("mov current ip", test_mov_current_ip),
-        ("mov ip system encoding", test_mov_ip_system_encoding),
+        ("iip control-register roundtrip", test_iip_control_register_roundtrip),
         ("br.many", test_br_many),
         ("brp.loop.imp", test_brp_loop_imp),
         ("brp.sptk windows", test_brp_sptk_windows),
@@ -2565,7 +2606,8 @@ def main():
         ("ldf.fill.nta post-increment", test_ldf_fill_nta_post_increment),
         ("stf.spill.nta post-increment", test_stf_spill_nta_post_increment),
         ("xmpy.hu", test_xmpy_hu),
-        ("setf/getf sig", test_setf_getf_sig),
+        ("setf/getf sig, xma.l, and frcpa predicate",
+         test_setf_sig_xma_frcpa_predicate),
         ("windows fp decode", test_windows_fp_decode),
         ("sync.m decode", test_sync_m_decode),
         ("rse maintenance decode", test_rse_maintenance_decode),
@@ -2581,6 +2623,15 @@ def main():
         ("sapic IVR accepts pending timer", test_sapic_ivr_accepts_pending_timer),
         ("ITV mask blocks pending timer", test_itv_mask_blocks_pending_timer),
     ]
+
+    all_tests = tests
+    tests, missing = select_tests(all_tests, sys.argv[2:])
+    if missing:
+        print(f"Bail out! unknown test name(s): {', '.join(missing)}")
+        print("# known tests:")
+        for name, fn in all_tests:
+            print(f"#   {name} ({fn.__name__})")
+        return 1
 
     print("TAP version 13")
     print(f"1..{len(tests)}")

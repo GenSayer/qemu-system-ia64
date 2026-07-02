@@ -88,6 +88,7 @@ SAL_REVISION = 0x0340
 SAL_HANDOFF_PSR = (1 << 3) | (1 << 13) | (1 << 44)
 SAL_DCR_LC = 1 << 2
 SAL_IVT_BASE = 0x10000
+SAL_PTA_DISABLED_VALUE = 15 << 2
 SAL_TR_PAGE_SHIFT = 22
 SAL_TR_ITIR = SAL_TR_PAGE_SHIFT << 2
 SAL_RR_FIRST_RID = 0x1000
@@ -696,7 +697,10 @@ def test_csv_rows_are_bound_to_execution(root, qemu1, qemu2):
         "bundle": {"exception_reserved_template", "mlx_long_nop_x_imm_decode",
                    "exception_break_x"},
         "branch_or_hint": {"arithmetic_and_branch", "br_many",
-                           "brl_call_mlx_decode", "br_call_indirect_completers_decode",
+                           "brl_call_mlx_decode",
+                           "brl_call_mlx_no_stop_decode",
+                           "brl_cond_mlx_no_stop_decode",
+                           "br_call_indirect_completers_decode",
                            "br_ctop_rotating_pipeline"},
         "integer": {"alu_immediate_ops", "register_shifts", "deposit_immediate",
                     "extract_immediate", "dep_decode", "popcnt_decode",
@@ -717,6 +721,7 @@ def test_csv_rows_are_bound_to_execution(root, qemu1, qemu2):
         "system_or_translation": {"pal_version", "itc_d_preserves_24bit_key",
                                   "ptc_l_m_unit_decode",
                                   "ptr_d_purge_completes_on_srlz_d",
+                                  "future_itm_rearm_clears_stale_timer_irr",
                                   "rfi_restores_interrupted_bsp_after_cover",
                                   "pmc_pmd_registers_are_independent"},
     }
@@ -1484,7 +1489,7 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
             u64(probe, 8) != 0 or
             u64(probe, 16) != SAL_DCR_LC or
             u64(probe, 24) != SAL_IVT_BASE or
-            u64(probe, 32) != 0 or
+            u64(probe, 32) != SAL_PTA_DISABLED_VALUE or
             sp < boot_stack_base + IA64_EFI_MIN_STACK_BYTES or
             sp >= boot_stack_top):
         raise RuntimeError("SAL loader PSR/RSC/CR/stack handoff mismatch")
@@ -1540,7 +1545,7 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     for token in [
             "CR.DCR: 0x0000000000000004",
             "IVA: 0x0000000000010000",
-            "PTA: 0x0000000000000000",
+            "PTA: 0x000000000000003c",
             "RR0: 0x0000000000100030",
             "RR5: 0x0000000000100530",
             "RR6: 0x0000000000100630",

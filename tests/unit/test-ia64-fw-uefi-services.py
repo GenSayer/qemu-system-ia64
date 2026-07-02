@@ -305,8 +305,22 @@ def main():
 
     print("ok 2 - firmware entry ABI and GP fixup")
 
+    exit_boot_services_block = re.search(
+        r"<bs_exit_boot_services>:(?:.|\n)*?(?=\n[0-9a-fA-F]+ <)",
+        text,
+    )
+    call_efi_entry_block = re.search(
+        r"<fw_call_efi_entry>:(?:.|\n)*?(?=\n[0-9a-fA-F]+ <)",
+        text,
+    )
     handoff_checks = [
         ("bs_exit" in objdump.stdout, "missing bs_exit symbol"),
+        (exit_boot_services_block is not None,
+         "missing bs_exit_boot_services disassembly"),
+        (exit_boot_services_block is not None and
+         "fw_prepare_sal_handoff_registers" not in
+         exit_boot_services_block.group(0),
+         "ExitBootServices must preserve OS-loader RR/TR state"),
         ("__ia64_save_stack_nonlocal" in objdump.stdout,
          "missing IA-64 nonlocal stack save helper"),
         ("__ia64_nonlocal_goto" in objdump.stdout,
@@ -316,9 +330,16 @@ def main():
          "st8 [r14]=r34" in text and
          "mov r12=r41" in text,
          "EFI image entry P64 stack arguments are not prepared"),
+        (call_efi_entry_block is not None,
+         "missing fw_call_efi_entry disassembly"),
+        (call_efi_entry_block is not None and
+         "mov.m ar.rsc=r0" in call_efi_entry_block.group(0) and
+         "mov.m ar.rsc=r43" in call_efi_entry_block.group(0),
+         "EFI image entry must receive enforced-lazy RSC and restore its caller"),
         ("mov cr.dcr=r14" in text and
          "mov cr.iva=r14" in text and
-         "mov cr.pta=r0" in text and
+         "movl r14=0x3c" in text and
+         "mov cr.pta=r14" in text and
          "mov rr[r14]=r15" in text and
          "mov pkr[r14]=r0" in text and
          "itr.i itr[r14]=r16" in text and
