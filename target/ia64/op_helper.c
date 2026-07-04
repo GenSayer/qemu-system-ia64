@@ -1288,19 +1288,7 @@ void helper_raise_exception(CPUIA64State *env, uint32_t exception,
                             uint32_t fault_slot)
 {
     CPUState *cs = env_cpu(env);
-    static unsigned syscall_logs;
 
-    /* Temporary fork/exec diagnostic, bounded and opt-in. */
-    if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-        exception == IA64_EXCP_BREAK && fault_imm == 0x100000 &&
-        ia64_psr_cpl(env->psr) == 3 && syscall_logs++ < 20000) {
-        qemu_log("ia64 syscall ip=%016" PRIx64 " sp=%016" PRIx64
-                 " bsp=%016" PRIx64 " nr=%" PRIu64
-                 " r32=%016" PRIx64 " r33=%016" PRIx64
-                 " r34=%016" PRIx64 " r35=%016" PRIx64 "\n",
-                 fault_ip, env->gr[12], env->ar_bsp, env->gr[15],
-                 env->gr[32], env->gr[33], env->gr[34], env->gr[35]);
-    }
     if (exception == IA64_EXCP_RESERVED_REG_FIELD) {
         qemu_log_mask(CPU_LOG_INT,
                       "ia64 reserved-field exception ip=%016" PRIx64
@@ -1602,20 +1590,6 @@ void helper_epc(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
     uint8_t current_cpl = ia64_psr_cpl(env->psr);
     uint8_t pfs_ppl = (env->ar_pfs & IA64_PFS_PPL_MASK) >> IA64_PFS_PPL_SHIFT;
     uint8_t new_cpl = current_cpl;
-    static unsigned epc_logs;
-
-    /* Temporary fork/exec diagnostic, bounded and opt-in. */
-    if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-        current_cpl == 3 && epc_logs++ < 20000) {
-        qemu_log("ia64 epc ip=%016" PRIx64 " sp=%016" PRIx64
-                 " bsp=%016" PRIx64 " nr=%" PRIu64
-                 " r8=%016" PRIx64 " r10=%016" PRIx64
-                 " r32=%016" PRIx64 " r33=%016" PRIx64
-                 " r34=%016" PRIx64 " r35=%016" PRIx64 "\n",
-                 fault_ip, env->gr[12], env->ar_bsp, env->gr[15],
-                 env->gr[8], env->gr[10], env->gr[32], env->gr[33],
-                 env->gr[34], env->gr[35]);
-    }
 
     if (pfs_ppl < current_cpl) {
         helper_raise_exception(env, IA64_EXCP_ILLEGAL, fault_ip, raw,
@@ -2054,6 +2028,20 @@ void helper_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
     case 1:
         env->cr[1] = value;
         ia64_itm_update(env, value);
+        break;
+    case 2:
+        if (ia64_firmware_owns_iva(env->cr[2]) !=
+            ia64_firmware_owns_iva(value)) {
+            /*
+             * The firmware identity window is an emulator boot facility,
+             * not an architectural translation.  Drop cached mappings when
+             * IVA ownership passes between firmware and the operating
+             * system.
+             */
+            tlb_flush(env_cpu(env));
+            queue_tb_flush(env_cpu(env));
+        }
+        env->cr[2] = value;
         break;
     case 8:
         env->cr[8] = value;
@@ -3307,7 +3295,7 @@ static bool ia64_data_address_to_mapped_phys_attr(CPUIA64State *env,
     uint32_t rid;
     const IA64TlbEntry *entry;
 
-    if (ia64_firmware_identity_pa(va, pa)) {
+    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, va, pa)) {
         if (spec) {
             *spec = IA64_MEM_SPECULATIVE;
         }
@@ -6141,7 +6129,7 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
         return 0;
     }
 
-    if (ia64_firmware_identity_pa(va, &pa)) {
+    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, va, &pa)) {
         return 1;
     }
 
@@ -6224,7 +6212,7 @@ static IA64Exception ia64_data_reference_exception(CPUIA64State *env,
     bool found = false;
 
     if (!(env->psr & IA64_PSR_DT) ||
-        ia64_firmware_identity_pa(va, &pa) ||
+        ia64_firmware_identity_pa(env->cr_iva, env->ip, va, &pa) ||
         ia64_sal_boot_virtual_pa(env, va, &pa)) {
         return IA64_EXCP_NONE;
     }
@@ -6832,7 +6820,8 @@ static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
     uint8_t perm;
     uint32_t rid;
 
-    if (ia64_firmware_identity_pa(entry_va, entry_pa)) {
+    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, entry_va,
+                                  entry_pa)) {
         return IA64_VHPT_ENTRY_TRANSLATED;
     }
 
@@ -7038,6 +7027,16 @@ static void ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
                   " pte=0x%016" PRIx64 "\n",
                   is_ifetch ? 'i' : 'd', slot, base_va, rid, base_pa,
                   page_size, perm, key, pte);
+    /*
+     * The QEMU softmmu TLB is indexed by guest virtual address and mmu_idx;
+     * it does not carry IA-64 region IDs.  A VHPT walk can install a TC entry
+     * for a different RID than a cached same-VA host entry, so discard the
+     * host translation range covered by the installed TC.
+     */
+    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    if (is_ifetch) {
+        ia64_defer_itlb_tb_flush(env);
+    }
 }
 
 /* ---- VHPT walker ---- */
@@ -7668,8 +7667,6 @@ void helper_invalidate_alat_store(CPUIA64State *env, uint64_t addr,
 {
     ia64_invalidate_alat_store(env, addr, size);
 }
-
-
 
 uint64_t helper_cloop_zero_st1(CPUIA64State *env, uint32_t base_reg,
                                uint32_t mmu_idx, uint32_t max_stores)

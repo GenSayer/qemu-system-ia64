@@ -74,7 +74,7 @@ HCDP_DEVICE_PRIMARY_CONSOLE = 1
 HCDP_PCI_TRANSLATE_IOPORT = 1 << 1
 VGA_VENDOR_ID = 0x1234
 VGA_DEVICE_ID = 0x1111
-EFI_RUNTIME_SERVICES_DATA = 6
+EFI_RUNTIME_SERVICES_CODE = 5
 EFI_ACPI_RECLAIM_MEMORY = 9
 EFI_MEMORY_MAPPED_IO = 11
 EFI_MEMORY_MAPPED_IO_PORT_SPACE = 12
@@ -951,26 +951,26 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         return find_efi_descriptor_in(memory_map, name, memory_type, addr,
                                       size, required_attr)
 
-    runtime_data_attr = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME
+    runtime_image_attr = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME
     find_efi_descriptor(
-        "EFI system table", EFI_RUNTIME_SERVICES_DATA,
+        "EFI system table", EFI_RUNTIME_SERVICES_CODE,
         symbols["mSystemTable"][0], symbols["mSystemTable"][1],
-        runtime_data_attr,
+        runtime_image_attr,
     )
     find_efi_descriptor(
-        "EFI configuration table", EFI_RUNTIME_SERVICES_DATA,
+        "EFI configuration table", EFI_RUNTIME_SERVICES_CODE,
         symbols["mConfigTables"][0], symbols["mConfigTables"][1],
-        runtime_data_attr,
+        runtime_image_attr,
     )
     find_efi_descriptor(
-        "SMBIOS entry point", EFI_RUNTIME_SERVICES_DATA,
+        "SMBIOS entry point", EFI_RUNTIME_SERVICES_CODE,
         symbols["mSmbiosEntryPoint"][0], symbols["mSmbiosEntryPoint"][1],
-        runtime_data_attr,
+        runtime_image_attr,
     )
     find_efi_descriptor(
-        "SMBIOS structure table", EFI_RUNTIME_SERVICES_DATA,
+        "SMBIOS structure table", EFI_RUNTIME_SERVICES_CODE,
         symbols["mSmbiosTable"][0], symbols["mSmbiosTable"][1],
-        runtime_data_attr,
+        runtime_image_attr,
     )
     find_efi_descriptor(
         "PCI MMIO window", EFI_MEMORY_MAPPED_IO,

@@ -135,6 +135,7 @@ IA64_IMPL_PA_BITS = 50
 IA64_IMPL_VA_MSB = 60
 IA64_IMPL_VA_BITS = IA64_IMPL_VA_MSB + 1 + IA64_REGION_BITS
 IA64_PAL_IMPL_VA_MSB = IA64_IMPL_VA_MSB
+LONG_VHPT_RID1_TAG = 1 << (IA64_IMPL_VA_MSB + 1 - 12)
 LONG_VHPT_RID2_TAG = 2 << (IA64_IMPL_VA_MSB + 1 - 12)
 LONG_VHPT_RID2_TAG_BYTE_SWAPPED = int.from_bytes(
     LONG_VHPT_RID2_TAG.to_bytes(8, "little"), "big")
@@ -12388,6 +12389,46 @@ test_itc_d_clear_dirty_raises_dirty_bit = require_registers(
         "r31": IA64_ISR_W,
     }, entry=0x10)
 
+test_itc_d_clean_page_read_fill_store_raises_dirty_bit = require_registers(
+    "itc_d_clean_page_read_fill_store_raises_dirty_bit", [
+        (0x10, *movl_mlx(2, 0x9000)),
+        (0x20, *movl_mlx(18, 0x0010000004009661 & ~PTE_DIRTY)),
+        (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x80, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0x80, 0x90)),
+        (0x90, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, ld8(28, 2), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(29, 0x1122334455667788)),
+        (0xc0, 0x00, st8(2, 29), nop_i(),
+         nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+        (IA64_DATA_DIRTY_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_DATA_DIRTY_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_DATA_DIRTY_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DATA_DIRTY_VECTOR + 0x20,
+                 IA64_DATA_DIRTY_VECTOR + 0x20)),
+        ITC_DATA_BUNDLE,
+    ], {
+        "ip": IA64_DATA_DIRTY_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r28": ITC_DATA_LOW,
+        "r30": 0x9000,
+        "r31": IA64_ISR_W,
+    }, entry=0x10)
+
 test_itc_d_clear_accessed_store_precedes_dirty_bit = require_registers(
     "itc_d_clear_accessed_store_precedes_dirty_bit", [
         (0x10, *movl_mlx(2, 0x9000)),
@@ -15281,6 +15322,68 @@ test_long_vhpt_walk_uses_dcr_byte_order = require_registers(
         "r30": 2,
     }, entry=0x10)
 
+LONG_VHPT_RID1_DATA_BUNDLE = (0x4000430, 0x00, 0x1111222233334444, 0, 0)
+LONG_VHPT_RID2_DATA_BUNDLE = (0x4010430, 0x00, 0x5555666677778888, 0, 0)
+LONG_VHPT_RID1_DATA_LOW, _ = bundle_words(*LONG_VHPT_RID1_DATA_BUNDLE[1:])
+LONG_VHPT_RID2_DATA_LOW, _ = bundle_words(*LONG_VHPT_RID2_DATA_BUNDLE[1:])
+
+test_long_vhpt_same_va_different_rids_refills = require_registers(
+    "long_vhpt_same_va_different_rids_refills", [
+        (0x10, *movl_mlx(16, 0x10013d)),
+        (0x20, *movl_mlx(17, 0x131)),
+        (0x30, *movl_mlx(18, 0x231)),
+        (0x40, *movl_mlx(19, 0x0010000004000661)),
+        (0x50, *movl_mlx(20, 0x0010000004010661)),
+        (0x60, *movl_mlx(21, 0x230)),
+        (0x70, *movl_mlx(22, LONG_VHPT_RID1_TAG)),
+        (0x80, *movl_mlx(23, LONG_VHPT_RID2_TAG)),
+        (0x90, *movl_mlx(24, 0x100020)),
+        (0xa0, *movl_mlx(25, 0x100040)),
+        (0xb0, 0x00, st8(24, 19), adds(26, 8, 24),
+         nop_i()),
+        (0xc0, 0x00, st8(26, 21), adds(27, 16, 24),
+         nop_i()),
+        (0xd0, 0x00, st8(27, 22), nop_i(),
+         nop_i()),
+        (0xe0, 0x00, st8(25, 20), adds(26, 8, 25),
+         nop_i()),
+        (0xf0, 0x00, st8(26, 21), adds(27, 16, 25),
+         nop_i()),
+        (0x100, 0x00, st8(27, 23), nop_i(),
+         nop_i()),
+        (0x110, 0x00, mov_m_gr_cr(16, 8), nop_i(),
+         nop_i()),
+        (0x120, 0x00, mov_rr_write(17, 0), nop_i(),
+         nop_i()),
+        (0x130, *movl_mlx(2, 0x430)),
+        (0x140, 0x00, ssm(1 << 17), nop_i(),
+         nop_i()),
+        (0x150, 0x00, ld8(28, 2), nop_i(),
+         nop_i()),
+        (0x160, 0x00, mov_rr_write(18, 0), nop_i(),
+         nop_i()),
+        (0x170, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x180, 0x00, ld8(29, 2), nop_i(),
+         nop_i()),
+        (0x190, 0x00, mov_rr_write(17, 0), nop_i(),
+         nop_i()),
+        (0x1a0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x1b0, 0x00, ld8(30, 2), nop_i(),
+         nop_i()),
+        (0x1c0, 0x10, nop_m(), nop_i(),
+         br_cond(0x1c0, 0x1c0)),
+        LONG_VHPT_RID1_DATA_BUNDLE,
+        LONG_VHPT_RID2_DATA_BUNDLE,
+    ], {
+        "ip": 0x1c0,
+        "exception": IA64_EXCP_NONE,
+        "r28": LONG_VHPT_RID1_DATA_LOW,
+        "r29": LONG_VHPT_RID2_DATA_LOW,
+        "r30": LONG_VHPT_RID1_DATA_LOW,
+    }, entry=0x10)
+
 test_long_vhpt_not_present_ignores_software_fields = require_registers(
     "long_vhpt_not_present_ignores_software_fields", [
         (0x10, *movl_mlx(16, 0x10013d)),
@@ -15968,9 +16071,59 @@ test_region6_processor_interrupt_block_xtp_store = require_registers(
 test_firmware_identity_under_translation = require_registers(
     "firmware_identity_under_translation", [
         (0x10, *movl_mlx(2, 0x130000)),
-        (0x20, *movl_mlx(19, (1 << 17) | (1 << 36))),
-        (0x30, 0x10, mov_gr_psr_full(19), nop_i(),
-         br_cond(0x30, 0x100000)),
+        (0x20, *movl_mlx(3, IA64_FIRMWARE_IVT_BASE)),
+        (0x30, 0x00, mov_m_gr_cr(3, 2), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(19, (1 << 17) | (1 << 36))),
+        (0x50, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0x50, 0x100000)),
+        (0x100000, 0x00, ld8(31, 2), nop_i(),
+         nop_i()),
+        (0x100010, 0x10, nop_m(), nop_i(),
+         br_cond(0x100010, 0x100010)),
+        (0x130000, 0x00, 0x1122334455667788, 0,
+         0),
+    ], {
+        "ip": 0x100010,
+        "exception": IA64_EXCP_NONE,
+        "r31": FW_IDENTITY_DATA,
+    }, entry=0x10)
+
+test_firmware_identity_ends_after_iva_handoff = require_registers(
+    "firmware_identity_ends_after_iva_handoff", [
+        *dtr_setup_bundles(0x10, 0x130000, 0x4130000),
+        (0x70, *movl_mlx(3, 0x130000)),
+        (0x80, 0x00, ssm(1 << 17), nop_i(),
+         nop_i()),
+        (0x90, 0x08, ld8(30, 3), nop_i(),
+         nop_i()),
+        (0xa0, *movl_mlx(2, 0x4000000)),
+        (0xb0, 0x00, mov_m_gr_cr(2, 2), nop_i(),
+         nop_i()),
+        (0xc0, 0x08, ld8(31, 3), nop_i(),
+         nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+        (0x130000, 0x00, 0x1122334455667788, 0,
+         0),
+        (0x4130000, 0x00, 0x8877665544332211, 0,
+         0),
+    ], {
+        "ip": 0xd0,
+        "exception": IA64_EXCP_NONE,
+        "r30": bundle_words(0x00, 0x1122334455667788, 0, 0)[0],
+        "r31": bundle_words(0x00, 0x8877665544332211, 0, 0)[0],
+    }, entry=0x10)
+
+test_firmware_runtime_identity_after_iva_handoff = require_registers(
+    "firmware_runtime_identity_after_iva_handoff", [
+        (0x10, *movl_mlx(2, 0x130000)),
+        (0x20, *movl_mlx(3, 0x4000000)),
+        (0x30, 0x00, mov_m_gr_cr(3, 2), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(19, (1 << 17) | (1 << 36))),
+        (0x50, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0x50, 0x100000)),
         (0x100000, 0x00, ld8(31, 2), nop_i(),
          nop_i()),
         (0x100010, 0x10, nop_m(), nop_i(),
@@ -16093,10 +16246,15 @@ def test_firmware_debug_tables(qemu):
 
 def test_firmware_load_image_selftests(qemu):
     output = run_firmware_serial(qemu)
-    expected = "Loaded Image Options: type and ownership contracts verified"
+    expected = [
+        "Loaded Image Options: type and ownership contracts verified",
+        "SAL State Info:       no-log paths verified",
+    ]
 
-    if expected not in output:
-        raise RuntimeError(f"missing firmware load-image selftest line:\n{output}")
+    missing = [line for line in expected if line not in output]
+    if missing:
+        raise RuntimeError(
+            f"missing firmware selftest lines {missing!r}:\n{output}")
 
 
 test_rfi_restores_translation_bits = require_registers(
@@ -19407,6 +19565,8 @@ TEST_NAMES = {
         test_itc_d_clear_accessed_raises_data_access_bit,
     "itc_d_clear_dirty_raises_dirty_bit":
         test_itc_d_clear_dirty_raises_dirty_bit,
+    "itc_d_clean_page_read_fill_store_raises_dirty_bit":
+        test_itc_d_clean_page_read_fill_store_raises_dirty_bit,
     "itc_d_clear_accessed_store_precedes_dirty_bit":
         test_itc_d_clear_accessed_store_precedes_dirty_bit,
     "itc_d_psr_da_suppresses_one_data_access_bit":
@@ -19565,6 +19725,8 @@ TEST_NAMES = {
         test_long_vhpt_walk_uses_standard_entry_layout,
     "long_vhpt_walk_uses_dcr_byte_order":
         test_long_vhpt_walk_uses_dcr_byte_order,
+    "long_vhpt_same_va_different_rids_refills":
+        test_long_vhpt_same_va_different_rids_refills,
     "long_vhpt_not_present_ignores_software_fields":
         test_long_vhpt_not_present_ignores_software_fields,
     "long_vhpt_unsupported_page_size_aborts_to_dtlb_miss":
@@ -19615,6 +19777,10 @@ TEST_NAMES = {
     "firmware_debug_tables": test_firmware_debug_tables,
     "firmware_load_image_selftests": test_firmware_load_image_selftests,
     "firmware_identity_under_translation": test_firmware_identity_under_translation,
+    "firmware_identity_ends_after_iva_handoff":
+        test_firmware_identity_ends_after_iva_handoff,
+    "firmware_runtime_identity_after_iva_handoff":
+        test_firmware_runtime_identity_after_iva_handoff,
     "rfi_restores_translation_bits": test_rfi_restores_translation_bits,
     "rfi_resumes_at_ipsr_ri_slot": test_rfi_resumes_at_ipsr_ri_slot,
     "mov_from_psr_does_not_copy_execution_slot_to_rfi":

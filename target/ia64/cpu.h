@@ -113,9 +113,21 @@ static inline uint32_t ia64_rr_rid(uint64_t rr)
     return (rr & IA64_RR_RID_MASK) >> IA64_RR_RID_SHIFT;
 }
 
-static inline bool ia64_firmware_identity_pa(uint64_t va, uint64_t *pa)
+static inline bool ia64_firmware_owns_iva(uint64_t iva)
 {
-    if (va >= IA64_FW_IDENTITY_BASE &&
+    return iva == 0 || iva == IA64_FIRMWARE_IVT_BASE;
+}
+
+static inline bool ia64_firmware_identity_pa(uint64_t iva, uint64_t ip,
+                                             uint64_t va, uint64_t *pa)
+{
+    bool firmware_context =
+        ia64_firmware_owns_iva(iva) ||
+        (ip >= IA64_FW_IDENTITY_BASE &&
+         ip < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE);
+
+    if (firmware_context &&
+        va >= IA64_FW_IDENTITY_BASE &&
         va < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE) {
         *pa = va;
         return true;

@@ -2538,6 +2538,7 @@ typedef struct {
 #define SAL_STATE_TYPE_CMC          2
 #define SAL_STATE_TYPE_CPE          3
 #define SAL_STATE_TYPE_DECONFIG     4
+#define SAL_ERROR_RECORD_HEADER_SIZE 40
 
 typedef struct {
     UINT64 HandlerAddr1;
@@ -2703,7 +2704,13 @@ sal_get_state_info_size(UINT64 Type, UINT64 Reserved1, UINT64 Reserved2,
         return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
     }
 
-    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+    /*
+     * Report at least the architected error-record header.  A successful
+     * zero-sized response leads operating systems to allocate an invalid
+     * record buffer even when no state information is currently pending.
+     */
+    return sal_return(SAL_STATUS_SUCCESS, SAL_ERROR_RECORD_HEADER_SIZE,
+                      0, 0);
 }
 
 static SAL_RETURN_VALUE __attribute__((noinline))
@@ -2759,7 +2766,7 @@ static BOOLEAN __attribute__((noinline)) sal_state_info_selftest(void)
                                               0, 0, 0, 0, 0, 1);
 
     return size_valid.Status == SAL_STATUS_SUCCESS &&
-           size_valid.Value0 == 0 &&
+           size_valid.Value0 == SAL_ERROR_RECORD_HEADER_SIZE &&
            size_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
            info_empty.Status == SAL_STATUS_NO_INFORMATION &&
            info_empty.Value0 == 0 &&
@@ -9702,7 +9709,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     static EFI_PAGE_ALLOCATION_RECORD saved_pages[PAGE_ALLOCATION_MAX];
     static EFI_POOL_ALLOCATION_RECORD saved_pool[POOL_ALLOCATION_MAX];
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
-    UINTN runtime_data_start = (UINTN)&__runtime_data_start;
+    UINTN runtime_code_start = (UINTN)&__runtime_code_start;
     EFI_MEMORY_DESCRIPTOR before;
     EFI_MEMORY_DESCRIPTOR preserved;
     EFI_MEMORY_DESCRIPTOR legacy;
@@ -9830,8 +9837,8 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        EFI_MEMORY_WB) ||
         !efi_memory_map_is_sorted() ||
         !efi_memory_map_has_ia64_descriptor_alignment() ||
-        !efi_memory_map_covers_range(EfiRuntimeServicesData,
-                                     runtime_data_start, firmware_end,
+        !efi_memory_map_covers_range(EfiRuntimeServicesCode,
+                                     runtime_code_start, firmware_end,
                                      EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
         efi_memory_descriptors_can_merge(&before, &preserved) ||
         efi_memory_descriptors_can_merge(&preserved, &legacy) ||
@@ -10042,7 +10049,6 @@ static void efi_init_memory_map(void)
 {
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
     UINTN runtime_code_start = (UINTN)&__runtime_code_start;
-    UINTN runtime_data_start = (UINTN)&__runtime_data_start;
     UINTN pal_start = (UINTN)pal_proc_entry & ~0xFFFULL;
     UINTN pal_end = pal_start + 0x1000U;
     UINT64 ram_size = fw_guest_ram_size();
@@ -10088,23 +10094,21 @@ static void efi_init_memory_map(void)
                              EFI_MEMORY_WB);
         efi_add_memory_range(&index, EfiBootServicesCode, pal_end,
                              runtime_code_start, EFI_MEMORY_WB);
+        /*
+         * Keep the linked runtime image in one EFI descriptor.  IA-64 SAL
+         * enters with a GP supplied by the SAL system table, and the linked
+         * code uses GP-relative references into rodata/data.  A loader may
+         * assign unrelated virtual bases to separate runtime descriptors,
+         * which would break those references.
+         */
         efi_add_memory_range(&index, EfiRuntimeServicesCode,
-                             runtime_code_start,
-                             runtime_data_start,
+                             runtime_code_start, firmware_end,
                              efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
-        efi_add_memory_range(&index, EfiRuntimeServicesData,
-                             runtime_data_start, firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesData,
                                                   EFI_MEMORY_WB));
     } else {
         efi_add_memory_range(&index, EfiRuntimeServicesCode, 0x00100000,
-                             runtime_data_start,
+                             firmware_end,
                              efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
-        efi_add_memory_range(&index, EfiRuntimeServicesData,
-                             runtime_data_start, firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesData,
                                                   EFI_MEMORY_WB));
     }
 

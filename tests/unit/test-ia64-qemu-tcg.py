@@ -2516,7 +2516,7 @@ def test_itv_mask_blocks_pending_timer(qemu):
     )
 
 
-def test_aliases(name, fn):
+def aliases_for_test(name, fn):
     aliases = {name, fn.__name__}
     if fn.__name__.startswith("test_"):
         aliases.add(fn.__name__[5:])
@@ -2530,7 +2530,7 @@ def select_tests(tests, selectors):
     by_alias = {}
     for test in tests:
         name, fn = test
-        for alias in test_aliases(name, fn):
+        for alias in aliases_for_test(name, fn):
             by_alias[alias] = test
 
     selected = []

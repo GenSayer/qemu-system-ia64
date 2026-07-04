@@ -806,7 +806,7 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
         return address == entry_pa;
     }
 
-    if (ia64_firmware_identity_pa(address, &pa) ||
+    if (ia64_firmware_identity_pa(env->cr_iva, address, address, &pa) ||
         ia64_sal_boot_virtual_pa(env, address, &pa)) {
         return pa == entry_pa;
     }
@@ -8436,8 +8436,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_check_alignment(insn, addr, ia64_memop_size(mop),
                                  false, true);
         ia64_gen_memory_release(insn);
-        /* RSE debug scaffolding disabled: per-store watchpoint hook removed to
-         * avoid a helper call on every store.  See helper_debug_store_watch. */
         tcg_gen_qemu_st_i64(value, addr, ctx->mmu_idx, mop);
         ia64_gen_invalidate_alat_store(addr, ia64_memop_size(mop));
         if (insn->opcode == IA64_OP_ST8SPILL) {
@@ -10769,6 +10767,32 @@ static int ia64_tlb_perm_to_prot(uint8_t perm)
     return prot;
 }
 
+static int ia64_tlb_prot_for_pte(CPUIA64State *env, uint64_t pte,
+                                 uint8_t perm, bool is_ifetch)
+{
+    int prot = ia64_tlb_perm_to_prot(perm);
+
+    /*
+     * QEMU's software TLB may satisfy later accesses without re-entering
+     * tlb_fill.  Do not cache write permission for a clean IA-64 PTE: a
+     * later store must take Data Dirty so the OS can update the PTE or break
+     * copy-on-write sharing.
+     */
+    if (!is_ifetch && !(env->psr & IA64_PSR_DA)) {
+        if (!(pte & IA64_PTE_ACCESSED)) {
+            prot &= ~(PAGE_READ | PAGE_WRITE);
+        }
+        if (!(pte & IA64_PTE_DIRTY)) {
+            prot &= ~PAGE_WRITE;
+        }
+    } else if (is_ifetch && !(env->psr & IA64_PSR_IA) &&
+               !(pte & IA64_PTE_ACCESSED)) {
+        prot &= ~PAGE_EXEC;
+    }
+
+    return prot;
+}
+
 static void ia64_tlb_set_entry_page(CPUState *cs, vaddr addr, hwaddr pa,
                                     uint64_t page_size, int prot,
                                     int mmu_idx)
@@ -10791,7 +10815,7 @@ static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
         return addr;
     }
 
-    if (ia64_firmware_identity_pa(addr, &pa)) {
+    if (ia64_firmware_identity_pa(cpu->env.cr_iva, addr, addr, &pa)) {
         return pa & TARGET_PAGE_MASK;
     }
 
@@ -10857,7 +10881,9 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         goto raise_exception;
     }
 
-    if (ia64_firmware_identity_pa(addr, &pa)) {
+    if (ia64_firmware_identity_pa(cpu->env.cr_iva,
+                                  is_ifetch ? addr : cpu->env.ip,
+                                  addr, &pa)) {
         vaddr page = addr & TARGET_PAGE_MASK;
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
@@ -10908,7 +10934,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                 excp = pte_excp;
                 goto raise_exception;
             }
-            prot = ia64_tlb_perm_to_prot(perm);
+            prot = ia64_tlb_prot_for_pte(&cpu->env, entry->pte, perm,
+                                         is_ifetch);
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 tlb hit %c va=0x%016" PRIx64
                           " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
@@ -10947,7 +10974,9 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                 excp = pte_excp;
                 goto raise_exception;
             }
-            prot = ia64_tlb_perm_to_prot(perm);
+            prot = ia64_tlb_prot_for_pte(&cpu->env,
+                                         new_entry ? new_entry->pte : pte,
+                                         perm, false);
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt hit d va=0x%016" PRIx64
                           " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
@@ -10984,7 +11013,9 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                 excp = pte_excp;
                 goto raise_exception;
             }
-            prot = ia64_tlb_perm_to_prot(perm);
+            prot = ia64_tlb_prot_for_pte(&cpu->env,
+                                         new_entry ? new_entry->pte : pte,
+                                         perm, true);
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt hit i va=0x%016" PRIx64
                           " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
@@ -11158,10 +11189,6 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     uint64_t isr_status = 0;
     bool psr_ic_inflight;
     bool collect;
-    bool fatal_decode_fault;
-    bool suspicious_user_address;
-    bool user_diagnostic_fault;
-    static unsigned excp_logs;
 
     if (excp >= IA64_EXCP_MAX || excp == IA64_EXCP_NONE) {
         return;
@@ -11199,96 +11226,15 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     default:
         break;
     }
-    fatal_decode_fault =
-        excp == IA64_EXCP_ILLEGAL ||
-        excp == IA64_EXCP_RESERVED_TEMPLATE ||
-        excp == IA64_EXCP_PRIVILEGED_OP ||
-        excp == IA64_EXCP_PRIVILEGED_REG ||
-        excp == IA64_EXCP_RESERVED_REG_FIELD;
-    suspicious_user_address =
-        ((fault_addr >> IA64_REGION_SHIFT) & IA64_REGION_MASK) != 1 &&
-        ((fault_addr >> IA64_REGION_SHIFT) & IA64_REGION_MASK) != 2 &&
-        ((fault_addr >> IA64_REGION_SHIFT) & IA64_REGION_MASK) != 3 &&
-        ((fault_addr >> IA64_REGION_SHIFT) & IA64_REGION_MASK) != 4 &&
-        ((fault_addr >> IA64_REGION_SHIFT) & IA64_REGION_MASK) != 5 &&
-        (excp == IA64_EXCP_VHPT_FAULT ||
-         excp == IA64_EXCP_ITLB_FAULT ||
-         excp == IA64_EXCP_DTLB_FAULT ||
-         excp == IA64_EXCP_ALT_ITLB ||
-         excp == IA64_EXCP_ALT_DTLB ||
-         excp == IA64_EXCP_DATA_ACCESS ||
-         excp == IA64_EXCP_PAGE_NOT_PRESENT ||
-         excp == IA64_EXCP_INST_ACCESS ||
-         excp == IA64_EXCP_UNIMPL_DATA_ADDR ||
-         excp == IA64_EXCP_UNIMPL_INST_ADDR);
-    user_diagnostic_fault =
-        (ia64_psr_cpl(cpu->env.psr) == 3 &&
-         (fatal_decode_fault || excp == IA64_EXCP_UNALIGNED ||
-          suspicious_user_address)) ||
-        (ia64_psr_cpl(cpu->env.psr) == 0 &&
-         (fatal_decode_fault || excp == IA64_EXCP_UNALIGNED ||
-          excp == IA64_EXCP_NAT_CONSUMPTION));
-    if (excp_logs++ < 32 || user_diagnostic_fault) {
-        qemu_log_mask(user_diagnostic_fault ? LOG_GUEST_ERROR : CPU_LOG_INT,
-                      "ia64 exception excp=%u vector=0x%04x ip=0x%016" PRIx64
-                      " fault=0x%016" PRIx64 " slot=%u psr=0x%016" PRIx64
-                      " ifa=0x%016" PRIx64 " isr=0x%016" PRIx64 "\n",
-                      excp, ia64_ivt_vectors[excp], cpu->env.ip, fault_addr,
-                      slot, cpu->env.psr, cpu->env.cr_ifa, cpu->env.cr_isr);
-    }
-    if (qemu_loglevel_mask(LOG_GUEST_ERROR) &&
-        ia64_psr_cpl(cpu->env.psr) == 3 && excp != IA64_EXCP_EXTINT &&
-        excp != IA64_EXCP_BREAK) {
-        /* One line per user fault: enough to spot a dying process. */
-        qemu_log("ia64 ufault excp=%d ip=%016" PRIx64 " ifa=%016" PRIx64
-                 " isr=%016" PRIx64 " sp=%016" PRIx64 " b0=%016" PRIx64
-                 " sof=%u\n",
-                 excp, cpu->env.ip, fault_addr, cpu->env.cr_isr,
-                 cpu->env.gr[12], cpu->env.br[0], cpu->env.cfm_sof);
-    }
-    if (user_diagnostic_fault) {
-        uint8_t bundle[16];
-
-        if (cpu_memory_rw_debug(cs, ia64_ip_bundle_addr(cpu->env.ip) - 16,
-                                bundle, sizeof(bundle), false) == 0) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "ia64 user fault prev bundle %016" PRIx64
-                          ": %02x%02x%02x%02x%02x%02x%02x%02x"
-                          "%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                          ia64_ip_bundle_addr(cpu->env.ip) - 16,
-                          bundle[0], bundle[1], bundle[2], bundle[3],
-                          bundle[4], bundle[5], bundle[6], bundle[7],
-                          bundle[8], bundle[9], bundle[10], bundle[11],
-                          bundle[12], bundle[13], bundle[14], bundle[15]);
-        }
-        if (cpu_memory_rw_debug(cs, ia64_ip_bundle_addr(cpu->env.ip),
-                                bundle, sizeof(bundle), false) == 0) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "ia64 user fault bundle %016" PRIx64
-                          ": %02x%02x%02x%02x%02x%02x%02x%02x"
-                          "%02x%02x%02x%02x%02x%02x%02x%02x"
-                          " cfm=%03x%02x pfs=%016" PRIx64
-                          " b0=%016" PRIx64 " rsc=%016" PRIx64 "\n",
-                          ia64_ip_bundle_addr(cpu->env.ip),
-                          bundle[0], bundle[1], bundle[2], bundle[3],
-                          bundle[4], bundle[5], bundle[6], bundle[7],
-                          bundle[8], bundle[9], bundle[10], bundle[11],
-                          bundle[12], bundle[13], bundle[14], bundle[15],
-                          cpu->env.cfm_sol, cpu->env.cfm_sof,
-                          cpu->env.ar_pfs, cpu->env.br[0],
-                          cpu->env.ar_rsc);
-        }
-    }
+    qemu_log_mask(CPU_LOG_INT,
+                  "ia64 exception excp=%u vector=0x%04x ip=0x%016" PRIx64
+                  " fault=0x%016" PRIx64 " slot=%u psr=0x%016" PRIx64
+                  " ifa=0x%016" PRIx64 " isr=0x%016" PRIx64 "\n",
+                  excp, ia64_ivt_vectors[excp], cpu->env.ip, fault_addr,
+                  slot, cpu->env.psr, cpu->env.cr_ifa, cpu->env.cr_isr);
     psr_ic_inflight = cpu->env.psr_ic_inflight;
     collect = cpu->env.psr & IA64_PSR_IC;
     if (collect) {
-        if (qemu_loglevel_mask(LOG_GUEST_ERROR) && slot == 3) {
-            qemu_log("ia64 bad interruption slot excp=%d ip=%016" PRIx64
-                     " fault=%016" PRIx64 " psr=%016" PRIx64
-                     " fault_slot=%u isr=%016" PRIx64 "\n",
-                     excp, cpu->env.ip, fault_addr, cpu->env.psr,
-                     cpu->env.fault_slot, cpu->env.cr_isr);
-        }
         cpu->env.cr_ipsr = (cpu->env.psr & ~IA64_PSR_RI_MASK) |
                            (((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT);
         cpu->env.cr_iip = ia64_ip_bundle_addr(cpu->env.ip);
