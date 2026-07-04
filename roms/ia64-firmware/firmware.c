@@ -1108,7 +1108,7 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[109];
+    UINT8 Aml[187];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -1640,7 +1640,7 @@ FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 64, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
 FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 487, acpi_dsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 145, acpi_ssdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 223, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
@@ -1796,26 +1796,27 @@ static ACPI_SSDT               mSsdt = {
         /*
          * Scope (\_SB) {
          *   Processor (CPU0, 0, 0, 0) {}
-         *   Device (UAR0) { Name (_HID, "PNP0501") Name (_UID, Zero)
-         *     Name (_CRS, ResourceTemplate() {
-         *       QWordMemory (..., UART_BASE, UART_BASE + 7, 8)
-         *       IRQNoFlags() { 4 } }) }
+         *   Device (UAR0) { _HID PNP0501; _CRS { QWordMemory UART; IRQ 4 } }
+         *   Device (PS2K) { _HID PNP0303; _CRS { IO 0x60; IO 0x64; IRQ 1 } }
+         *   Device (PS2M) { _HID PNP0F13; _CRS { IRQ 12 } }
          * }
          */
-        0x10, 0x4c, 0x06, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
-        0x5b, 0x83, 0x0b, 'C',  'P',  'U',  '0',  0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x82, 0x46,
-        0x05, 'U',  'A',  'R',  '0',  0x08, 0x5f, 0x48,
-        0x49, 0x44, 0x0d, 'P',  'N',  'P',  '0',  '5',
-        '0',  '1',  0x00, 0x08, 0x5f, 0x55, 0x49, 0x44,
-        0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x36,
-        0x0a, 0x33, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
-        0x07, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x22, 0x10, 0x00, 0x79, 0x00,
+        0x10, 0x4a, 0x0b, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x83, 0x0b, 0x43,
+        0x50, 0x55, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x82, 0x46,
+        0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50,
+        0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08, 0x5f, 0x55, 0x49, 0x44,
+        0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x36, 0x0a, 0x33, 0x8a, 0x2b,
+        0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0xf0,
+        0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x10, 0x00, 0x79,
+        0x00, 0x5b, 0x82, 0x2d, 0x50, 0x53, 0x32, 0x4b, 0x08, 0x5f, 0x48, 0x49,
+        0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11,
+        0x18, 0x0a, 0x15, 0x47, 0x01, 0x60, 0x00, 0x60, 0x00, 0x01, 0x01, 0x47,
+        0x01, 0x64, 0x00, 0x64, 0x00, 0x01, 0x01, 0x22, 0x02, 0x00, 0x79, 0x00,
+        0x5b, 0x82, 0x1d, 0x50, 0x53, 0x32, 0x4d, 0x08, 0x5f, 0x48, 0x49, 0x44,
+        0x0c, 0x41, 0xd0, 0x0f, 0x13, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x08,
+        0x0a, 0x05, 0x22, 0x00, 0x10, 0x79, 0x00,
     },
 };
 static ACPI_MCFG               mMcfg;
@@ -5216,6 +5217,24 @@ static EFI_STATUS ps2_read_key(EFI_INPUT_KEY *Key)
     return EFI_NOT_READY;
 }
 
+/*
+ * Wait briefly for the next serial byte.  Escape-sequence bytes for a single
+ * key (e.g. ESC '[' 'B') arrive as a burst, so a bounded spin suffices to tell
+ * a multi-byte sequence apart from a lone ESC keypress without hanging ConIn.
+ */
+static BOOLEAN conin_uart_read_wait(UINT8 *ch)
+{
+    UINT32 spin;
+
+    for (spin = 0; spin < 200000U; spin++) {
+        if (uart_can_read()) {
+            *ch = uart_getc();
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static EFI_STATUS conin_read_device_key(EFI_INPUT_KEY *Key)
 {
     UINT8 ch;
@@ -5223,6 +5242,62 @@ static EFI_STATUS conin_read_device_key(EFI_INPUT_KEY *Key)
     if (uart_can_read()) {
         ch = uart_getc();
         Key->ScanCode = 0;
+        Key->UnicodeChar = 0;
+
+        if (ch == 0x1b) {
+            /*
+             * Translate VT100/ANSI escape sequences from a serial console into
+             * EFI scan codes so menu navigation (arrows, Home/End, etc.) works
+             * over serial as it does with the PS/2 keyboard.  A lone ESC (no
+             * following byte) is reported as EFI_SCAN_ESC.
+             */
+            UINT8 b1;
+
+            if (!conin_uart_read_wait(&b1)) {
+                Key->ScanCode = EFI_SCAN_ESC;
+                return EFI_SUCCESS;
+            }
+            if (b1 == '[' || b1 == 'O') {
+                UINT8 b2;
+
+                if (conin_uart_read_wait(&b2)) {
+                    switch (b2) {
+                    case 'A': Key->ScanCode = EFI_SCAN_UP;    return EFI_SUCCESS;
+                    case 'B': Key->ScanCode = EFI_SCAN_DOWN;  return EFI_SUCCESS;
+                    case 'C': Key->ScanCode = EFI_SCAN_RIGHT; return EFI_SUCCESS;
+                    case 'D': Key->ScanCode = EFI_SCAN_LEFT;  return EFI_SUCCESS;
+                    case 'H': Key->ScanCode = EFI_SCAN_HOME;  return EFI_SUCCESS;
+                    case 'F': Key->ScanCode = EFI_SCAN_END;   return EFI_SUCCESS;
+                    case '1': case '2': case '3':
+                    case '4': case '5': case '6': {
+                        /* ESC '[' n '~' : Home/Ins/Del/End/PgUp/PgDn. */
+                        UINT8 b3;
+
+                        switch (b2) {
+                        case '1': Key->ScanCode = EFI_SCAN_HOME;      break;
+                        case '2': Key->ScanCode = EFI_SCAN_INSERT;    break;
+                        case '3': Key->ScanCode = EFI_SCAN_DELETE;    break;
+                        case '4': Key->ScanCode = EFI_SCAN_END;       break;
+                        case '5': Key->ScanCode = EFI_SCAN_PAGE_UP;   break;
+                        case '6': Key->ScanCode = EFI_SCAN_PAGE_DOWN; break;
+                        default:  break;
+                        }
+                        (void)conin_uart_read_wait(&b3); /* consume trailing '~' */
+                        return EFI_SUCCESS;
+                    }
+                    default: break;
+                    }
+                }
+                /* Unrecognized sequence: surface ESC rather than lose it. */
+                Key->ScanCode = EFI_SCAN_ESC;
+                return EFI_SUCCESS;
+            }
+
+            /* ESC followed by an ordinary byte: report the Escape key. */
+            Key->ScanCode = EFI_SCAN_ESC;
+            return EFI_SUCCESS;
+        }
+
         Key->UnicodeChar = (ch == '\n') ? '\r' : (CHAR16)ch;
         return EFI_SUCCESS;
     }
