@@ -14,7 +14,7 @@ PC profile intended for firmware, boot loader, and operating-system bring-up:
 - 1 vCPU, 2 GiB default RAM
 - Local SAPIC and I/O SAPIC interrupt model
 - ACPI 2.0-style platform tables
-- PCI root bus, CMD646 IDE/ATAPI boot storage, ICH9 AHCI, OHCI/UHCI USB,
+- PCI root bus, CMD646 IDE/ATAPI, LSI53C895A SCSI boot storage, ICH9 AHCI, OHCI/UHCI USB,
   standard VGA, PS/2 input, and MMIO serial console
 
 ## Build
@@ -37,14 +37,15 @@ The firmware build requires an IA-64 ELF cross toolchain named
   -smp 1 \
   -m 2048 \
   -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
-  -drive file=<guest-media.iso>,if=ide,media=cdrom,format=raw,readonly=on \
+  -drive file=<guest-media.iso>,media=cdrom,format=raw,readonly=on \
   -vga std \
   -display gtk
 ```
 
 Use `-serial stdio` to see the serial output.
 
-<img width="1828" height="1080" alt="Debian is starting on qemu-system-ia64, showing its linux version" src="https://github.com/user-attachments/assets/be2b618b-9e89-4168-ba8c-f8ece5d8bc6a" />
+<img width="639" height="461" alt="Gentoo linux is booting on qemu-system-ia64" src="https://github.com/user-attachments/assets/d16ad66d-ffdb-4e27-8e3d-a056498e4ed7" />
+
 
 ## Tests
 
@@ -65,6 +66,6 @@ floating-point corner cases, and device compatibility still need validation agai
 
 This repository does not contain any kind of unauthorised, unlicensed, or proprietary images, such as disk images and firmware, machine ROM dumps, or operating system binaries.
 
-This project is not affiliated with or endorsed by Intel, HPE or the QEMU project.
+This project is not affiliated with or endorsed by Intel, HPE , the QEMU project, Gentoo Foundation or the Gentoo Project.
 
 Guest operating system images must be supplied by the user under their own applicable licences.
