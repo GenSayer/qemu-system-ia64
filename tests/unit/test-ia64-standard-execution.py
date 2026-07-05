@@ -58,7 +58,7 @@ FW_FIRMWARE_ADDRESS_SPACE_SIZE = 0x01000000
 PCI_IO_SIZE = 0x1000000
 PCI_IO_SPARSE_SIZE = 0x4000000
 LEGACY_IO_BASE = 0x800010000000
-PCI_IO_TRANSLATION_OFFSET = (-LEGACY_IO_BASE) & ((1 << 64) - 1)
+PCI_IO_TRANSLATION_OFFSET = 0
 PCI_INTX_GSI_BASE = 16
 PCI_INTX_LINES = 4
 IOSAPIC_BASE = 0x80110000
@@ -72,6 +72,7 @@ HCDP_UART_IRQ = 4
 HCDP_UART_PRIMARY_CONSOLE = 1 << 2
 HCDP_DEVICE_PRIMARY_CONSOLE = 1
 HCDP_PCI_TRANSLATE_IOPORT = 1 << 1
+HCDP_VGA_PCI_DEVICE = 5
 VGA_VENDOR_ID = 0x1234
 VGA_DEVICE_ID = 0x1111
 EFI_RUNTIME_SERVICES_CODE = 5
@@ -331,7 +332,7 @@ def run_firmware(qemu, firmware):
             "-display", "none",
             "-serial", "stdio",
             "-monitor", "none",
-            "-drive", f"file={disk},if=ide,format=raw",
+            "-drive", f"file={disk},format=raw",
         ]
         proc = subprocess.Popen(
             args,
@@ -1453,6 +1454,9 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         raise RuntimeError("HCDP default VGA primary console flags mismatch")
     if hcdp[88] != 10 or hcdp[90] != 41:
         raise RuntimeError("HCDP VGA console descriptor mismatch")
+    if (hcdp[98] != 0 or hcdp[99] != 0 or
+            hcdp[100] != HCDP_VGA_PCI_DEVICE or hcdp[101] != 0):
+        raise RuntimeError("HCDP VGA PCI location mismatch")
     if u16(hcdp, 102) != VGA_DEVICE_ID or u16(hcdp, 104) != VGA_VENDOR_ID:
         raise RuntimeError("HCDP VGA PCI identity mismatch")
     if (u64(hcdp, 110) != 0 or u64(hcdp, 118) != LEGACY_IO_BASE or

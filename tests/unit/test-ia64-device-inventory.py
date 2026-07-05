@@ -39,6 +39,8 @@ def main():
             "xp /1wx 0x7ff0018020\n"
             "xp /1wx 0x7ff0020000\n"
             "xp /3wx 0x7ff0020010\n"
+            "xp /1wx 0x7ff0028000\n"
+            "xp /3wx 0x7ff0028010\n"
             "quit\n"
         ),
         stdout=subprocess.PIPE,
@@ -66,6 +68,10 @@ def main():
         "OHCI USB INTx": r"USB controller: PCI device 106b:003f[\s\S]*?IRQ 18, pin A",
         "UHCI USB": r"USB controller: PCI device 8086:7020",
         "UHCI USB INTx": r"USB controller: PCI device 8086:7020[\s\S]*?IRQ 18, pin D",
+        "LSI SCSI": r"SCSI controller: PCI device 1000:0012",
+        "LSI SCSI INTx": (
+            r"SCSI controller: PCI device 1000:0012[\s\S]*?IRQ 16, pin A"
+        ),
         "VGA": r"VGA controller: PCI device 1234:1111",
         "SAL PCI config aperture": r"ia64-pci-config",
         "SAL PCI config IDE read": r"7ff0000000:\s+0x06461095",
@@ -82,9 +88,13 @@ def main():
         "SAL PCI config OHCI BAR": r"7ff0010010:\s+0xc1010000",
         "SAL PCI config UHCI read": r"7ff0018000:\s+0x70208086",
         "SAL PCI config UHCI BAR": r"7ff0018020:\s+0x0000c121",
-        "SAL PCI config VGA read": r"7ff0020000:\s+0x11111234",
+        "SAL PCI config LSI read": r"7ff0020000:\s+0x00121000",
+        "SAL PCI config LSI BARs": (
+            r"7ff0020010:\s+0x0000c201\s+0xc1030000\s+0xc1032000"
+        ),
+        "SAL PCI config VGA read": r"7ff0028000:\s+0x11111234",
         "SAL PCI config VGA BARs": (
-            r"7ff0020010:\s+0xc2000008\s+0x00000000\s+0xc3000000"
+            r"7ff0028010:\s+0xc2000008\s+0x00000000\s+0xc3000000"
         ),
     }
     missing = [

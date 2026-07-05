@@ -4,7 +4,7 @@
  * IA-64 virtual PC platform.
  *
  * Provides RAM, a bootstrap CPU, a memory-mapped serial console,
- * firmware ROM loading via -bios, a PCI host bridge, IDE and AHCI
+ * firmware ROM loading via -bios, a PCI host bridge, SCSI, IDE and AHCI
  * storage controllers, OHCI/UHCI USB, local SAPIC/I/O SAPIC wiring,
  * and ACPI fixed power-management registers.
  */
@@ -15,6 +15,7 @@
 #include "qemu/error-report.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/char/serial-mm.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
@@ -51,8 +52,12 @@
 #define IA64_IDE_BMDMA_IO_BASE  0x0000c000U
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
+/* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
+#define IA64_LSI_IO_BASE        0x0000c200U
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
+#define IA64_LSI_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x00030000ULL)
+#define IA64_LSI_RAM_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x00032000ULL)
 #define IA64_VGA_FB_PCI_BASE    (IA64_PCI_MMIO_BASE + 0x01000000ULL)
 #define IA64_VGA_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
@@ -64,7 +69,7 @@
 #define IA64_ACPI_SCI_IRQ       9
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION      3ULL
+#define IA64_FW_HANDOFF_VERSION      4ULL
 #define IA64_FW_CONSOLE_SERIAL       0ULL
 #define IA64_FW_CONSOLE_VGA          1ULL
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
@@ -75,6 +80,7 @@ static PCIDevice *ia64_vpc_ide_dev;
 static PCIDevice *ia64_vpc_ahci_dev;
 static PCIDevice *ia64_vpc_ohci_dev;
 static PCIDevice *ia64_vpc_uhci_dev;
+static PCIDevice *ia64_vpc_lsi_dev;
 static PCIDevice *ia64_vpc_vga_dev;
 static MemoryRegion *ia64_vpc_vga_fb_alias;
 static MemoryRegion *ia64_vpc_vga_mmio_alias;
@@ -88,6 +94,7 @@ static qemu_irq ia64_vpc_acpi_sci_irq;
 static Notifier ia64_vpc_powerdown_notifier;
 static qemu_irq ia64_vpc_isa_irqs[ISA_NUM_IRQS];
 static bool ia64_vpc_i8042_enabled = true;
+static bool ia64_vpc_firmware_ide_dma = true;
 static uint64_t ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
 
 static uint16_t ia64_lduw(const uint8_t *p)
@@ -114,6 +121,23 @@ static void ia64_vpc_set_i8042(Object *obj, bool value, Error **errp)
     (void)errp;
 
     ia64_vpc_i8042_enabled = value;
+}
+
+static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
+{
+    (void)obj;
+    (void)errp;
+
+    return ia64_vpc_firmware_ide_dma;
+}
+
+static void ia64_vpc_set_firmware_ide_dma(Object *obj, bool value,
+                                          Error **errp)
+{
+    (void)obj;
+    (void)errp;
+
+    ia64_vpc_firmware_ide_dma = value;
 }
 
 static char *ia64_vpc_get_firmware_console(Object *obj, Error **errp)
@@ -278,7 +302,7 @@ static void ia64_vpc_map_firmware_address_space(void)
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
 {
-    uint8_t handoff[88] = { 0 };
+    uint8_t handoff[96] = { 0 };
     struct tm tm;
 
     stq_le_p(handoff, IA64_FW_HANDOFF_MAGIC);
@@ -293,6 +317,7 @@ static void ia64_vpc_write_firmware_handoff(MachineState *machine)
     stq_le_p(handoff + 64, tm.tm_min);
     stq_le_p(handoff + 72, tm.tm_sec);
     stq_le_p(handoff + 80, ia64_vpc_firmware_console);
+    stq_le_p(handoff + 88, ia64_vpc_firmware_ide_dma);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
 }
 
@@ -371,6 +396,23 @@ static void ia64_vpc_configure_uhci(PCIDevice *pci_dev)
                              PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
 }
 
+static void ia64_vpc_configure_lsi(PCIDevice *pci_dev)
+{
+    if (pci_dev == NULL) {
+        return;
+    }
+
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
+                             IA64_LSI_IO_BASE, 4);
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
+                             IA64_LSI_MMIO_PCI_BASE, 4);
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_2,
+                             IA64_LSI_RAM_PCI_BASE, 4);
+    pci_default_write_config(pci_dev, PCI_COMMAND,
+                             PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
+                             PCI_COMMAND_MASTER, 2);
+}
+
 static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -392,11 +434,13 @@ static void ia64_vpc_configure_platform_pci(void)
     ia64_vpc_configure_ahci(ia64_vpc_ahci_dev);
     ia64_vpc_configure_ohci(ia64_vpc_ohci_dev);
     ia64_vpc_configure_uhci(ia64_vpc_uhci_dev);
+    ia64_vpc_configure_lsi(ia64_vpc_lsi_dev);
     ia64_vpc_configure_vga(ia64_vpc_vga_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_ide_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_ahci_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_ohci_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_uhci_dev);
+    ia64_vpc_configure_pci_irq(ia64_vpc_lsi_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_vga_dev);
 }
 
@@ -769,8 +813,8 @@ static void ia64_vpc_init(MachineState *machine)
     ia64_vpc_init_acpi_pm(machine, iosapic, pci_io);
 
     /*
-     * Keep IDE as the firmware boot path, but expose a standards-based AHCI
-     * HBA so guests can enumerate and use SATA storage support.
+     * AHCI remains available for guests that support SATA, but firmware boot
+     * storage is provided by the LSI SCSI HBA below with IDE as compatibility.
      */
     ia64_vpc_ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
     ia64_vpc_configure_ahci(ia64_vpc_ahci_dev);
@@ -785,6 +829,17 @@ static void ia64_vpc_init(MachineState *machine)
     }
 
     ia64_vpc_init_usb(machine, pci_bus);
+
+    /*
+     * Put the SCSI HBA on device 4.  The firmware DSDT _PRT covers root-bus
+     * devices 0..4, and VGA does not require an interrupt line.
+     */
+    ia64_vpc_lsi_dev = pci_new(PCI_DEVFN(4, 0), "lsi53c895a");
+    qdev_prop_set_bit(DEVICE(ia64_vpc_lsi_dev),
+                      "disconnect-on-data-wait", false);
+    pci_realize_and_unref(ia64_vpc_lsi_dev, pci_bus, &error_fatal);
+    ia64_vpc_configure_lsi(ia64_vpc_lsi_dev);
+    lsi53c8xx_handle_legacy_cmdline(DEVICE(ia64_vpc_lsi_dev));
 
     ia64_vpc_vga_dev = pci_vga_init(pci_bus);
     ia64_vpc_configure_vga(ia64_vpc_vga_dev);
@@ -810,7 +865,7 @@ static void ia64_vpc_machine_init(MachineClass *mc)
     mc->default_ram_size = 2 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
     mc->default_display = "std";
-    mc->block_default_type = IF_IDE;
+    mc->block_default_type = IF_SCSI;
     mc->no_serial = 0;
     mc->no_parallel = 1;
     mc->no_floppy = 1;
@@ -821,6 +876,11 @@ static void ia64_vpc_machine_init(MachineClass *mc)
                                    ia64_vpc_set_i8042);
     object_class_property_set_description(oc, "i8042",
         "Set on/off to enable/disable the i8042 PS/2 controller");
+    object_class_property_add_bool(oc, "firmware-ide-dma",
+                                   ia64_vpc_get_firmware_ide_dma,
+                                   ia64_vpc_set_firmware_ide_dma);
+    object_class_property_set_description(oc, "firmware-ide-dma",
+        "Set on/off to enable/disable firmware IDE bus-master DMA");
     object_class_property_add_str(oc, "firmware-console",
                                   ia64_vpc_get_firmware_console,
                                   ia64_vpc_set_firmware_console);

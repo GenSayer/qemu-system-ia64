@@ -65,7 +65,7 @@ def main():
         "Loaded Image Options:",
         "Boot Manager:        trying Boot",
         "BootOrder boot failed",
-        "BOOT path:            ATA/ATAPI Block I/O + FAT resolver",
+        "BOOT path:            SCSI/ATA Block I/O + FAT resolver",
         "BOOTIA64.EFI",
         "PlatformLangCodes",
         "ConOutDev",

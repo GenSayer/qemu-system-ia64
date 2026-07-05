@@ -159,9 +159,9 @@ def main():
         return 1
 
     ssdt_size = symbol_size("mSsdt")
-    if ssdt_size != 0x91:
+    if ssdt_size != 0xdf:
         print("not ok 1 - IA-64 SSDT serial layout size")
-        print(f"# expected mSsdt size 0x91, got 0x{ssdt_size:x}")
+        print(f"# expected mSsdt size 0xdf, got 0x{ssdt_size:x}")
         return 1
 
     mcfg_size = symbol_size("mMcfg")
@@ -192,9 +192,9 @@ def main():
         return 1
 
     graphics_path = symbol_bytes("mGraphicsDevicePath")
-    if len(graphics_path) != 0x16 or graphics_path[0x11] != 4:
+    if len(graphics_path) != 0x16 or graphics_path[0x11] != 5:
         print("not ok 1 - GOP device path PCI slot")
-        print("# expected GOP PCI device path to reference bus 0 device 4")
+        print("# expected GOP PCI device path to reference bus 0 device 5")
         return 1
 
     dsdt = symbol_bytes("mDsdt")

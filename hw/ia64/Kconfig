@@ -13,3 +13,4 @@ config IA64_VPC
     select AHCI_ICH9
     select IDE_CMD646
     select IDE_PCI
+    select LSI_SCSI_PCI

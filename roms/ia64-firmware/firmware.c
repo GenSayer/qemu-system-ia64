@@ -61,6 +61,7 @@ typedef __SIZE_TYPE__    size_t;
 #define PCI_MMIO_SIZE                 0x0000000010000000ULL
 #define PCI_OHCI_MMIO_BAR             0xc1010000U
 #define PCI_AHCI_MMIO_BAR             0xc1020000U
+#define PCI_LSI_MMIO_BAR              0xc1030000U
 #define PCI_VGA_FB_BAR                0xc2000000U
 #define PCI_VGA_MMIO_BAR              0xc3000000U
 #define VGA_FB_BASE                   ((UINT64)PCI_VGA_FB_BAR)
@@ -122,7 +123,7 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
 #define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
 #define FW_HANDOFF_MAGIC  0x4d41523436414951ULL /* "QIA64RAM" */
-#define FW_HANDOFF_VERSION 3ULL
+#define FW_HANDOFF_VERSION 4ULL
 #define FW_CONSOLE_POLICY_SERIAL 0ULL
 #define FW_CONSOLE_POLICY_VGA    1ULL
 #define EFI_MEMORY_UC     0x0000000000000001ULL
@@ -201,7 +202,12 @@ typedef __SIZE_TYPE__    size_t;
 #define LEGACY_IO_LIMIT               (LEGACY_IO_BASE + PCI_IO_SIZE)
 #define LEGACY_IO_SPARSE_LIMIT        (LEGACY_IO_BASE + PCI_IO_SPARSE_SIZE)
 #define LEGACY_IO_SPARSE_END          (LEGACY_IO_SPARSE_LIMIT - 1)
-#define PCI_IO_TRANSLATION_OFFSET     ((UINT64)(0ULL - LEGACY_IO_BASE))
+/*
+ * A zero ACPI translation offset selects IA-64 legacy I/O space zero.  The
+ * EFI memory map supplies LEGACY_IO_BASE for that space; publishing the
+ * two's-complement negative base creates a separate, invalid Linux I/O space.
+ */
+#define PCI_IO_TRANSLATION_OFFSET     0ULL
 #define PCI_MMIO_END                  (PCI_MMIO_BASE + PCI_MMIO_SIZE - 1U)
 #define PCI_MMIO_TRANSLATION_OFFSET   0ULL
 #define PCI_CONFIG_ECAM_BASE          0x0000007FF0000000ULL
@@ -1762,7 +1768,7 @@ static ACPI_DSDT               mDsdt = {
     0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x8a, 0x2b,
     0x00, 0x01, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0xff, 0x7f, 0xff, 0xff,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x8a, 0x2b, 0x00, 0x00,
     0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0xc1, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xd0, 0x00, 0x00,
@@ -1905,6 +1911,7 @@ typedef struct {
     UINT64 Minute;
     UINT64 Second;
     UINT64 ConsolePolicy;
+    UINT64 IdeDmaEnabled;
 } FW_HANDOFF;
 
 static BOOLEAN fw_handoff_valid(volatile FW_HANDOFF *Handoff)
@@ -2032,6 +2039,14 @@ static BOOLEAN fw_handoff_vga_console_primary(void)
     return fw_handoff_valid(handoff) &&
            handoff->Version >= 3 &&
            handoff->ConsolePolicy == FW_CONSOLE_POLICY_VGA;
+}
+
+static BOOLEAN fw_handoff_ide_dma_enabled(void)
+{
+    FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+
+    return !fw_handoff_valid(handoff) || handoff->Version < 4 ||
+           handoff->IdeDmaEnabled != 0;
 }
 
 static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
@@ -2333,6 +2348,7 @@ typedef struct FW_PCI_IO_DEVICE {
 #define FW_HANDLE_PCI_AHCI    ((EFI_HANDLE)(UINTN)0x7101)
 #define FW_HANDLE_PCI_OHCI    ((EFI_HANDLE)(UINTN)0x7102)
 #define FW_HANDLE_PCI_UHCI    ((EFI_HANDLE)(UINTN)0x7103)
+#define FW_HANDLE_PCI_LSI     ((EFI_HANDLE)(UINTN)0x7104)
 #define FW_HANDLE_TCG         ((EFI_HANDLE)(UINTN)0x8000)
 
 static EFI_HANDLE mBlockIoHandle;
@@ -2347,8 +2363,9 @@ static EFI_HANDLE mPciIdeHandle;
 static EFI_HANDLE mPciAhciHandle;
 static EFI_HANDLE mPciOhciHandle;
 static EFI_HANDLE mPciUhciHandle;
+static EFI_HANDLE mPciLsiHandle;
 static EFI_HANDLE mTcgHandle;
-#define FW_PCI_IO_DEVICE_COUNT 5U
+#define FW_PCI_IO_DEVICE_COUNT 6U
 static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT];
 static EFI_LOADED_IMAGE_PROTOCOL mLoadedImageProto;
 static IA64_FPSWA_INTERFACE mFpswaProto;
@@ -3537,29 +3554,10 @@ static UINTN acpi_align_up(UINTN value, UINTN align)
     return (value + align - 1U) & ~(align - 1U);
 }
 
-static VOID *acpi_reclaim_alloc(UINTN *Cursor, UINTN Size, UINTN Align)
-{
-    UINTN addr;
-    UINTN end;
-
-    if (Cursor == NULL || Align == 0 || (Align & (Align - 1U)) != 0) {
-        return NULL;
-    }
-
-    addr = acpi_align_up(*Cursor, Align);
-    end = addr + Size;
-    if (end < addr || addr < ACPI_RECLAIM_BASE ||
-        end > ACPI_RECLAIM_END) {
-        return NULL;
-    }
-
-    fw_set_mem((VOID *)addr, Size, 0);
-    *Cursor = end;
-    return (VOID *)addr;
-}
-
 static void acpi_use_static_tables(void)
 {
+    UINTN end;
+
     mAcpiRsdp = &mRsdp;
     mAcpiXsdt = &mXsdt;
     mAcpiRsdt = &mRsdt;
@@ -3572,31 +3570,76 @@ static void acpi_use_static_tables(void)
     mAcpiSrat = &mSrat;
     mAcpiSlit = &mSlit;
     mAcpiHcdp = &mHcdp;
-    mAcpiTableEnd = (UINTN)&mHcdp + sizeof(mHcdp);
+
+    end = (UINTN)&mRsdp + sizeof(mRsdp);
+    if ((UINTN)&mFacs + sizeof(mFacs) > end) {
+        end = (UINTN)&mFacs + sizeof(mFacs);
+    }
+    if ((UINTN)&mDsdt + sizeof(mDsdt) > end) {
+        end = (UINTN)&mDsdt + sizeof(mDsdt);
+    }
+    if ((UINTN)&mSsdt + sizeof(mSsdt) > end) {
+        end = (UINTN)&mSsdt + sizeof(mSsdt);
+    }
+    if ((UINTN)&mFadt + sizeof(mFadt) > end) {
+        end = (UINTN)&mFadt + sizeof(mFadt);
+    }
+    if ((UINTN)&mXsdt + sizeof(mXsdt) > end) {
+        end = (UINTN)&mXsdt + sizeof(mXsdt);
+    }
+    if ((UINTN)&mRsdt + sizeof(mRsdt) > end) {
+        end = (UINTN)&mRsdt + sizeof(mRsdt);
+    }
+    if ((UINTN)&mMadt + sizeof(mMadt) > end) {
+        end = (UINTN)&mMadt + sizeof(mMadt);
+    }
+    if ((UINTN)&mMcfg + sizeof(mMcfg) > end) {
+        end = (UINTN)&mMcfg + sizeof(mMcfg);
+    }
+    if ((UINTN)&mSrat + sizeof(mSrat) > end) {
+        end = (UINTN)&mSrat + sizeof(mSrat);
+    }
+    if ((UINTN)&mSlit + sizeof(mSlit) > end) {
+        end = (UINTN)&mSlit + sizeof(mSlit);
+    }
+    if ((UINTN)&mHcdp + sizeof(mHcdp) > end) {
+        end = (UINTN)&mHcdp + sizeof(mHcdp);
+    }
+    mAcpiTableEnd = end;
 }
 
 static BOOLEAN acpi_assign_reclaim_tables(void)
 {
     UINTN cursor = ACPI_RECLAIM_BASE;
 
-    mAcpiRsdp = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiRsdp), 16);
-    mAcpiFacs = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiFacs), 64);
-    mAcpiDsdt = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiDsdt), 8);
-    mAcpiSsdt = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiSsdt), 8);
-    mAcpiFadt = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiFadt), 8);
-    mAcpiXsdt = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiXsdt), 8);
-    mAcpiRsdt = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiRsdt), 8);
-    mAcpiMadt = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiMadt), 8);
-    mAcpiMcfg = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiMcfg), 8);
-    mAcpiSrat = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiSrat), 8);
-    mAcpiSlit = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiSlit), 8);
-    mAcpiHcdp = acpi_reclaim_alloc(&cursor, sizeof(*mAcpiHcdp), 8);
+    mAcpiRsdp = (ACPI_RSDP *)acpi_align_up(cursor, 16);
+    cursor = (UINTN)mAcpiRsdp + sizeof(*mAcpiRsdp);
+    mAcpiFacs = (ACPI_FACS *)acpi_align_up(cursor, 64);
+    cursor = (UINTN)mAcpiFacs + sizeof(*mAcpiFacs);
+    mAcpiDsdt = (ACPI_DSDT *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiDsdt + sizeof(*mAcpiDsdt);
+    mAcpiSsdt = (ACPI_SSDT *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiSsdt + sizeof(*mAcpiSsdt);
+    mAcpiFadt = (ACPI_FADT *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiFadt + sizeof(*mAcpiFadt);
+    mAcpiXsdt = (ACPI_XSDT *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiXsdt + sizeof(*mAcpiXsdt);
+    mAcpiRsdt = (ACPI_RSDT *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiRsdt + sizeof(*mAcpiRsdt);
+    mAcpiMadt = (ACPI_MADT *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiMadt + sizeof(*mAcpiMadt);
+    mAcpiMcfg = (ACPI_MCFG *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiMcfg + sizeof(*mAcpiMcfg);
+    mAcpiSrat = (ACPI_SRAT *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiSrat + sizeof(*mAcpiSrat);
+    mAcpiSlit = (ACPI_SLIT *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiSlit + sizeof(*mAcpiSlit);
+    mAcpiHcdp = (ACPI_HCDP *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiHcdp + sizeof(*mAcpiHcdp);
     mAcpiTableEnd = cursor;
 
-    if (mAcpiRsdp == NULL || mAcpiXsdt == NULL || mAcpiRsdt == NULL ||
-        mAcpiFadt == NULL || mAcpiFacs == NULL || mAcpiDsdt == NULL ||
-        mAcpiSsdt == NULL || mAcpiMadt == NULL || mAcpiMcfg == NULL ||
-        mAcpiSrat == NULL || mAcpiSlit == NULL || mAcpiHcdp == NULL) {
+    if (mAcpiTableEnd < ACPI_RECLAIM_BASE ||
+        mAcpiTableEnd > ACPI_RECLAIM_END) {
         acpi_use_static_tables();
         return 0;
     }
@@ -11261,7 +11304,7 @@ static void efi_init_platform_tables(void)
     mHcdp.Device[0].Pci.Length = sizeof(mHcdp.Device[0].Pci);
     mHcdp.Device[0].Pci.Segment = 0;
     mHcdp.Device[0].Pci.Bus = 0;
-    mHcdp.Device[0].Pci.Device = 4;
+    mHcdp.Device[0].Pci.Device = 5;
     mHcdp.Device[0].Pci.Function = 0;
     mHcdp.Device[0].Pci.DeviceId = 0x1111;
     mHcdp.Device[0].Pci.VendorId = 0x1234;
@@ -11547,7 +11590,7 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
             (fw_handoff_vga_console_primary() ?
              HCDP_DEVICE_FLAG_PRIMARY_CONSOLE : 0) ||
         mAcpiHcdp->Device[0].Pci.Bus != 0 ||
-        mAcpiHcdp->Device[0].Pci.Device != 4 ||
+        mAcpiHcdp->Device[0].Pci.Device != 5 ||
         mAcpiHcdp->Device[0].Pci.Function != 0 ||
         mAcpiHcdp->Device[0].Pci.DeviceId != 0x1111 ||
         mAcpiHcdp->Device[0].Pci.VendorId != 0x1234) {
@@ -11964,6 +12007,7 @@ static void efi_init_static_handles(void)
     mPciAhciHandle = FW_HANDLE_PCI_AHCI;
     mPciOhciHandle = FW_HANDLE_PCI_OHCI;
     mPciUhciHandle = FW_HANDLE_PCI_UHCI;
+    mPciLsiHandle = FW_HANDLE_PCI_LSI;
     mTcgHandle = FW_HANDLE_TCG;
 }
 
@@ -13110,10 +13154,12 @@ static IDE_DEVICE mIdeDevices[2] = {
 };
 static IDE_DEVICE *mBootIdeDevice = &mIdeDevices[0];
 static IDE_DEVICE *mHardDiskIdeDevice;
+static UINT32 mCdromBlocks;
 
 #define PCI_CLASS_REVISION_OFFSET     0x08U
 #define PCI_CFG_COMMAND_OFFSET        0x04U
 #define PCI_CFG_COMMAND_IO_SPACE      0x0001U
+#define PCI_CFG_COMMAND_MEMORY_SPACE  0x0002U
 #define PCI_CFG_COMMAND_BUS_MASTER    0x0004U
 #define PCI_HEADER_TYPE_OFFSET        0x0eU
 #define PCI_HEADER_TYPE_MULTI_FUNC    0x80U
@@ -13375,7 +13421,8 @@ static BOOLEAN ide_configure_primary_from_pci(void)
     gIde.data_base = data_base;
     gIde.ctrl_base = ctrl_base + 2U;
     gIde.has_bmdma = 0;
-    if (ide_io_bar_address(bmdma_bar, &bmdma_base) &&
+    if (fw_handoff_ide_dma_enabled() &&
+        ide_io_bar_address(bmdma_bar, &bmdma_base) &&
         bmdma_base + 7U < LEGACY_IO_LIMIT) {
         gIde.bmdma_base = bmdma_base;
         gIde.has_bmdma = 1;
@@ -14118,9 +14165,817 @@ static BOOLEAN atapi_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
     return 1;
 }
 
-static BOOLEAN atapi_read_sector(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba)
+/* --- LSI53C895A SCSI Block I/O driver ----------------------------------- */
+
+typedef struct {
+    UINT8   target;
+    UINT8   lun;
+    UINT8   present;
+    UINT8   media_present;
+    UINT8   is_cd;
+    UINT8   removable;
+    UINT8   read_only;
+    UINT32  block_size;
+    UINT64  last_lba;
+} SCSI_DEVICE;
+
+#define SCSI_DEVICE_MAX              7U
+#define SCSI_HOST_ID                 7U
+#define SCSI_CDB_MAX                 16U
+#define SCSI_INQUIRY_LEN             36U
+#define SCSI_CAPACITY_LEN            8U
+#define SCSI_BOUNCE_SIZE             (64U * 1024U)
+
+#define SCSI_CMD_TEST_UNIT_READY     0x00U
+#define SCSI_CMD_INQUIRY             0x12U
+#define SCSI_CMD_READ_CAPACITY_10    0x25U
+#define SCSI_CMD_READ_10             0x28U
+#define SCSI_CMD_WRITE_10            0x2aU
+
+#define SCSI_TYPE_DIRECT             0x00U
+#define SCSI_TYPE_CDROM              0x05U
+
+#define PCI_SUB_CLASS_SCSI           0x00U
+#define PCI_LSI_BAR1_OFFSET          0x14U
+
+#define LSI_REG_SCID                 0x04U
+#define LSI_REG_DSTAT                0x0cU
+#define LSI_REG_ISTAT0               0x14U
+#define LSI_REG_DSP                  0x2cU
+#define LSI_REG_SIEN0                0x40U
+#define LSI_REG_SIEN1                0x41U
+#define LSI_REG_SIST0                0x42U
+#define LSI_REG_SIST1                0x43U
+#define LSI_REG_RESPID0              0x4aU
+
+#define LSI_ISTAT0_DIP               0x01U
+#define LSI_ISTAT0_SIP               0x02U
+#define LSI_ISTAT0_INTF              0x04U
+#define LSI_ISTAT0_SRST              0x40U
+#define LSI_ISTAT0_ABRT              0x80U
+#define LSI_DSTAT_SIR                0x04U
+
+#define LSI_PHASE_DO                 0U
+#define LSI_PHASE_DI                 1U
+#define LSI_PHASE_CMD                2U
+#define LSI_PHASE_ST                 3U
+#define LSI_PHASE_MO                 6U
+#define LSI_PHASE_MI                 7U
+
+#define LSI_SCRIPT_SELECT(Target) \
+    (0x40000000U | ((UINT32)(Target) << 16) | (1U << 3))
+#define LSI_SCRIPT_WAIT_RESELECT     0x50000000U
+#define LSI_SCRIPT_DISCONNECT        0x48000000U
+#define LSI_SCRIPT_MOVE(Phase, Count) \
+    (((UINT32)(Phase) << 24) | (0x00ffffffU & (UINT32)(Count)))
+#define LSI_SCRIPT_JUMP_IF_PHASE(Phase) \
+    (0x80000000U | ((UINT32)(Phase) << 24) | (1U << 19) | (1U << 17))
+#define LSI_SCRIPT_INTERRUPT         0x98080000U
+#define LSI_SCRIPT_INTERRUPT_ERROR   1U
+
+#define LSI_SCRIPT_DWORDS            64U
+
+static UINT64 mLsiMmioBase;
+static UINT8  mLsiPresent;
+static SCSI_DEVICE mScsiDevices[SCSI_DEVICE_MAX];
+static SCSI_DEVICE *mBootScsiDevice;
+static SCSI_DEVICE *mDiskScsiDevice;
+static UINT32 mLsiScript[LSI_SCRIPT_DWORDS] __attribute__((aligned(8)));
+static UINT8  mLsiCdb[SCSI_CDB_MAX] __attribute__((aligned(8)));
+static UINT8  mLsiMsgOut[1] __attribute__((aligned(8)));
+static UINT8  mLsiMsgIn[8] __attribute__((aligned(8)));
+static UINT8  mLsiStatus[1] __attribute__((aligned(8)));
+static UINT8  mScsiBounce[SCSI_BOUNCE_SIZE] __attribute__((aligned(8)));
+
+typedef enum {
+    FW_STORAGE_NONE = 0,
+    FW_STORAGE_IDE,
+    FW_STORAGE_SCSI,
+} FW_STORAGE_KIND;
+
+typedef struct {
+    FW_STORAGE_KIND Kind;
+    IDE_DEVICE *Ide;
+    SCSI_DEVICE *Scsi;
+} FW_STORAGE_DEVICE;
+
+static FW_STORAGE_DEVICE mBootStorageDevice;
+static FW_STORAGE_DEVICE mDiskStorageDevice;
+
+static UINT32 fw_be32(const UINT8 *p)
 {
-    return atapi_read_sectors(dev, buf, lba, 1);
+    return ((UINT32)p[0] << 24) |
+           ((UINT32)p[1] << 16) |
+           ((UINT32)p[2] << 8) |
+           (UINT32)p[3];
+}
+
+static void fw_write_be32(UINT8 *p, UINT32 value)
+{
+    p[0] = (UINT8)(value >> 24);
+    p[1] = (UINT8)(value >> 16);
+    p[2] = (UINT8)(value >> 8);
+    p[3] = (UINT8)value;
+}
+
+static void fw_write_be16(UINT8 *p, UINT16 value)
+{
+    p[0] = (UINT8)(value >> 8);
+    p[1] = (UINT8)value;
+}
+
+static BOOLEAN fw_addr32(const VOID *Ptr, UINT32 *Address)
+{
+    UINTN addr = (UINTN)Ptr;
+
+    if (Address == NULL || (addr >> 32) != 0) {
+        return 0;
+    }
+    *Address = (UINT32)addr;
+    return 1;
+}
+
+/* Preserve every LSI MMIO register access performed by the firmware. */
+static volatile UINT8 *lsi_reg(UINT32 Offset)
+{
+    return (volatile UINT8 *)(UINTN)(mLsiMmioBase + Offset); /* MMIO */
+}
+
+static UINT8 lsi_read8(UINT32 Offset)
+{
+    return *lsi_reg(Offset);
+}
+
+static void lsi_write8(UINT32 Offset, UINT8 Value)
+{
+    *lsi_reg(Offset) = Value;
+}
+
+static void lsi_write32(UINT32 Offset, UINT32 Value)
+{
+    lsi_write8(Offset, (UINT8)Value);
+    lsi_write8(Offset + 1U, (UINT8)(Value >> 8));
+    lsi_write8(Offset + 2U, (UINT8)(Value >> 16));
+    lsi_write8(Offset + 3U, (UINT8)(Value >> 24));
+}
+
+static UINT32 lsi_script_addr(UINTN DwordIndex)
+{
+    UINT32 addr;
+
+    if (!fw_addr32(&mLsiScript[DwordIndex], &addr)) {
+        return 0;
+    }
+    return addr;
+}
+
+static UINTN lsi_script_emit(UINTN DwordIndex, UINT32 Insn, UINT32 Addr)
+{
+    if (DwordIndex + 2U > LSI_SCRIPT_DWORDS) {
+        return DwordIndex;
+    }
+    mLsiScript[DwordIndex] = Insn;
+    mLsiScript[DwordIndex + 1U] = Addr;
+    return DwordIndex + 2U;
+}
+
+static BOOLEAN lsi_mmio_bar_address(UINT32 Bar, UINT64 *Address)
+{
+    UINT64 mmio;
+
+    if (Address == NULL || Bar == 0 || Bar == 0xffffffffU ||
+        (Bar & 1U) != 0) {
+        return 0;
+    }
+
+    mmio = Bar & ~(UINT64)0x0fU;
+    if (mmio < PCI_MMIO_BASE || mmio >= PCI_MMIO_BASE + PCI_MMIO_SIZE) {
+        return 0;
+    }
+    *Address = mmio;
+    return 1;
+}
+
+static BOOLEAN scsi_find_lsi_controller(PCI_DEVICE_LOCATION *Location)
+{
+    UINT16 bus;
+    UINT8 device;
+    UINT8 function;
+    UINT8 function_count;
+
+    if (Location == NULL) {
+        return 0;
+    }
+
+    for (bus = 0; bus < PCI_MAX_BUSES; bus++) {
+        for (device = 0; device < PCI_MAX_DEVICES; device++) {
+            function_count = 1;
+            for (function = 0; function < function_count; function++) {
+                UINT32 id;
+                UINT32 class_rev;
+                UINT8 base_class;
+                UINT8 sub_class;
+
+                id = (UINT32)pci_config_read_value(0, (UINT8)bus,
+                                                   device, function, 0, 4);
+                if ((id & 0xffffU) == 0xffffU) {
+                    if (function == 0) {
+                        break;
+                    }
+                    continue;
+                }
+
+                if (function == 0) {
+                    UINT8 header_type = (UINT8)pci_config_read_value(
+                        0, (UINT8)bus, device, function,
+                        PCI_HEADER_TYPE_OFFSET, 1);
+                    if ((header_type & PCI_HEADER_TYPE_MULTI_FUNC) != 0) {
+                        function_count = PCI_MAX_FUNCTIONS;
+                    }
+                }
+
+                class_rev = (UINT32)pci_config_read_value(
+                    0, (UINT8)bus, device, function,
+                    PCI_CLASS_REVISION_OFFSET, 4);
+                sub_class = (UINT8)((class_rev >> 16) & 0xffU);
+                base_class = (UINT8)((class_rev >> 24) & 0xffU);
+                if (id == 0x00121000U ||
+                    (base_class == PCI_BASE_CLASS_MASS_STORAGE &&
+                     sub_class == PCI_SUB_CLASS_SCSI)) {
+                    Location->Bus = (UINT8)bus;
+                    Location->Device = device;
+                    Location->Function = function;
+                    return 1;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+static BOOLEAN lsi_init_controller(void)
+{
+    PCI_DEVICE_LOCATION location;
+    UINT32 mmio_bar;
+    UINT64 mmio_base;
+    UINT16 command;
+
+    if (mLsiPresent) {
+        return 1;
+    }
+    if (!scsi_find_lsi_controller(&location)) {
+        return 0;
+    }
+
+    mmio_bar = (UINT32)pci_config_read_value(0, location.Bus,
+                                             location.Device,
+                                             location.Function,
+                                             PCI_LSI_BAR1_OFFSET, 4);
+    if (!lsi_mmio_bar_address(mmio_bar, &mmio_base)) {
+        return 0;
+    }
+
+    command = (UINT16)pci_config_read_value(0, location.Bus,
+                                            location.Device,
+                                            location.Function,
+                                            PCI_CFG_COMMAND_OFFSET, 2);
+    command |= PCI_CFG_COMMAND_IO_SPACE |
+               PCI_CFG_COMMAND_MEMORY_SPACE |
+               PCI_CFG_COMMAND_BUS_MASTER;
+    pci_config_write_value(0, location.Bus, location.Device,
+                           location.Function, PCI_CFG_COMMAND_OFFSET, 2,
+                           command);
+
+    mLsiMmioBase = mmio_base;
+    mLsiPresent = 1;
+
+    lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_SRST);
+    (void)lsi_read8(LSI_REG_DSTAT);
+    (void)lsi_read8(LSI_REG_SIST0);
+    (void)lsi_read8(LSI_REG_SIST1);
+    lsi_write8(LSI_REG_SCID, SCSI_HOST_ID);
+    lsi_write8(LSI_REG_RESPID0, (UINT8)(1U << SCSI_HOST_ID));
+    lsi_write8(LSI_REG_SIEN0, 0);
+    lsi_write8(LSI_REG_SIEN1, 0);
+    lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_INTF);
+
+    uart_puts("SCSI controller:      LSI53C895A mmio=0x");
+    uart_put_hex64(mLsiMmioBase);
+    uart_puts("\r\n");
+    return 1;
+}
+
+static BOOLEAN lsi_run_scsi_script(UINT8 Target, UINT8 *Cdb, UINTN CdbLen,
+                                   UINT8 *Data, UINT32 DataLen,
+                                   UINT8 *Status)
+{
+    UINTN pos = 0;
+    UINTN jmp_mi_addr;
+    UINTN jmp_di_addr;
+    UINTN jmp_do_addr;
+    UINTN jmp_st_addr;
+    UINTN data_in_pos;
+    UINTN data_in_status_addr;
+    UINTN data_out_pos;
+    UINTN data_out_status_addr;
+    UINTN status_pos;
+    UINTN msgin_pos;
+    UINT32 script_addr;
+    UINT32 cdb_addr;
+    UINT32 data_addr = 0;
+    UINT32 msgout_addr;
+    UINT32 msgin_addr;
+    UINT32 status_addr;
+    UINTN timeout;
+    UINT8 istat;
+    UINT8 dstat;
+
+    if (!mLsiPresent || Cdb == NULL || CdbLen == 0 ||
+        CdbLen > SCSI_CDB_MAX || Target >= SCSI_HOST_ID ||
+        (DataLen != 0 && Data == NULL)) {
+        return 0;
+    }
+    if (!fw_addr32(Cdb, &cdb_addr) ||
+        !fw_addr32(mLsiMsgOut, &msgout_addr) ||
+        !fw_addr32(mLsiMsgIn, &msgin_addr) ||
+        !fw_addr32(mLsiStatus, &status_addr)) {
+        return 0;
+    }
+    if (DataLen != 0 && !fw_addr32(Data, &data_addr)) {
+        return 0;
+    }
+
+    fw_set_mem(mLsiScript, sizeof(mLsiScript), 0);
+    fw_set_mem(mLsiMsgIn, sizeof(mLsiMsgIn), 0);
+    fw_set_mem(mLsiStatus, sizeof(mLsiStatus), 0xff);
+    mLsiMsgOut[0] = 0x80; /* IDENTIFY, LUN 0 */
+
+    pos = lsi_script_emit(pos, LSI_SCRIPT_SELECT(Target), 0);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_MOVE(LSI_PHASE_MO, 1),
+                          msgout_addr);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_MOVE(LSI_PHASE_CMD, CdbLen),
+                          cdb_addr);
+
+    jmp_mi_addr = pos + 1U;
+    pos = lsi_script_emit(pos, LSI_SCRIPT_JUMP_IF_PHASE(LSI_PHASE_MI), 0);
+    jmp_di_addr = pos + 1U;
+    pos = lsi_script_emit(pos, LSI_SCRIPT_JUMP_IF_PHASE(LSI_PHASE_DI), 0);
+    jmp_do_addr = pos + 1U;
+    pos = lsi_script_emit(pos, LSI_SCRIPT_JUMP_IF_PHASE(LSI_PHASE_DO), 0);
+    jmp_st_addr = pos + 1U;
+    pos = lsi_script_emit(pos, LSI_SCRIPT_JUMP_IF_PHASE(LSI_PHASE_ST), 0);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_INTERRUPT,
+                          LSI_SCRIPT_INTERRUPT_ERROR);
+
+    data_in_pos = pos;
+    if (DataLen != 0) {
+        pos = lsi_script_emit(pos, LSI_SCRIPT_MOVE(LSI_PHASE_DI, DataLen),
+                              data_addr);
+    }
+    data_in_status_addr = pos + 1U;
+    pos = lsi_script_emit(pos, LSI_SCRIPT_JUMP_IF_PHASE(LSI_PHASE_ST), 0);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_INTERRUPT,
+                          LSI_SCRIPT_INTERRUPT_ERROR);
+
+    data_out_pos = pos;
+    if (DataLen != 0) {
+        pos = lsi_script_emit(pos, LSI_SCRIPT_MOVE(LSI_PHASE_DO, DataLen),
+                              data_addr);
+    }
+    data_out_status_addr = pos + 1U;
+    pos = lsi_script_emit(pos, LSI_SCRIPT_JUMP_IF_PHASE(LSI_PHASE_ST), 0);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_INTERRUPT,
+                          LSI_SCRIPT_INTERRUPT_ERROR);
+
+    status_pos = pos;
+    pos = lsi_script_emit(pos, LSI_SCRIPT_MOVE(LSI_PHASE_ST, 1),
+                          status_addr);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_MOVE(LSI_PHASE_MI, 1),
+                          msgin_addr);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_DISCONNECT, 0);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_INTERRUPT, 0);
+
+    msgin_pos = pos;
+    pos = lsi_script_emit(pos, LSI_SCRIPT_MOVE(LSI_PHASE_MI,
+                                               sizeof(mLsiMsgIn)),
+                          msgin_addr);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_WAIT_RESELECT, 0);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_MOVE(LSI_PHASE_MI,
+                                               sizeof(mLsiMsgIn)),
+                          msgin_addr);
+    pos = lsi_script_emit(pos, LSI_SCRIPT_JUMP_IF_PHASE(LSI_PHASE_DI),
+                          lsi_script_addr(data_in_pos));
+    pos = lsi_script_emit(pos, LSI_SCRIPT_JUMP_IF_PHASE(LSI_PHASE_DO),
+                          lsi_script_addr(data_out_pos));
+    pos = lsi_script_emit(pos, LSI_SCRIPT_INTERRUPT,
+                          LSI_SCRIPT_INTERRUPT_ERROR);
+
+    mLsiScript[jmp_mi_addr] = lsi_script_addr(msgin_pos);
+    mLsiScript[jmp_di_addr] = lsi_script_addr(data_in_pos);
+    mLsiScript[jmp_do_addr] = lsi_script_addr(data_out_pos);
+    mLsiScript[jmp_st_addr] = lsi_script_addr(status_pos);
+    mLsiScript[data_in_status_addr] = lsi_script_addr(status_pos);
+    mLsiScript[data_out_status_addr] = lsi_script_addr(status_pos);
+    script_addr = lsi_script_addr(0);
+    if (script_addr == 0) {
+        return 0;
+    }
+
+    (void)lsi_read8(LSI_REG_DSTAT);
+    (void)lsi_read8(LSI_REG_SIST0);
+    (void)lsi_read8(LSI_REG_SIST1);
+    lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_INTF);
+    __asm__ __volatile__ ("mf" : : : "memory");
+    lsi_write32(LSI_REG_DSP, script_addr);
+
+    timeout = 20000000U;
+    do {
+        istat = lsi_read8(LSI_REG_ISTAT0);
+        if ((istat & LSI_ISTAT0_DIP) != 0) {
+            dstat = lsi_read8(LSI_REG_DSTAT);
+            if ((dstat & LSI_DSTAT_SIR) != 0) {
+                if (Status != NULL) {
+                    *Status = mLsiStatus[0];
+                }
+                return mLsiStatus[0] == 0;
+            }
+            return 0;
+        }
+        if ((istat & LSI_ISTAT0_SIP) != 0) {
+            (void)lsi_read8(LSI_REG_SIST0);
+            (void)lsi_read8(LSI_REG_SIST1);
+            return 0;
+        }
+        timeout--;
+    } while (timeout > 0);
+
+    lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_ABRT);
+    return 0;
+}
+
+static BOOLEAN lsi_scsi_command_prepared(SCSI_DEVICE *Dev, UINTN CdbLen,
+                                         UINT8 *Data, UINT32 DataLen)
+{
+    UINT8 status = 0xff;
+
+    if (Dev == NULL || !Dev->present ||
+        CdbLen == 0 || CdbLen > sizeof(mLsiCdb)) {
+        return 0;
+    }
+
+    return lsi_run_scsi_script(Dev->target, mLsiCdb, CdbLen, Data, DataLen,
+                               &status);
+}
+
+static BOOLEAN scsi_inquiry(SCSI_DEVICE *Dev, UINT8 *Buffer, UINT32 Length)
+{
+    fw_set_mem(mLsiCdb, sizeof(mLsiCdb), 0);
+    mLsiCdb[0] = SCSI_CMD_INQUIRY;
+    mLsiCdb[4] = (UINT8)Length;
+    return lsi_scsi_command_prepared(Dev, 6, Buffer, Length);
+}
+
+static BOOLEAN scsi_read_capacity(SCSI_DEVICE *Dev)
+{
+    UINT8 *buf = mScsiBounce;
+    UINT32 last_lba;
+    UINT32 block_size;
+
+    fw_set_mem(mLsiCdb, sizeof(mLsiCdb), 0);
+    mLsiCdb[0] = SCSI_CMD_READ_CAPACITY_10;
+    fw_set_mem(buf, SCSI_CAPACITY_LEN, 0);
+    if (!lsi_scsi_command_prepared(Dev, 10, buf, SCSI_CAPACITY_LEN)) {
+        return 0;
+    }
+
+    last_lba = fw_be32(buf);
+    block_size = fw_be32(buf + 4);
+    if (block_size == 0) {
+        return 0;
+    }
+    Dev->last_lba = last_lba;
+    Dev->block_size = block_size;
+    Dev->media_present = 1;
+    return 1;
+}
+
+static BOOLEAN scsi_test_unit_ready(SCSI_DEVICE *Dev)
+{
+    fw_set_mem(mLsiCdb, sizeof(mLsiCdb), 0);
+    mLsiCdb[0] = SCSI_CMD_TEST_UNIT_READY;
+    return lsi_scsi_command_prepared(Dev, 6, NULL, 0);
+}
+
+static BOOLEAN scsi_read_blocks(SCSI_DEVICE *Dev, UINT8 *Buffer,
+                                UINT32 Lba, UINT32 Count)
+{
+    UINT32 byte_count;
+
+    if (Dev == NULL || !Dev->present || !Dev->media_present ||
+        Buffer == NULL || Count == 0 || Count > 0xffffU ||
+        Dev->block_size == 0) {
+        return Count == 0;
+    }
+
+    byte_count = Dev->block_size * Count;
+    if (byte_count / Dev->block_size != Count) {
+        return 0;
+    }
+
+    fw_set_mem(mLsiCdb, sizeof(mLsiCdb), 0);
+    mLsiCdb[0] = SCSI_CMD_READ_10;
+    fw_write_be32(mLsiCdb + 2, Lba);
+    fw_write_be16(mLsiCdb + 7, (UINT16)Count);
+    return lsi_scsi_command_prepared(Dev, 10, Buffer, byte_count);
+}
+
+static BOOLEAN scsi_write_blocks(SCSI_DEVICE *Dev, const UINT8 *Buffer,
+                                 UINT32 Lba, UINT32 Count)
+{
+    UINT32 byte_count;
+
+    if (Dev == NULL || !Dev->present || !Dev->media_present ||
+        Dev->read_only || Buffer == NULL || Count == 0 ||
+        Count > 0xffffU || Dev->block_size == 0) {
+        return Count == 0;
+    }
+
+    byte_count = Dev->block_size * Count;
+    if (byte_count / Dev->block_size != Count ||
+        byte_count > sizeof(mScsiBounce)) {
+        return 0;
+    }
+
+    fw_copy_mem(mScsiBounce, Buffer, byte_count);
+    fw_set_mem(mLsiCdb, sizeof(mLsiCdb), 0);
+    mLsiCdb[0] = SCSI_CMD_WRITE_10;
+    fw_write_be32(mLsiCdb + 2, Lba);
+    fw_write_be16(mLsiCdb + 7, (UINT16)Count);
+    return lsi_scsi_command_prepared(Dev, 10, mScsiBounce, byte_count);
+}
+
+static void scsi_probe_devices(void)
+{
+    UINTN target;
+
+    fw_set_mem(mScsiDevices, sizeof(mScsiDevices), 0);
+    mBootScsiDevice = NULL;
+    mDiskScsiDevice = NULL;
+
+    if (!lsi_init_controller()) {
+        return;
+    }
+
+    for (target = 0; target < SCSI_DEVICE_MAX; target++) {
+        SCSI_DEVICE *dev = &mScsiDevices[target];
+        UINT8 *inquiry = mScsiBounce;
+        UINT8 type;
+
+        if (target == SCSI_HOST_ID) {
+            continue;
+        }
+
+        fw_set_mem(dev, sizeof(*dev), 0);
+        dev->target = (UINT8)target;
+        dev->lun = 0;
+        fw_set_mem(inquiry, SCSI_INQUIRY_LEN, 0);
+        dev->present = 1;
+        if (!scsi_inquiry(dev, inquiry, SCSI_INQUIRY_LEN)) {
+            dev->present = 0;
+            continue;
+        }
+
+        type = inquiry[0] & 0x1fU;
+        if (type == 0x1fU) {
+            dev->present = 0;
+            continue;
+        }
+
+        dev->is_cd = type == SCSI_TYPE_CDROM;
+        dev->removable = (inquiry[1] & 0x80U) != 0;
+        dev->read_only = dev->is_cd;
+        (void)scsi_test_unit_ready(dev);
+        if (!scsi_read_capacity(dev)) {
+            dev->media_present = 0;
+            dev->block_size = dev->is_cd ? ATAPI_SECTOR_SIZE : 512U;
+            dev->last_lba = 0;
+        }
+
+        uart_puts("SCSI device:          target ");
+        uart_put_hex64(target);
+        uart_puts(dev->is_cd ? " CD-ROM" : " disk");
+        uart_puts(dev->media_present ? " media\r\n" : " no media\r\n");
+
+        if (dev->media_present && dev->is_cd && mBootScsiDevice == NULL) {
+            mBootScsiDevice = dev;
+        }
+        if (dev->media_present && !dev->is_cd && mDiskScsiDevice == NULL) {
+            mDiskScsiDevice = dev;
+        }
+    }
+}
+
+static void storage_set_none(FW_STORAGE_DEVICE *Device)
+{
+    if (Device != NULL) {
+        fw_set_mem(Device, sizeof(*Device), 0);
+        Device->Kind = FW_STORAGE_NONE;
+    }
+}
+
+static void storage_set_ide(FW_STORAGE_DEVICE *Device, IDE_DEVICE *Ide)
+{
+    storage_set_none(Device);
+    if (Device != NULL && Ide != NULL && Ide->present) {
+        Device->Kind = FW_STORAGE_IDE;
+        Device->Ide = Ide;
+    }
+}
+
+static void storage_set_scsi(FW_STORAGE_DEVICE *Device, SCSI_DEVICE *Scsi)
+{
+    storage_set_none(Device);
+    if (Device != NULL && Scsi != NULL && Scsi->present &&
+        Scsi->media_present) {
+        Device->Kind = FW_STORAGE_SCSI;
+        Device->Scsi = Scsi;
+    }
+}
+
+static BOOLEAN storage_present(const FW_STORAGE_DEVICE *Device)
+{
+    if (Device == NULL) {
+        return 0;
+    }
+    if (Device->Kind == FW_STORAGE_IDE) {
+        return Device->Ide != NULL && Device->Ide->present;
+    }
+    if (Device->Kind == FW_STORAGE_SCSI) {
+        return Device->Scsi != NULL && Device->Scsi->present &&
+               Device->Scsi->media_present;
+    }
+    return 0;
+}
+
+static BOOLEAN storage_is_cd(const FW_STORAGE_DEVICE *Device)
+{
+    if (!storage_present(Device)) {
+        return 0;
+    }
+    if (Device->Kind == FW_STORAGE_IDE) {
+        return Device->Ide->is_atapi;
+    }
+    return Device->Scsi->is_cd;
+}
+
+static BOOLEAN storage_read_only(const FW_STORAGE_DEVICE *Device)
+{
+    if (!storage_present(Device)) {
+        return 1;
+    }
+    if (Device->Kind == FW_STORAGE_IDE) {
+        return Device->Ide->is_atapi;
+    }
+    return Device->Scsi->read_only;
+}
+
+static UINT32 storage_block_size(const FW_STORAGE_DEVICE *Device)
+{
+    if (!storage_present(Device)) {
+        return 512U;
+    }
+    if (Device->Kind == FW_STORAGE_IDE) {
+        return Device->Ide->is_atapi ? ATAPI_SECTOR_SIZE : 512U;
+    }
+    return Device->Scsi->block_size;
+}
+
+static UINT64 storage_last_lba(const FW_STORAGE_DEVICE *Device)
+{
+    if (!storage_present(Device)) {
+        return 0;
+    }
+    if (Device->Kind == FW_STORAGE_IDE) {
+        if (Device->Ide->is_atapi) {
+            return mCdromBlocks > 0 ? (UINT64)(mCdromBlocks - 1U) :
+                                      0xffffffffULL;
+        }
+        return Device->Ide->last_lba;
+    }
+    return Device->Scsi->last_lba;
+}
+
+static BOOLEAN storage_read_blocks(const FW_STORAGE_DEVICE *Device,
+                                   UINT8 *Buffer, UINT32 Lba, UINT32 Count)
+{
+    UINT32 done;
+    UINT32 blocks_per_bounce;
+
+    if (!storage_present(Device) || Buffer == NULL) {
+        return Count == 0;
+    }
+    if (Count == 0) {
+        return 1;
+    }
+    if (Device->Kind == FW_STORAGE_IDE) {
+        if (Device->Ide->is_atapi) {
+            return atapi_read_sectors(Device->Ide, Buffer, Lba, Count);
+        }
+        if (Count == 1) {
+            return ata_pio_read_sector_cached(Device->Ide, Buffer, Lba);
+        }
+        return ata_read_sectors(Device->Ide, Buffer, Lba, Count);
+    }
+
+    if (Device->Scsi->block_size == 0) {
+        return 0;
+    }
+    blocks_per_bounce = sizeof(mScsiBounce) / Device->Scsi->block_size;
+    if (blocks_per_bounce == 0) {
+        return 0;
+    }
+    if (blocks_per_bounce > 0xffffU) {
+        blocks_per_bounce = 0xffffU;
+    }
+
+    done = 0;
+    while (done < Count) {
+        UINT32 chunk = Count - done;
+        UINT32 bytes;
+
+        if (chunk > blocks_per_bounce) {
+            chunk = blocks_per_bounce;
+        }
+        bytes = chunk * Device->Scsi->block_size;
+        if (bytes / Device->Scsi->block_size != chunk ||
+            !scsi_read_blocks(Device->Scsi, mScsiBounce, Lba + done,
+                              chunk)) {
+            return 0;
+        }
+        fw_copy_mem(Buffer + (UINTN)done * Device->Scsi->block_size,
+                    mScsiBounce, bytes);
+        done += chunk;
+    }
+    return 1;
+}
+
+static BOOLEAN storage_write_blocks(const FW_STORAGE_DEVICE *Device,
+                                    const UINT8 *Buffer, UINT32 Lba,
+                                    UINT32 Count)
+{
+    UINT32 done = 0;
+    UINT32 max_blocks;
+
+    if (!storage_present(Device) || Buffer == NULL ||
+        storage_read_only(Device)) {
+        return Count == 0;
+    }
+    if (Count == 0) {
+        return 1;
+    }
+    if (Device->Kind == FW_STORAGE_IDE && Device->Ide->is_atapi) {
+        return 0;
+    }
+
+    max_blocks = Device->Kind == FW_STORAGE_IDE ? 255U :
+        (UINT32)(sizeof(mScsiBounce) / Device->Scsi->block_size);
+    if (max_blocks == 0) {
+        return 0;
+    }
+    if (max_blocks > 0xffffU) {
+        max_blocks = 0xffffU;
+    }
+
+    while (done < Count) {
+        UINT32 chunk = Count - done;
+        const UINT8 *chunk_buffer =
+            Buffer + (UINTN)done * storage_block_size(Device);
+        BOOLEAN ok;
+
+        if (chunk > max_blocks) {
+            chunk = max_blocks;
+        }
+        if (Device->Kind == FW_STORAGE_IDE) {
+            ok = ata_write_sectors(Device->Ide, chunk_buffer,
+                                   Lba + done, chunk);
+        } else {
+            ok = scsi_write_blocks(Device->Scsi, chunk_buffer,
+                                   Lba + done, chunk);
+        }
+        if (!ok) {
+            return 0;
+        }
+        done += chunk;
+    }
+    return 1;
+}
+
+static void storage_invalidate_cache(const FW_STORAGE_DEVICE *Device)
+{
+    if (Device != NULL && Device->Kind == FW_STORAGE_IDE) {
+        ata_read_cache_invalidate(Device->Ide);
+    }
 }
 
 /* --- FAT12/16 File System ------------------------------------------------- */
@@ -14262,7 +15117,6 @@ static UINT64 mBootImagePartitionCdBlocks;
 static UINT32 mBootImageFatBlocks;
 static UINT16 mBootImageCatalogSectorCount;
 static BOOLEAN mBootImageUsesUefiSectorCount;
-static UINT32 mCdromBlocks;
 static BOOLEAN mBootImageMapped;
 static BOOLEAN mBootImageChecked;
 
@@ -14311,12 +15165,12 @@ static BOOLEAN atapi_configure_el_torito(void)
     }
     mBootImageChecked = 1;
 
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->is_atapi) {
+    if (!storage_is_cd(&mBootStorageDevice)) {
         return 0;
     }
 
     for (i = 16; i < 32; i++) {
-        if (!atapi_read_sector(mBootIdeDevice, sec, (UINT32)i)) {
+        if (!storage_read_blocks(&mBootStorageDevice, sec, (UINT32)i, 1)) {
             return 0;
         }
         if (!fw_bytes_eq(sec + 1, "CD001", 5)) {
@@ -14336,7 +15190,7 @@ static BOOLEAN atapi_configure_el_torito(void)
     }
 
     if (catalog_lba == 0 ||
-        !atapi_read_sector(mBootIdeDevice, sec, catalog_lba)) {
+        !storage_read_blocks(&mBootStorageDevice, sec, catalog_lba, 1)) {
         return 0;
     }
 
@@ -14347,7 +15201,8 @@ static BOOLEAN atapi_configure_el_torito(void)
 
     catalog_sector_count = fw_le16(sec + 0x26);
     boot_lba = fw_le32(sec + 0x28);
-    if (boot_lba == 0 || !atapi_read_sector(mBootIdeDevice, sec, boot_lba)) {
+    if (boot_lba == 0 ||
+        !storage_read_blocks(&mBootStorageDevice, sec, boot_lba, 1)) {
         return 0;
     }
 
@@ -14407,12 +15262,15 @@ static BOOLEAN atapi_configure_el_torito(void)
 
 static BOOLEAN fw_read_512(UINT8 *buf, UINT32 lba)
 {
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present) {
+    if (!storage_present(&mBootStorageDevice)) {
         return 0;
     }
 
-    if (!mBootIdeDevice->is_atapi) {
-        return ata_pio_read_sector_cached(mBootIdeDevice, buf, lba);
+    if (!storage_is_cd(&mBootStorageDevice)) {
+        if (storage_block_size(&mBootStorageDevice) != 512U) {
+            return 0;
+        }
+        return storage_read_blocks(&mBootStorageDevice, buf, lba, 1);
     }
 
     if (!atapi_configure_el_torito()) {
@@ -14431,7 +15289,7 @@ static BOOLEAN fw_read_512(UINT8 *buf, UINT32 lba)
         UINT32 off = (lba & 3) * 512;
 
         if (!cached_valid || cached_iso_lba != iso_lba) {
-            if (!atapi_read_sector(mBootIdeDevice, sec, iso_lba)) {
+            if (!storage_read_blocks(&mBootStorageDevice, sec, iso_lba, 1)) {
                 return 0;
             }
             cached_iso_lba = iso_lba;
@@ -14449,12 +15307,13 @@ static BOOLEAN fw_read_512s(UINT8 *buf, UINT32 lba, UINT32 count)
     if (count == 0) {
         return 1;
     }
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present) {
+    if (!storage_present(&mBootStorageDevice)) {
         return 0;
     }
 
-    if (!mBootIdeDevice->is_atapi) {
-        if ((UINT64)lba + count - 1U > mBootIdeDevice->last_lba) {
+    if (!storage_is_cd(&mBootStorageDevice)) {
+        if (storage_block_size(&mBootStorageDevice) != 512U ||
+            (UINT64)lba + count - 1U > storage_last_lba(&mBootStorageDevice)) {
             return 0;
         }
         while (done < count) {
@@ -14463,8 +15322,8 @@ static BOOLEAN fw_read_512s(UINT8 *buf, UINT32 lba, UINT32 count)
             if (chunk > 255) {
                 chunk = 255;
             }
-            if (!ata_read_sectors(mBootIdeDevice, buf + done * 512,
-                                  lba + done, chunk)) {
+            if (!storage_read_blocks(&mBootStorageDevice, buf + done * 512,
+                                     lba + done, chunk)) {
                 return 0;
             }
             done += chunk;
@@ -14487,9 +15346,9 @@ static BOOLEAN fw_read_512s(UINT8 *buf, UINT32 lba, UINT32 count)
         if ((block & 3U) == 0 && remaining >= 4) {
             UINT32 cd_count = remaining / 4U;
 
-            if (!atapi_read_sectors(mBootIdeDevice, buf + done * 512,
-                                    mBootImageStartLba + (block / 4U),
-                                    cd_count)) {
+            if (!storage_read_blocks(&mBootStorageDevice, buf + done * 512,
+                                     mBootImageStartLba + (block / 4U),
+                                     cd_count)) {
                 return 0;
             }
             done += cd_count * 4U;
@@ -14512,31 +15371,31 @@ EFI_STATUS blk_reset(EFI_BLOCK_IO_PROTOCOL *This,
     return EFI_SUCCESS;
 }
 
-static IDE_DEVICE *block_io_ide_device(EFI_BLOCK_IO_PROTOCOL *This)
+static FW_STORAGE_DEVICE *block_io_storage_device(EFI_BLOCK_IO_PROTOCOL *This)
 {
     if (This == &mDiskBlockIoProto) {
-        return mHardDiskIdeDevice;
+        return &mDiskStorageDevice;
     }
-    return mBootIdeDevice;
+    return &mBootStorageDevice;
 }
 
 static EFI_STATUS blk_validate_transfer(EFI_BLOCK_IO_PROTOCOL *This,
                                         UINT32 MediaId, UINT64 Lba,
                                         UINTN BufferSize, VOID *Buffer,
                                         EFI_BLOCK_IO_MEDIA **Media,
-                                        IDE_DEVICE **Device,
+                                        FW_STORAGE_DEVICE **Device,
                                         UINT32 *BlockCount)
 {
     EFI_BLOCK_IO_MEDIA *media;
-    IDE_DEVICE *dev;
+    FW_STORAGE_DEVICE *dev;
     UINTN block_size;
 
     if (This == NULL || This->Media == NULL) {
         return EFI_INVALID_PARAMETER;
     }
     media = This->Media;
-    dev = block_io_ide_device(This);
-    if (dev == NULL || !dev->present || !media->MediaPresent) {
+    dev = block_io_storage_device(This);
+    if (dev == NULL || !storage_present(dev) || !media->MediaPresent) {
         return EFI_NO_MEDIA;
     }
     if (MediaId != media->MediaId) {
@@ -14588,7 +15447,7 @@ EFI_STATUS blk_read(EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId,
                             UINT64 Lba, UINTN BufferSize, VOID *Buffer)
 {
     EFI_BLOCK_IO_MEDIA *media;
-    IDE_DEVICE *dev;
+    FW_STORAGE_DEVICE *dev;
     UINT8 *buf = (UINT8 *)Buffer;
     UINT32 block_count;
     EFI_STATUS st;
@@ -14596,17 +15455,15 @@ EFI_STATUS blk_read(EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId,
     st = blk_validate_transfer(This, MediaId, Lba, BufferSize, Buffer,
                                &media, &dev, &block_count);
     if (st != EFI_SUCCESS || BufferSize == 0) {
-        if (st != EFI_SUCCESS) {
-        }
         return st;
     }
 
-    if (dev->is_atapi && !media->LogicalPartition) {
-        if (!atapi_read_sectors(dev, buf, (UINT32)Lba, block_count)) {
+    if (storage_is_cd(dev) && !media->LogicalPartition) {
+        if (!storage_read_blocks(dev, buf, (UINT32)Lba, block_count)) {
             return EFI_DEVICE_ERROR;
         }
     } else if (media->BlockSize == 512 && This == &mDiskBlockIoProto) {
-        if (!ata_read_sectors(dev, buf, (UINT32)Lba, block_count)) {
+        if (!storage_read_blocks(dev, buf, (UINT32)Lba, block_count)) {
             return EFI_DEVICE_ERROR;
         }
     } else if (media->BlockSize == 512) {
@@ -14623,7 +15480,7 @@ EFI_STATUS blk_write(EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId,
                              UINT64 Lba, UINTN BufferSize, VOID *Buffer)
 {
     EFI_BLOCK_IO_MEDIA *media;
-    IDE_DEVICE *dev;
+    FW_STORAGE_DEVICE *dev;
     UINT32 block_count;
     EFI_STATUS st;
 
@@ -14632,14 +15489,14 @@ EFI_STATUS blk_write(EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId,
     if (st != EFI_SUCCESS || BufferSize == 0) {
         return st;
     }
-    if (media->ReadOnly || dev->is_atapi || media->BlockSize != 512) {
+    if (media->ReadOnly || storage_is_cd(dev) || media->BlockSize != 512) {
         return EFI_WRITE_PROTECTED;
     }
-    if (!ata_write_sectors(dev, (const UINT8 *)Buffer, (UINT32)Lba,
-                           block_count)) {
+    if (!storage_write_blocks(dev, (const UINT8 *)Buffer, (UINT32)Lba,
+                              block_count)) {
         return EFI_DEVICE_ERROR;
     }
-    ata_read_cache_invalidate(dev);
+    storage_invalidate_cache(dev);
     return EFI_SUCCESS;
 }
 
@@ -14663,8 +15520,7 @@ static BOOLEAN block_io_read_selftest(void)
 
     st = mBlockIoProto.ReadBlocks(&mBlockIoProto, media->MediaId + 1U,
                                   0, media->BlockSize, buf);
-    if (mBootIdeDevice != NULL && mBootIdeDevice->present &&
-        media->MediaPresent) {
+    if (storage_present(&mBootStorageDevice) && media->MediaPresent) {
         if (st != EFI_MEDIA_CHANGED) {
             return 0;
         }
@@ -14672,8 +15528,7 @@ static BOOLEAN block_io_read_selftest(void)
         return 0;
     }
 
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present ||
-        !media->MediaPresent) {
+    if (!storage_present(&mBootStorageDevice) || !media->MediaPresent) {
         return 1;
     }
 
@@ -14706,7 +15561,7 @@ static BOOLEAN block_io_read_selftest(void)
         return 0;
     }
 
-    if (mBootIdeDevice->is_atapi && mRawBlockIoProto.Media != NULL) {
+    if (storage_is_cd(&mBootStorageDevice) && mRawBlockIoProto.Media != NULL) {
         EFI_BLOCK_IO_MEDIA *raw = mRawBlockIoProto.Media;
 
         if (mRawBlockIoProto.ReadBlocks(&mRawBlockIoProto,
@@ -15173,6 +16028,8 @@ static FW_PCI_CONTROLLER_DEVICE_PATH mPciOhciDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(2);
 static FW_PCI_CONTROLLER_DEVICE_PATH mPciUhciDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(3);
+static FW_PCI_CONTROLLER_DEVICE_PATH mPciLsiDevicePath =
+    FW_PCI_CONTROLLER_DEVICE_PATH_INIT(4);
 
 static FW_BLOCK_DEVICE_PATH mBlockDevicePath = {
     .Acpi = {
@@ -15191,12 +16048,12 @@ static FW_BLOCK_DEVICE_PATH mBlockDevicePath = {
             .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
         },
         .Function = 0,
-        .Device = 0,
+        .Device = 4,
     },
     .Atapi = {
         .Header = {
             .Type = 0x03,
-            .SubType = 0x01,
+            .SubType = 0x02,
             .Length = sizeof(FW_ATAPI_DEVICE_PATH_NODE),
         },
         .PrimarySecondary = 0,
@@ -15237,12 +16094,12 @@ static FW_RAW_BLOCK_DEVICE_PATH mRawBlockDevicePath = {
             .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
         },
         .Function = 0,
-        .Device = 0,
+        .Device = 4,
     },
     .Atapi = {
         .Header = {
             .Type = 0x03,
-            .SubType = 0x01,
+            .SubType = 0x02,
             .Length = sizeof(FW_ATAPI_DEVICE_PATH_NODE),
         },
         .PrimarySecondary = 0,
@@ -15273,16 +16130,16 @@ static FW_RAW_BLOCK_DEVICE_PATH mDiskBlockDevicePath = {
             .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
         },
         .Function = 0,
-        .Device = 0,
+        .Device = 4,
     },
     .Atapi = {
         .Header = {
             .Type = 0x03,
-            .SubType = 0x01,
+            .SubType = 0x02,
             .Length = sizeof(FW_ATAPI_DEVICE_PATH_NODE),
         },
-        .PrimarySecondary = 0,
-        .SlaveMaster = 1,
+        .PrimarySecondary = 1,
+        .SlaveMaster = 0,
         .Lun = 0,
     },
     .End = {
@@ -15309,7 +16166,7 @@ static FW_GRAPHICS_DEVICE_PATH mGraphicsDevicePath = {
             .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
         },
         .Function = 0,
-        .Device = 4,
+        .Device = 5,
     },
     .End = {
         .Type = 0x7f,
@@ -15394,12 +16251,12 @@ static FW_WINDOWS_OS_OPTIONS mWindowsSetupOsOptions = {
                     .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
                 },
                 .Function = 0,
-                .Device = 0,
+                .Device = 4,
             },
             .Atapi = {
                 .Header = {
                     .Type = 0x03,
-                    .SubType = 0x01,
+                    .SubType = 0x02,
                     .Length = sizeof(FW_ATAPI_DEVICE_PATH_NODE),
                 },
                 .PrimarySecondary = 0,
@@ -15448,12 +16305,12 @@ static FW_WINDOWS_SETUP_LOADER_DEVICE_PATH mWindowsSetupLoaderDevicePath = {
             .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
         },
         .Function = 0,
-        .Device = 0,
+        .Device = 4,
     },
     .Atapi = {
         .Header = {
             .Type = 0x03,
-            .SubType = 0x01,
+            .SubType = 0x02,
             .Length = sizeof(FW_ATAPI_DEVICE_PATH_NODE),
         },
         .PrimarySecondary = 0,
@@ -15486,12 +16343,65 @@ static FW_WINDOWS_SETUP_LOADER_DEVICE_PATH mWindowsSetupLoaderDevicePath = {
     },
 };
 
-static void fw_update_windows_setup_device_paths(VOID)
+static UINT8 fw_storage_pci_device(const FW_STORAGE_DEVICE *Device)
 {
-    mWindowsSetupOsOptions.OsLoaderFilePath.FilePath.Atapi.SlaveMaster =
-        mBootIdeDevice != NULL ? mBootIdeDevice->unit : 0;
-    mWindowsSetupLoaderDevicePath.Atapi.SlaveMaster =
-        mBootIdeDevice != NULL ? mBootIdeDevice->unit : 0;
+    return (Device != NULL && Device->Kind == FW_STORAGE_IDE) ? 0 : 4;
+}
+
+static void fw_set_storage_path_node(FW_ATAPI_DEVICE_PATH_NODE *Node,
+                                     const FW_STORAGE_DEVICE *Device)
+{
+    if (Node == NULL) {
+        return;
+    }
+
+    Node->Header.Type = 0x03;
+    Node->Header.Length = sizeof(*Node);
+    Node->Lun = 0;
+
+    if (Device != NULL && Device->Kind == FW_STORAGE_IDE &&
+        Device->Ide != NULL) {
+        Node->Header.SubType = 0x01; /* ATAPI */
+        Node->PrimarySecondary = 0;
+        Node->SlaveMaster = Device->Ide->unit;
+        return;
+    }
+
+    Node->Header.SubType = 0x02; /* SCSI */
+    if (Device != NULL && Device->Kind == FW_STORAGE_SCSI &&
+        Device->Scsi != NULL) {
+        Node->PrimarySecondary = Device->Scsi->target;
+        Node->SlaveMaster = 0;
+        Node->Lun = Device->Scsi->lun;
+    } else {
+        Node->PrimarySecondary = 0;
+        Node->SlaveMaster = 0;
+    }
+}
+
+static BOOLEAN fw_storage_path_node_matches(
+    const FW_ATAPI_DEVICE_PATH_NODE *Node,
+    const FW_STORAGE_DEVICE *Device)
+{
+    if (Node == NULL || Device == NULL ||
+        Node->Header.Type != 0x03 ||
+        Node->Header.Length != sizeof(*Node)) {
+        return 0;
+    }
+
+    if (Device->Kind == FW_STORAGE_IDE && Device->Ide != NULL) {
+        return Node->Header.SubType == 0x01 &&
+               Node->PrimarySecondary == 0 &&
+               Node->SlaveMaster == Device->Ide->unit &&
+               Node->Lun == 0;
+    }
+    if (Device->Kind == FW_STORAGE_SCSI && Device->Scsi != NULL) {
+        return Node->Header.SubType == 0x02 &&
+               Node->PrimarySecondary == Device->Scsi->target &&
+               Node->SlaveMaster == 0 &&
+               Node->Lun == Device->Scsi->lun;
+    }
+    return 0;
 }
 
 static FW_BOOT_FULL_DEVICE_PATH mBootFullDevicePath = {
@@ -15511,12 +16421,12 @@ static FW_BOOT_FULL_DEVICE_PATH mBootFullDevicePath = {
             .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
         },
         .Function = 0,
-        .Device = 0,
+        .Device = 4,
     },
     .Atapi = {
         .Header = {
             .Type = 0x03,
-            .SubType = 0x01,
+            .SubType = 0x02,
             .Length = sizeof(FW_ATAPI_DEVICE_PATH_NODE),
         },
         .PrimarySecondary = 0,
@@ -15548,6 +16458,31 @@ static FW_BOOT_FULL_DEVICE_PATH mBootFullDevicePath = {
         .Length = 4,
     },
 };
+
+static void fw_update_storage_device_paths(VOID)
+{
+    UINT8 boot_pci = fw_storage_pci_device(&mBootStorageDevice);
+    UINT8 disk_pci = fw_storage_pci_device(&mDiskStorageDevice);
+
+    mBlockDevicePath.Pci.Device = boot_pci;
+    fw_set_storage_path_node(&mBlockDevicePath.Atapi, &mBootStorageDevice);
+    mRawBlockDevicePath.Pci.Device = boot_pci;
+    fw_set_storage_path_node(&mRawBlockDevicePath.Atapi, &mBootStorageDevice);
+    mBootFullDevicePath.Pci.Device = boot_pci;
+    fw_set_storage_path_node(&mBootFullDevicePath.Atapi, &mBootStorageDevice);
+
+    mWindowsSetupOsOptions.OsLoaderFilePath.FilePath.Pci.Device = boot_pci;
+    fw_set_storage_path_node(
+        &mWindowsSetupOsOptions.OsLoaderFilePath.FilePath.Atapi,
+        &mBootStorageDevice);
+    mWindowsSetupLoaderDevicePath.Pci.Device = boot_pci;
+    fw_set_storage_path_node(&mWindowsSetupLoaderDevicePath.Atapi,
+                             &mBootStorageDevice);
+
+    mDiskBlockDevicePath.Pci.Device = disk_pci;
+    fw_set_storage_path_node(&mDiskBlockDevicePath.Atapi,
+                             &mDiskStorageDevice);
+}
 
 static BOOLEAN fw_device_path_is_end(const FW_DEVICE_PATH_NODE *node)
 {
@@ -15939,9 +16874,8 @@ static BOOLEAN __attribute__((noinline)) windows_setup_boot_option_selftest(void
         }
     }
 
-    return source->Atapi.Header.Type == 0x03 &&
-           source->Atapi.Header.SubType == 0x01 &&
-           source->Atapi.SlaveMaster == mBootIdeDevice->unit &&
+    return fw_storage_path_node_matches(&source->Atapi,
+                                        &mBootStorageDevice) &&
            source->Cdrom.Header.Type == 0x04 &&
            source->Cdrom.Header.SubType == 0x02 &&
            source->Cdrom.PartitionStart == 0 &&
@@ -15958,7 +16892,8 @@ static BOOLEAN __attribute__((noinline)) optical_raw_device_path_selftest(void)
 {
     return mRawBlockDevicePath.Acpi.Header.Type == 0x02 &&
            mRawBlockDevicePath.Pci.Header.Type == 0x01 &&
-           mRawBlockDevicePath.Atapi.Header.Type == 0x03 &&
+           fw_storage_path_node_matches(&mRawBlockDevicePath.Atapi,
+                                        &mBootStorageDevice) &&
            mRawBlockDevicePath.End.Type == 0x7f &&
            mRawBlockDevicePath.End.SubType == 0xff &&
            fw_device_path_size((const FW_DEVICE_PATH_NODE *)
@@ -15970,8 +16905,8 @@ static BOOLEAN __attribute__((noinline)) el_torito_partition_selftest(void)
 {
     UINT64 expected_cd_blocks;
 
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present ||
-        !mBootIdeDevice->is_atapi || !mBootImageMapped) {
+    if (!storage_present(&mBootStorageDevice) ||
+        !storage_is_cd(&mBootStorageDevice) || !mBootImageMapped) {
         return 1;
     }
     if (mBootImageFatBlocks == 0 ||
@@ -16913,11 +17848,10 @@ static EFI_STATUS fw_fat_read_file_entry(const FAT_DIR_ENTRY *entry,
 
 static BOOLEAN fw_iso_read_sector(UINT8 *buf, UINT32 lba)
 {
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present ||
-        !mBootIdeDevice->is_atapi || buf == NULL) {
+    if (!storage_is_cd(&mBootStorageDevice) || buf == NULL) {
         return 0;
     }
-    return atapi_read_sector(mBootIdeDevice, buf, lba);
+    return storage_read_blocks(&mBootStorageDevice, buf, lba, 1);
 }
 
 static BOOLEAN fw_iso_read_sectors(UINT8 *buf, UINT32 lba, UINT32 count)
@@ -16925,11 +17859,10 @@ static BOOLEAN fw_iso_read_sectors(UINT8 *buf, UINT32 lba, UINT32 count)
     if (count == 0) {
         return 1;
     }
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present ||
-        !mBootIdeDevice->is_atapi || buf == NULL) {
+    if (!storage_is_cd(&mBootStorageDevice) || buf == NULL) {
         return 0;
     }
-    return atapi_read_sectors(mBootIdeDevice, buf, lba, count);
+    return storage_read_blocks(&mBootStorageDevice, buf, lba, count);
 }
 
 static BOOLEAN fw_iso_init(void)
@@ -16940,8 +17873,7 @@ static BOOLEAN fw_iso_init(void)
     if (mIsoVolume.valid) {
         return 1;
     }
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present ||
-        !mBootIdeDevice->is_atapi) {
+    if (!storage_is_cd(&mBootStorageDevice)) {
         return 0;
     }
 
@@ -17408,11 +18340,10 @@ static BOOLEAN fw_udf_tag_valid(const UINT8 *buf, UINT16 expected_tag,
 
 static BOOLEAN fw_udf_read_sector(UINT8 *buf, UINT32 lba)
 {
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present ||
-        !mBootIdeDevice->is_atapi || buf == NULL) {
+    if (!storage_is_cd(&mBootStorageDevice) || buf == NULL) {
         return 0;
     }
-    return atapi_read_sector(mBootIdeDevice, buf, lba);
+    return storage_read_blocks(&mBootStorageDevice, buf, lba, 1);
 }
 
 static BOOLEAN fw_udf_regid_matches(const UINT8 *regid, const char *id)
@@ -18205,8 +19136,7 @@ static BOOLEAN fw_udf_init(void)
     }
     mUdfVolume.checked = 1;
 
-    if (mBootIdeDevice == NULL || !mBootIdeDevice->present ||
-        !mBootIdeDevice->is_atapi) {
+    if (!storage_is_cd(&mBootStorageDevice)) {
         return 0;
     }
     if (mCdromBlocks == 0 && !atapi_configure_el_torito()) {
@@ -19495,6 +20425,11 @@ static const FW_PCI_ROOT_BRIDGE_RESOURCES mPciRootBridgeResources = {
 #define FW_PCI_UHCI_ATTRIBUTES \
     (EFI_PCI_ATTRIBUTE_IO | EFI_PCI_ATTRIBUTE_BUS_MASTER)
 
+#define FW_PCI_LSI_ATTRIBUTES \
+    (EFI_PCI_ATTRIBUTE_IO | \
+     EFI_PCI_ATTRIBUTE_MEMORY | \
+     EFI_PCI_ATTRIBUTE_BUS_MASTER)
+
 #define FW_PCI_VGA_ATTRIBUTES \
     (EFI_PCI_ATTRIBUTE_IO | \
      EFI_PCI_ATTRIBUTE_MEMORY | \
@@ -19962,6 +20897,7 @@ static EFI_PCI_IO_PROTOCOL mPciIdeIoProto;
 static EFI_PCI_IO_PROTOCOL mPciAhciIoProto;
 static EFI_PCI_IO_PROTOCOL mPciOhciIoProto;
 static EFI_PCI_IO_PROTOCOL mPciUhciIoProto;
+static EFI_PCI_IO_PROTOCOL mPciLsiIoProto;
 static EFI_PCI_IO_PROTOCOL mPciVgaIoProto;
 
 static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
@@ -19986,8 +20922,13 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
         4, 0x0000c121U, 0x20, "UHCI", 1,
     },
     {
+        &mPciLsiHandle, &mPciLsiIoProto, &mPciLsiDevicePath,
+        0, 4, 0, FW_PCI_LSI_ATTRIBUTES, 0x00121000U,
+        1, PCI_LSI_MMIO_BAR, 0x400, "LSI", 1,
+    },
+    {
         &mGraphicsHandle, &mPciVgaIoProto, &mGraphicsDevicePath,
-        0, 4, 0, FW_PCI_VGA_ATTRIBUTES, 0x11111234U,
+        0, 5, 0, FW_PCI_VGA_ATTRIBUTES, 0x11111234U,
         0, PCI_VGA_FB_BAR | 0x8U, 0x1000000, "VGA", 0,
     },
 };
@@ -20641,6 +21582,7 @@ static EFI_PCI_IO_PROTOCOL mPciIdeIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static EFI_PCI_IO_PROTOCOL mPciAhciIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static EFI_PCI_IO_PROTOCOL mPciOhciIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static EFI_PCI_IO_PROTOCOL mPciUhciIoProto = FW_PCI_IO_PROTOCOL_INIT;
+static EFI_PCI_IO_PROTOCOL mPciLsiIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static EFI_PCI_IO_PROTOCOL mPciVgaIoProto = FW_PCI_IO_PROTOCOL_INIT;
 
 #undef FW_PCI_IO_PROTOCOL_INIT
@@ -21978,9 +22920,6 @@ EFI_STATUS bs_locate_protocol(void *Protocol, VOID *Registration, VOID **Interfa
     handle = handles[0];
     st = bs_handle_protocol(handle, Protocol, Interface);
     (void)bs_free_pool(handles);
-    if (st != EFI_SUCCESS) {
-    } else {
-    }
     return st;
 }
 
@@ -23607,16 +24546,41 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     if (!mBootIdeDevice->present && mIdeDevices[1].present) {
         mBootIdeDevice = &mIdeDevices[1];
     }
-    mBlockDevicePath.Atapi.SlaveMaster = mBootIdeDevice->unit;
-    mRawBlockDevicePath.Atapi.SlaveMaster = mBootIdeDevice->unit;
-    mBootFullDevicePath.Atapi.SlaveMaster = mBootIdeDevice->unit;
-    fw_update_windows_setup_device_paths();
-    if (mHardDiskIdeDevice != NULL) {
-        mDiskBlockDevicePath.Atapi.SlaveMaster = mHardDiskIdeDevice->unit;
+    scsi_probe_devices();
+
+    storage_set_none(&mBootStorageDevice);
+    storage_set_none(&mDiskStorageDevice);
+    if (mBootScsiDevice != NULL) {
+        storage_set_scsi(&mBootStorageDevice, mBootScsiDevice);
+    } else if (mBootIdeDevice != NULL && mBootIdeDevice->present &&
+               mBootIdeDevice->is_atapi) {
+        storage_set_ide(&mBootStorageDevice, mBootIdeDevice);
+    } else if (mDiskScsiDevice != NULL) {
+        storage_set_scsi(&mBootStorageDevice, mDiskScsiDevice);
+    } else if (mBootIdeDevice != NULL && mBootIdeDevice->present) {
+        storage_set_ide(&mBootStorageDevice, mBootIdeDevice);
     }
 
-    if (mBootIdeDevice->present && mBootIdeDevice->is_atapi &&
-        atapi_configure_el_torito()) {
+    if (mDiskScsiDevice != NULL) {
+        storage_set_scsi(&mDiskStorageDevice, mDiskScsiDevice);
+    } else if (mHardDiskIdeDevice != NULL) {
+        storage_set_ide(&mDiskStorageDevice, mHardDiskIdeDevice);
+    }
+    if (!storage_present(&mBootStorageDevice) &&
+        storage_present(&mDiskStorageDevice)) {
+        mBootStorageDevice = mDiskStorageDevice;
+    }
+
+    mCdromBlocks = 0;
+    if (mBootStorageDevice.Kind == FW_STORAGE_SCSI &&
+        storage_is_cd(&mBootStorageDevice) &&
+        mBootStorageDevice.Scsi->block_size == ATAPI_SECTOR_SIZE &&
+        mBootStorageDevice.Scsi->last_lba < 0xffffffffULL) {
+        mCdromBlocks = (UINT32)(mBootStorageDevice.Scsi->last_lba + 1U);
+    }
+    fw_update_storage_device_paths();
+
+    if (storage_is_cd(&mBootStorageDevice) && atapi_configure_el_torito()) {
         UINT64 cdrom_partition_blocks = mBootImagePartitionCdBlocks;
 
         mBlockDevicePath.Cdrom.BootEntry = 0;
@@ -23638,21 +24602,17 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
         uart_puts("Block I/O: El Torito FAT image mapped\r\n");
     }
     mBlockIoMedia.MediaId = 1;
-    mBlockIoMedia.RemovableMedia =
-        (mBootIdeDevice->present && mBootIdeDevice->is_atapi) ? 1 : 0;
-    mBlockIoMedia.MediaPresent = mBootIdeDevice->present ? 1 : 0;
+    mBlockIoMedia.RemovableMedia = storage_is_cd(&mBootStorageDevice) ? 1 : 0;
+    mBlockIoMedia.MediaPresent = storage_present(&mBootStorageDevice) ? 1 : 0;
     mBlockIoMedia.LogicalPartition = mBootImageMapped ? 1 : 0;
-    mBlockIoMedia.ReadOnly =
-        (!mBootIdeDevice->present || mBootIdeDevice->is_atapi) ? 1 : 0;
+    mBlockIoMedia.ReadOnly = storage_read_only(&mBootStorageDevice) ? 1 : 0;
     mBlockIoMedia.WriteCaching = 0;
     mBlockIoMedia.BlockSize = mBootImageMapped ? 512 :
-                              (mBootIdeDevice->is_atapi ? ATAPI_SECTOR_SIZE : 512);
+                              storage_block_size(&mBootStorageDevice);
     mBlockIoMedia.IoAlign = 0;
     mBlockIoMedia.LastBlock = mBootImageMapped ?
         (UINT64)(mBootImagePartitionBlocks - 1) :
-        (mBootIdeDevice->is_atapi ?
-         (mCdromBlocks > 0 ? (UINT64)(mCdromBlocks - 1) : 0xFFFFFFFFULL) :
-         mBootIdeDevice->last_lba);
+        storage_last_lba(&mBootStorageDevice);
 
     mBlockIoProto.Revision = EFI_BLOCK_IO_PROTOCOL_REVISION;
     mBlockIoProto.Media = &mBlockIoMedia;
@@ -23663,7 +24623,7 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     mBlockDiskIoProto.Revision = EFI_DISK_IO_PROTOCOL_REVISION;
     mBlockDiskIoProto.ReadDisk = disk_read;
     mBlockDiskIoProto.WriteDisk = disk_write;
-    if (mBootIdeDevice->present && mBootIdeDevice->is_atapi) {
+    if (storage_is_cd(&mBootStorageDevice)) {
         mRawBlockIoMedia.MediaId = 2;
         mRawBlockIoMedia.RemovableMedia = 1;
         mRawBlockIoMedia.MediaPresent = 1;
@@ -23685,16 +24645,17 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
         mRawDiskIoProto.WriteDisk = disk_write;
         mRawBlockIoHandle = FW_HANDLE_RAW_BLOCK_IO;
     }
-    if (mHardDiskIdeDevice != NULL) {
+    if (storage_present(&mDiskStorageDevice)) {
         mDiskBlockIoMedia.MediaId = 3;
         mDiskBlockIoMedia.RemovableMedia = 0;
         mDiskBlockIoMedia.MediaPresent = 1;
         mDiskBlockIoMedia.LogicalPartition = 0;
-        mDiskBlockIoMedia.ReadOnly = 0;
+        mDiskBlockIoMedia.ReadOnly =
+            storage_read_only(&mDiskStorageDevice) ? 1 : 0;
         mDiskBlockIoMedia.WriteCaching = 0;
-        mDiskBlockIoMedia.BlockSize = 512;
+        mDiskBlockIoMedia.BlockSize = storage_block_size(&mDiskStorageDevice);
         mDiskBlockIoMedia.IoAlign = 0;
-        mDiskBlockIoMedia.LastBlock = mHardDiskIdeDevice->last_lba;
+        mDiskBlockIoMedia.LastBlock = storage_last_lba(&mDiskStorageDevice);
         mDiskBlockIoProto.Revision = EFI_BLOCK_IO_PROTOCOL_REVISION;
         mDiskBlockIoProto.Media = &mDiskBlockIoMedia;
         mDiskBlockIoProto.Reset = blk_reset;
@@ -23706,18 +24667,24 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
         mDiskIoProto.WriteDisk = disk_write;
         mDiskBlockIoHandle = FW_HANDLE_DISK_BLOCK_IO;
     }
-    uart_puts("Windows Setup Boot Option:");
-    uart_puts(windows_setup_boot_option_selftest() ?
-              " CD boot path verified\r\n" :
-              " verification failed\r\n");
-    uart_puts("Optical Raw Device Path:");
-    uart_puts(optical_raw_device_path_selftest() ?
-              " whole-media ATAPI path verified\r\n" :
-              " verification failed\r\n");
-    uart_puts("El Torito Mapping:    ");
-    uart_puts(el_torito_partition_selftest() ?
-              "partition verified\r\n" :
-              "verification failed\r\n");
+    if (storage_is_cd(&mBootStorageDevice)) {
+        uart_puts("Windows Setup Boot Option:");
+        uart_puts(windows_setup_boot_option_selftest() ?
+                  " CD boot path verified\r\n" :
+                  " verification failed\r\n");
+        uart_puts("Optical Raw Device Path:");
+        uart_puts(optical_raw_device_path_selftest() ?
+                  " whole-media optical path verified\r\n" :
+                  " verification failed\r\n");
+        uart_puts("El Torito Mapping:    ");
+        uart_puts(el_torito_partition_selftest() ?
+                  "partition verified\r\n" :
+                  "verification failed\r\n");
+    } else {
+        uart_puts("Windows Setup Boot Option: no optical boot media\r\n");
+        uart_puts("Optical Raw Device Path: no optical boot media\r\n");
+        uart_puts("El Torito Mapping:    no optical boot media\r\n");
+    }
     mSimpleFsProto.Revision = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_REVISION;
     mSimpleFsProto.OpenVolume = fat_open_volume;
     mOpticalSimpleFsProto.Revision = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_REVISION;
@@ -23808,8 +24775,11 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
               " base adjustment/fixup log verified\r\n" :
               " verification failed\r\n");
     uart_puts("Block I/O Protocol:   installed (");
-    if (mBootIdeDevice != NULL && mBootIdeDevice->present) {
-        if (mBootIdeDevice->is_atapi) {
+    if (storage_present(&mBootStorageDevice)) {
+        if (mBootStorageDevice.Kind == FW_STORAGE_SCSI) {
+            uart_puts(storage_is_cd(&mBootStorageDevice) ?
+                      "SCSI CD-ROM" : "SCSI disk");
+        } else if (mBootStorageDevice.Ide->is_atapi) {
             uart_puts(gIde.has_bmdma ? "ATAPI DMA-capable" : "ATAPI PIO");
         } else {
             uart_puts(gIde.has_bmdma ? "ATA DMA-capable" : "ATA PIO");
@@ -23817,19 +24787,20 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     } else {
         uart_puts("ATA PIO");
     }
-    uart_puts(", primary IDE)\r\n");
+    uart_puts(mBootStorageDevice.Kind == FW_STORAGE_SCSI ?
+              ", LSI53C895A)\r\n" : ", primary IDE)\r\n");
     uart_puts("Block I/O Read Test:  ");
     uart_puts(block_io_read_selftest() ? "media ID/range/bulk reads verified\r\n" :
               "verification failed\r\n");
     uart_puts("Disk Block I/O Test:  ");
     if (mDiskBlockIoHandle == NULL) {
-        uart_puts("no ATA disk present\r\n");
+        uart_puts("no fixed disk present\r\n");
     } else {
         uart_puts(disk_block_io_selftest() ?
-                  "primary ATA read/zero-write verified\r\n" :
+                  "fixed disk read/zero-write verified\r\n" :
                   "verification failed\r\n");
     }
-    if (mBootIdeDevice->present && mBootIdeDevice->is_atapi) {
+    if (storage_is_cd(&mBootStorageDevice)) {
         uart_puts("Optical SimpleFS:     ");
         if (fw_udf_init()) {
             uart_puts("UDF root verified\r\n");
@@ -23919,7 +24890,7 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     uart_puts(sal_loader_handoff_selftest() ?
               "registers/stack/TR verified\r\n" :
               "verification failed\r\n");
-    uart_puts("BOOT path:            ATA/ATAPI Block I/O + FAT resolver\r\n");
+    uart_puts("BOOT path:            SCSI/ATA Block I/O + FAT resolver\r\n");
     uart_puts("\r\nFirmware ready. Attempting disk boot...\r\n");
 
     {
@@ -23943,7 +24914,7 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
             uart_puts(", status=0x");
             uart_put_hex64(st);
             uart_puts(").");
-            if (mBootIdeDevice->is_atapi && st == EFI_NOT_FOUND) {
+            if (storage_is_cd(&mBootStorageDevice) && st == EFI_NOT_FOUND) {
                 uart_puts(" CD-ROM boot path stopped after disk image failure.\r\n");
                 while (1) {
                 }

@@ -278,7 +278,7 @@ def run_qemu(qemu, firmware, disk):
         "-display", "none",
         "-serial", "stdio",
         "-monitor", "none",
-        "-drive", f"file={disk},if=ide,format=raw,media=cdrom,readonly=on",
+        "-drive", f"file={disk},format=raw,media=cdrom,readonly=on",
     ]
     proc = subprocess.Popen(
         args,
@@ -346,7 +346,7 @@ def main():
         returncode, output = run_qemu(qemu, firmware, disk)
 
     required = [
-        "IDE device:           ATAPI primary master",
+        "SCSI device:          target 0000000000000000 CD-ROM media",
         "Block I/O: El Torito FAT image mapped",
         "Optical SimpleFS:     UDF root verified",
     ]

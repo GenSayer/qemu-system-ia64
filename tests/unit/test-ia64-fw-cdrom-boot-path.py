@@ -98,8 +98,8 @@ def run_qemu(qemu, firmware, disk, target_disk):
         "-display", "none",
         "-serial", "stdio",
         "-monitor", "none",
-        "-drive", f"file={disk},if=ide,index=0,format=raw,media=cdrom,readonly=on",
-        "-drive", f"file={target_disk},if=ide,index=1,format=raw,media=disk",
+        "-drive", f"file={disk},format=raw,media=cdrom,readonly=on",
+        "-drive", f"file={target_disk},format=raw,media=disk",
     ]
     proc = subprocess.Popen(
         args,
@@ -167,18 +167,18 @@ def main():
     ]
 
     required = [
-        "IDE controller:       PCI BAR primary data=0x0000800010000800",
-        "IDE device:           ATAPI primary master",
-        "IDE device:           ATA primary slave",
+        "SCSI device:          target 0000000000000000 CD-ROM media",
+        "SCSI device:          target 0000000000000001 disk media",
         "Block I/O: El Torito FAT image mapped",
         "El Torito Mapping:    partition verified",
         "Windows Setup Boot Option: CD boot path verified",
-        "Optical Raw Device Path: whole-media ATAPI path verified",
+        "Optical Raw Device Path: whole-media optical path verified",
         "Console Out Test:     text output contracts verified",
         "Console Handles:      graphics output handle verified",
         "Loaded Image Options: type and ownership contracts verified",
+        "Block I/O Protocol:   installed (SCSI CD-ROM, LSI53C895A)",
         "Block I/O Read Test:  media ID/range/bulk reads verified",
-        "Disk Block I/O Test:  primary ATA read/zero-write verified",
+        "Disk Block I/O Test:  fixed disk read/zero-write verified",
         "Block I/O: locating \\EFI\\BOOT\\BOOTIA64.EFI...",
         "Block I/O: BOOTIA64.EFI not found",
     ]

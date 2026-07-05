@@ -76,7 +76,7 @@ def main():
     if memory:
         args += ["-m", memory]
     if disk:
-        drive_opts = f"file={disk},if=ide,format=raw"
+        drive_opts = f"file={disk},format=raw"
         if disk.lower().endswith(".iso"):
             drive_opts += ",media=cdrom,readonly=on"
         args += ["-drive", drive_opts]
