@@ -577,12 +577,12 @@ def main():
         text=True,
     )
     expected_banner = (
-        "Graphics Output:      GOP/UGA stdvga BGRx PixelBitMask "
+        "Graphics Output:      GOP/UGA stdvga BGRx "
         "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
         "1280x1024x32 @ 0xc2000000"
     )
     expected_setmode_label = "GOP SetMode Test:"
-    expected_setmode_result = "BGRx bitmask framebuffer cleared"
+    expected_setmode_result = "BGRx framebuffer cleared"
     if (strings.returncode != 0 or gop_size != 0xb4 or
             expected_banner not in strings.stdout or
             expected_setmode_label not in strings.stdout or

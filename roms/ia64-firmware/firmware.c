@@ -6709,11 +6709,12 @@ static BOOLEAN graphics_mode_has_bgrx_layout(
     const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info)
 {
     return Info != NULL &&
-           Info->PixelFormat == PixelBitMask &&
-           Info->PixelInformation.RedMask == GOP_BGRX_RED_MASK &&
-           Info->PixelInformation.GreenMask == GOP_BGRX_GREEN_MASK &&
-           Info->PixelInformation.BlueMask == GOP_BGRX_BLUE_MASK &&
-           Info->PixelInformation.ReservedMask == GOP_BGRX_RESERVED_MASK;
+           (Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor ||
+            (Info->PixelFormat == PixelBitMask &&
+             Info->PixelInformation.RedMask == GOP_BGRX_RED_MASK &&
+             Info->PixelInformation.GreenMask == GOP_BGRX_GREEN_MASK &&
+             Info->PixelInformation.BlueMask == GOP_BGRX_BLUE_MASK &&
+             Info->PixelInformation.ReservedMask == GOP_BGRX_RESERVED_MASK));
 }
 
 static EFI_STATUS graphics_select_mode(UINT32 ModeNumber, BOOLEAN RedrawText)
@@ -11949,11 +11950,12 @@ static void efi_init_graphics(void)
     mGopModeInfo[0].Version = 0;
     mGopModeInfo[0].HorizontalResolution = VGA_MODE_TEXT_WIDTH;
     mGopModeInfo[0].VerticalResolution = VGA_MODE_TEXT_HEIGHT;
-    mGopModeInfo[0].PixelFormat = PixelBitMask;
-    mGopModeInfo[0].PixelInformation.RedMask = GOP_BGRX_RED_MASK;
-    mGopModeInfo[0].PixelInformation.GreenMask = GOP_BGRX_GREEN_MASK;
-    mGopModeInfo[0].PixelInformation.BlueMask = GOP_BGRX_BLUE_MASK;
-    mGopModeInfo[0].PixelInformation.ReservedMask = GOP_BGRX_RESERVED_MASK;
+
+    mGopModeInfo[0].PixelFormat = PixelBlueGreenRedReserved8BitPerColor;
+    mGopModeInfo[0].PixelInformation.RedMask = 0;
+    mGopModeInfo[0].PixelInformation.GreenMask = 0;
+    mGopModeInfo[0].PixelInformation.BlueMask = 0;
+    mGopModeInfo[0].PixelInformation.ReservedMask = 0;
     mGopModeInfo[0].PixelsPerScanLine = VGA_MODE_TEXT_WIDTH;
 
     mGopModeInfo[1] = mGopModeInfo[0];
@@ -24754,12 +24756,12 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     uart_puts("UEFI Stall:           ");
     uart_puts(uefi_stall_selftest() ? "ITC delay verified\r\n" :
               "verification failed\r\n");
-    uart_puts("Graphics Output:      GOP/UGA stdvga BGRx PixelBitMask "
+    uart_puts("Graphics Output:      GOP/UGA stdvga BGRx "
               "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
               "1280x1024x32 @ 0xc2000000\r\n");
     uart_puts("GOP SetMode Test:     ");
     uart_puts(graphics_gop_set_mode_selftest() ?
-              "BGRx bitmask framebuffer cleared\r\n" :
+              "BGRx framebuffer cleared\r\n" :
               "verification failed\r\n");
     uart_puts("EFI Image Handoff:    ");
     uart_puts(efi_entry_handoff_selftest() ?
