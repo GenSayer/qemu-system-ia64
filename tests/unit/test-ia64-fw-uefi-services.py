@@ -171,6 +171,9 @@ def main():
         "ps2_shift_scan_code",
         "uefi_conin_wait_key_selftest",
         "uefi_ps2_scancode_selftest",
+        "usb_keyboard_init",
+        "usb_keyboard_read_key",
+        "uefi_usb_keyboard_selftest",
         "mConInExProtocolGuid",
         "mConInExProto",
         "mConInKeyNotifyRecords",
@@ -607,17 +610,22 @@ def main():
     set2_scan_size = symbol_size("mPs2Set2EfiScanMap")
     conin_ex_size = symbol_size("mConInExProto")
     ps2_scan_enable_size = symbol_size("ps2_keyboard_enable_scanning")
+    usb_keyboard_init_size = symbol_size("usb_keyboard_init")
+    usb_keyboard_read_size = symbol_size("usb_keyboard_read_key")
     input_ex_tokens = [
         "Console In Buffer:",
         "WaitForKey preserves keystrokes",
         "PS/2 Scancode Test:",
         "translated set1/set2 decode verified",
+        "USB Keyboard Test:",
+        "HID boot report decode verified",
         "Console In Ex:",
         "SimpleTextInputEx ready",
     ]
     if (extended_scan_size != 0x50 or set1_scan_size != 0x30 or
             set2_scan_size != 0x30 or conin_ex_size != 0x30 or
-            ps2_scan_enable_size == 0 or
+            ps2_scan_enable_size == 0 or usb_keyboard_init_size == 0 or
+            usb_keyboard_read_size == 0 or
             any(token not in strings.stdout for token in input_ex_tokens)):
         print("not ok 7 - firmware EFI input scan tables")
         if extended_scan_size != 0x50:
@@ -642,6 +650,10 @@ def main():
             )
         if ps2_scan_enable_size == 0:
             print("# missing non-empty PS/2 keyboard scan-enable helper")
+        if usb_keyboard_init_size == 0:
+            print("# missing non-empty USB keyboard init helper")
+        if usb_keyboard_read_size == 0:
+            print("# missing non-empty USB keyboard read helper")
         for token in input_ex_tokens:
             if token not in strings.stdout:
                 print(f"# missing banner token: {token}")

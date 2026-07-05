@@ -353,6 +353,19 @@ if 'ia64-softmmu' in target_dirs
        timeout: 75,
        suite: ['unit', 'ia64'])
 
+  test('test-ia64-fw-usb-keyboard',
+       python,
+       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
+       args: [
+         files('test-ia64-fw-usb-keyboard.py'),
+         meson.project_source_root(),
+         meson.project_build_root() / 'qemu-system-ia64',
+         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
+       ],
+       protocol: 'tap',
+       timeout: 45,
+       suite: ['unit', 'ia64'])
+
   test('test-ia64-fw-cdrom-boot-path',
        python,
        depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],

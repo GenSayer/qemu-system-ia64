@@ -229,6 +229,54 @@ typedef __SIZE_TYPE__    size_t;
 #define PS2_MODE_SYS                  0x04U
 #define PS2_MODE_KCC                  0x40U
 
+#define OHCI_REG_REVISION             0x00U
+#define OHCI_REG_CONTROL              0x04U
+#define OHCI_REG_COMMAND_STATUS       0x08U
+#define OHCI_REG_INTERRUPT_STATUS     0x0cU
+#define OHCI_REG_INTERRUPT_DISABLE    0x14U
+#define OHCI_REG_HCCA                 0x18U
+#define OHCI_REG_CONTROL_HEAD_ED      0x20U
+#define OHCI_REG_PERIODIC_START       0x40U
+#define OHCI_REG_RH_DESCRIPTOR_A      0x48U
+#define OHCI_REG_RH_STATUS            0x50U
+#define OHCI_REG_RH_PORT_STATUS_BASE  0x54U
+
+#define OHCI_CTL_PLE                  (1U << 2)
+#define OHCI_CTL_CLE                  (1U << 4)
+#define OHCI_USB_OPERATIONAL          0x80U
+#define OHCI_STATUS_HCR               (1U << 0)
+#define OHCI_STATUS_CLF               (1U << 1)
+#define OHCI_RHS_LPSC                 (1U << 16)
+#define OHCI_PORT_CCS                 (1U << 0)
+#define OHCI_PORT_PES                 (1U << 1)
+#define OHCI_PORT_PRS                 (1U << 4)
+#define OHCI_PORT_PPS                 (1U << 8)
+#define OHCI_PORT_LSDA                (1U << 9)
+#define OHCI_PORT_WTC                 0x001f0000U
+#define OHCI_TD_R                     (1U << 18)
+#define OHCI_TD_DIR_SETUP             0U
+#define OHCI_TD_DIR_OUT               1U
+#define OHCI_TD_DIR_IN                2U
+#define OHCI_TD_DP_SHIFT              19U
+#define OHCI_TD_DI_SHIFT              21U
+#define OHCI_TD_CC_SHIFT              28U
+#define OHCI_TD_CC_NOERROR            0U
+#define OHCI_TD_CC_NOT_ACCESSED       0x0fU
+#define OHCI_ED_D_SHIFT               11U
+#define OHCI_ED_S                     (1U << 13)
+#define OHCI_ED_C                     2U
+#define OHCI_ED_MPS_SHIFT             16U
+#define OHCI_DPTR_MASK                0xfffffff0U
+#define OHCI_USB_KEYBOARD_ADDRESS     1U
+#define OHCI_USB_KEYBOARD_ENDPOINT    1U
+#define OHCI_USB_KEYBOARD_REPORT_SIZE 8U
+
+#define USB_REQ_SET_ADDRESS           0x05U
+#define USB_REQ_SET_CONFIGURATION     0x09U
+#define USB_REQ_HID_SET_IDLE          0x0aU
+#define USB_REQ_HID_SET_PROTOCOL      0x0bU
+#define USB_TYPE_CLASS_INTERFACE_OUT  0x21U
+
 #define EFI_RESET_COLD                0U
 #define EFI_RESET_WARM                1U
 #define EFI_RESET_SHUTDOWN            2U
@@ -292,6 +340,28 @@ typedef uint64_t    EFI_VIRTUAL_ADDRESS;
 typedef void       *EFI_HANDLE;
 typedef UINTN       EFI_STATUS;
 typedef VOID       *EFI_EVENT;
+
+typedef struct {
+    UINT32 InterruptTable[32];
+    UINT16 FrameNumber;
+    UINT16 Pad;
+    UINT32 DoneHead;
+    UINT8  Reserved[120];
+} __attribute__((packed)) FW_OHCI_HCCA;
+
+typedef struct {
+    UINT32 Flags;
+    UINT32 Tail;
+    UINT32 Head;
+    UINT32 Next;
+} __attribute__((packed)) FW_OHCI_ED;
+
+typedef struct {
+    UINT32 Flags;
+    UINT32 CurrentBufferPointer;
+    UINT32 Next;
+    UINT32 BufferEnd;
+} __attribute__((packed)) FW_OHCI_TD;
 
 #include "linker-symbols.h"
 
@@ -1675,6 +1745,9 @@ FW_STATIC_ASSERT(sizeof(EFI_DEBUG_IMAGE_INFO_TABLE_HEADER) == 16,
                  efi_debug_image_info_table_header_size);
 FW_STATIC_ASSERT(sizeof(EFI_DEBUG_IMAGE_INFO_NORMAL) == 24,
                  efi_debug_image_info_normal_size);
+FW_STATIC_ASSERT(sizeof(FW_OHCI_HCCA) == 256, ohci_hcca_size);
+FW_STATIC_ASSERT(sizeof(FW_OHCI_ED) == 16, ohci_ed_size);
+FW_STATIC_ASSERT(sizeof(FW_OHCI_TD) == 16, ohci_td_size);
 FW_STATIC_ASSERT(sizeof(TCG_VERSION) == 4, tcg_version_size);
 FW_STATIC_ASSERT(sizeof(TCG_DIGEST) == 20, tcg_digest_size);
 FW_STATIC_ASSERT(sizeof(TCG_EFI_BOOT_SERVICE_CAPABILITY) == 12,
@@ -2107,6 +2180,19 @@ static BOOLEAN                mPs2Break;
 static BOOLEAN                mPs2Extended;
 static BOOLEAN                mPs2Shift;
 static BOOLEAN                mPs2Translated;
+static BOOLEAN                mUsbKeyboardTried;
+static BOOLEAN                mUsbKeyboardReady;
+static BOOLEAN                mUsbKeyboardLowSpeed;
+static FW_OHCI_HCCA           mUsbOhciHcca __attribute__((aligned(256)));
+static FW_OHCI_ED             mUsbOhciControlEd __attribute__((aligned(16)));
+static FW_OHCI_ED             mUsbOhciInterruptEd __attribute__((aligned(16)));
+static FW_OHCI_TD             mUsbOhciControlTd[4] __attribute__((aligned(16)));
+static FW_OHCI_TD             mUsbOhciInterruptTd[2] __attribute__((aligned(16)));
+static UINT8                  mUsbOhciSetupPacket[8] __attribute__((aligned(16)));
+static UINT8                  mUsbOhciDataBuffer[64] __attribute__((aligned(16)));
+static UINT8                  mUsbKeyboardReport[OHCI_USB_KEYBOARD_REPORT_SIZE]
+    __attribute__((aligned(16)));
+static UINT8                  mUsbKeyboardPreviousReport[OHCI_USB_KEYBOARD_REPORT_SIZE];
 static CHAR16                 mTextChars[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static UINT8                  mTextAttrs[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static BOOLEAN                mTextWrapPending;
@@ -5260,6 +5346,440 @@ static EFI_STATUS ps2_read_key(EFI_INPUT_KEY *Key)
     return EFI_NOT_READY;
 }
 
+static volatile UINT32 *usb_ohci_reg(UINTN Offset)
+{
+    return (volatile UINT32 *)(UINTN)(PCI_OHCI_MMIO_BAR + Offset);
+}
+
+static UINT32 usb_ohci_read(UINTN Offset)
+{
+    return *usb_ohci_reg(Offset);
+}
+
+static void usb_ohci_write(UINTN Offset, UINT32 Value)
+{
+    *usb_ohci_reg(Offset) = Value;
+}
+
+static UINT32 usb_ohci_phys(const VOID *Pointer)
+{
+    return (UINT32)(UINTN)Pointer;
+}
+
+static void usb_dma_barrier(void)
+{
+    __asm__ volatile ("" ::: "memory");
+}
+
+static UINT32 usb_ohci_ed_head(const FW_OHCI_ED *Ed)
+{
+    return ((volatile const FW_OHCI_ED *)Ed)->Head;
+}
+
+static UINT32 usb_ohci_ed_tail(const FW_OHCI_ED *Ed)
+{
+    return ((volatile const FW_OHCI_ED *)Ed)->Tail;
+}
+
+static UINT32 usb_ohci_td_flags(UINT32 Direction, BOOLEAN BufferRounding)
+{
+    UINT32 flags = (OHCI_TD_CC_NOT_ACCESSED << OHCI_TD_CC_SHIFT) |
+                   (0U << OHCI_TD_DI_SHIFT) |
+                   (Direction << OHCI_TD_DP_SHIFT);
+
+    if (BufferRounding) {
+        flags |= OHCI_TD_R;
+    }
+    return flags;
+}
+
+static void usb_ohci_init_td(FW_OHCI_TD *Td, UINT32 Direction,
+                             VOID *Buffer, UINTN Length, FW_OHCI_TD *Next,
+                             BOOLEAN BufferRounding)
+{
+    Td->Flags = usb_ohci_td_flags(Direction, BufferRounding);
+    if (Length != 0) {
+        Td->CurrentBufferPointer = usb_ohci_phys(Buffer);
+        Td->BufferEnd = Td->CurrentBufferPointer + (UINT32)Length - 1U;
+    } else {
+        Td->CurrentBufferPointer = 0;
+        Td->BufferEnd = 0;
+    }
+    Td->Next = Next != NULL ? usb_ohci_phys(Next) : 0;
+}
+
+static UINT32 usb_ohci_td_condition_code(const FW_OHCI_TD *Td)
+{
+    return ((volatile const FW_OHCI_TD *)Td)->Flags >> OHCI_TD_CC_SHIFT;
+}
+
+static BOOLEAN usb_ohci_wait_control_done(FW_OHCI_TD *First,
+                                          FW_OHCI_TD *Last)
+{
+    UINT64 start = fw_read_itc();
+    UINT64 timeout = 100000ULL * FW_ITC_TICKS_PER_MICROSECOND;
+
+    while (fw_read_itc() - start < timeout) {
+        if ((usb_ohci_ed_head(&mUsbOhciControlEd) & OHCI_DPTR_MASK) ==
+            usb_ohci_ed_tail(&mUsbOhciControlEd)) {
+            FW_OHCI_TD *td;
+
+            usb_dma_barrier();
+            for (td = First; td <= Last; td++) {
+                if (usb_ohci_td_condition_code(td) != OHCI_TD_CC_NOERROR) {
+                    return 0;
+                }
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static BOOLEAN usb_ohci_control_transfer(UINT8 DeviceAddress,
+                                         UINT8 RequestType,
+                                         UINT8 Request,
+                                         UINT16 Value,
+                                         UINT16 Index,
+                                         UINT16 Length,
+                                         BOOLEAN DataIn)
+{
+    FW_OHCI_TD *setup_td = &mUsbOhciControlTd[0];
+    FW_OHCI_TD *data_td = NULL;
+    FW_OHCI_TD *status_td;
+    FW_OHCI_TD *dummy_td;
+    UINTN td_index = 1;
+    UINT32 flags;
+
+    if (Length > sizeof(mUsbOhciDataBuffer)) {
+        return 0;
+    }
+
+    mUsbOhciSetupPacket[0] = RequestType;
+    mUsbOhciSetupPacket[1] = Request;
+    mUsbOhciSetupPacket[2] = (UINT8)Value;
+    mUsbOhciSetupPacket[3] = (UINT8)(Value >> 8);
+    mUsbOhciSetupPacket[4] = (UINT8)Index;
+    mUsbOhciSetupPacket[5] = (UINT8)(Index >> 8);
+    mUsbOhciSetupPacket[6] = (UINT8)Length;
+    mUsbOhciSetupPacket[7] = (UINT8)(Length >> 8);
+
+    fw_set_mem(mUsbOhciControlTd, sizeof(mUsbOhciControlTd), 0);
+
+    if (Length != 0) {
+        data_td = &mUsbOhciControlTd[td_index++];
+    }
+    status_td = &mUsbOhciControlTd[td_index++];
+    dummy_td = &mUsbOhciControlTd[td_index];
+
+    usb_ohci_init_td(setup_td, OHCI_TD_DIR_SETUP, mUsbOhciSetupPacket,
+                     sizeof(mUsbOhciSetupPacket),
+                     data_td != NULL ? data_td : status_td, 0);
+    if (data_td != NULL) {
+        usb_ohci_init_td(data_td,
+                         DataIn ? OHCI_TD_DIR_IN : OHCI_TD_DIR_OUT,
+                         mUsbOhciDataBuffer, Length, status_td, DataIn);
+    }
+    usb_ohci_init_td(status_td,
+                     DataIn ? OHCI_TD_DIR_OUT : OHCI_TD_DIR_IN,
+                     NULL, 0, dummy_td, 1);
+
+    flags = (UINT32)DeviceAddress |
+            (8U << OHCI_ED_MPS_SHIFT);
+    if (mUsbKeyboardLowSpeed) {
+        flags |= OHCI_ED_S;
+    }
+    mUsbOhciControlEd.Flags = flags;
+    mUsbOhciControlEd.Tail = usb_ohci_phys(dummy_td);
+    mUsbOhciControlEd.Head = usb_ohci_phys(setup_td);
+    mUsbOhciControlEd.Next = 0;
+
+    usb_dma_barrier();
+    usb_ohci_write(OHCI_REG_CONTROL_HEAD_ED, usb_ohci_phys(&mUsbOhciControlEd));
+    usb_ohci_write(OHCI_REG_COMMAND_STATUS, OHCI_STATUS_CLF);
+
+    return usb_ohci_wait_control_done(setup_td, status_td);
+}
+
+static BOOLEAN usb_ohci_controller_present(void)
+{
+    UINT32 revision = usb_ohci_read(OHCI_REG_REVISION);
+
+    return revision != 0xffffffffU && (revision & 0xffU) == 0x10U;
+}
+
+static BOOLEAN usb_ohci_reset_controller(void)
+{
+    UINTN spin;
+
+    usb_ohci_write(OHCI_REG_INTERRUPT_DISABLE, 0xffffffffU);
+    usb_ohci_write(OHCI_REG_INTERRUPT_STATUS, 0xffffffffU);
+    usb_ohci_write(OHCI_REG_COMMAND_STATUS, OHCI_STATUS_HCR);
+    for (spin = 0; spin < 1000000U; spin++) {
+        if ((usb_ohci_read(OHCI_REG_COMMAND_STATUS) & OHCI_STATUS_HCR) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static BOOLEAN usb_ohci_enable_keyboard_port(void)
+{
+    UINT32 rh_desc;
+    UINT32 port_count;
+    UINT32 port;
+
+    rh_desc = usb_ohci_read(OHCI_REG_RH_DESCRIPTOR_A);
+    port_count = rh_desc & 0xffU;
+    if (port_count == 0 || port_count > 15U) {
+        return 0;
+    }
+
+    usb_ohci_write(OHCI_REG_RH_STATUS, OHCI_RHS_LPSC);
+    for (port = 0; port < port_count; port++) {
+        UINTN reg = OHCI_REG_RH_PORT_STATUS_BASE + port * 4U;
+        UINT32 status = usb_ohci_read(reg);
+        UINTN spin;
+
+        usb_ohci_write(reg, OHCI_PORT_WTC | OHCI_PORT_PPS);
+        if ((status & OHCI_PORT_CCS) == 0) {
+            continue;
+        }
+
+        usb_ohci_write(reg, OHCI_PORT_WTC | OHCI_PORT_PRS);
+        for (spin = 0; spin < 1000000U; spin++) {
+            status = usb_ohci_read(reg);
+            if ((status & OHCI_PORT_PRS) == 0 &&
+                (status & OHCI_PORT_PES) != 0) {
+                usb_ohci_write(reg, OHCI_PORT_WTC);
+                mUsbKeyboardLowSpeed = (status & OHCI_PORT_LSDA) != 0;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void usb_keyboard_submit_interrupt_td(void)
+{
+    UINT32 carry = usb_ohci_ed_head(&mUsbOhciInterruptEd) & OHCI_ED_C;
+
+    fw_set_mem(mUsbKeyboardReport, sizeof(mUsbKeyboardReport), 0);
+    fw_set_mem(mUsbOhciInterruptTd, sizeof(mUsbOhciInterruptTd), 0);
+    usb_ohci_init_td(&mUsbOhciInterruptTd[0], OHCI_TD_DIR_IN,
+                     mUsbKeyboardReport, sizeof(mUsbKeyboardReport),
+                     &mUsbOhciInterruptTd[1], 1);
+
+    mUsbOhciInterruptEd.Flags =
+        OHCI_USB_KEYBOARD_ADDRESS |
+        ((UINT32)OHCI_USB_KEYBOARD_ENDPOINT << 7) |
+        (OHCI_TD_DIR_IN << OHCI_ED_D_SHIFT) |
+        (OHCI_USB_KEYBOARD_REPORT_SIZE << OHCI_ED_MPS_SHIFT);
+    if (mUsbKeyboardLowSpeed) {
+        mUsbOhciInterruptEd.Flags |= OHCI_ED_S;
+    }
+    mUsbOhciInterruptEd.Tail = usb_ohci_phys(&mUsbOhciInterruptTd[1]);
+    mUsbOhciInterruptEd.Head = usb_ohci_phys(&mUsbOhciInterruptTd[0]) | carry;
+    mUsbOhciInterruptEd.Next = 0;
+    usb_dma_barrier();
+}
+
+static BOOLEAN __attribute__((noinline, used)) usb_keyboard_init(void)
+{
+    UINTN i;
+
+    if (mUsbKeyboardReady) {
+        return 1;
+    }
+    if (mUsbKeyboardTried) {
+        return 0;
+    }
+    mUsbKeyboardTried = 1;
+    mUsbKeyboardLowSpeed = 0;
+    fw_set_mem(&mUsbOhciHcca, sizeof(mUsbOhciHcca), 0);
+    fw_set_mem(&mUsbOhciControlEd, sizeof(mUsbOhciControlEd), 0);
+    fw_set_mem(&mUsbOhciInterruptEd, sizeof(mUsbOhciInterruptEd), 0);
+    fw_set_mem(mUsbKeyboardPreviousReport,
+               sizeof(mUsbKeyboardPreviousReport), 0);
+
+    if (!usb_ohci_controller_present() ||
+        !usb_ohci_reset_controller()) {
+        return 0;
+    }
+
+    usb_ohci_write(OHCI_REG_HCCA, usb_ohci_phys(&mUsbOhciHcca));
+    usb_ohci_write(OHCI_REG_PERIODIC_START, 0x2a2fU);
+    usb_ohci_write(OHCI_REG_CONTROL,
+                   OHCI_USB_OPERATIONAL | OHCI_CTL_CLE | OHCI_CTL_PLE);
+
+    if (!usb_ohci_enable_keyboard_port()) {
+        return 0;
+    }
+
+    if (!usb_ohci_control_transfer(0, 0, USB_REQ_SET_ADDRESS,
+                                   OHCI_USB_KEYBOARD_ADDRESS, 0, 0, 0)) {
+        return 0;
+    }
+    (void)bs_stall(2000);
+
+    if (!usb_ohci_control_transfer(OHCI_USB_KEYBOARD_ADDRESS, 0,
+                                   USB_REQ_SET_CONFIGURATION,
+                                   1, 0, 0, 0) ||
+        !usb_ohci_control_transfer(OHCI_USB_KEYBOARD_ADDRESS,
+                                   USB_TYPE_CLASS_INTERFACE_OUT,
+                                   USB_REQ_HID_SET_IDLE, 0, 0, 0, 0) ||
+        !usb_ohci_control_transfer(OHCI_USB_KEYBOARD_ADDRESS,
+                                   USB_TYPE_CLASS_INTERFACE_OUT,
+                                   USB_REQ_HID_SET_PROTOCOL, 0, 0, 0, 0)) {
+        return 0;
+    }
+
+    for (i = 0; i < FW_ARRAY_SIZE(mUsbOhciHcca.InterruptTable); i++) {
+        mUsbOhciHcca.InterruptTable[i] =
+            usb_ohci_phys(&mUsbOhciInterruptEd);
+    }
+    usb_dma_barrier();
+    mUsbKeyboardReady = 1;
+    usb_keyboard_submit_interrupt_td();
+    return 1;
+}
+
+static BOOLEAN usb_keyboard_report_has_usage(const UINT8 *Report, UINT8 Usage)
+{
+    UINTN i;
+
+    for (i = 2; i < OHCI_USB_KEYBOARD_REPORT_SIZE; i++) {
+        if (Report[i] == Usage) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static CHAR16 usb_keyboard_usage_to_char(UINT8 Usage, BOOLEAN Shift)
+{
+    static const CHAR8 normal_digits[] = "1234567890";
+    static const CHAR8 shifted_digits[] = "!@#$%^&*()";
+
+    if (Usage >= 0x04 && Usage <= 0x1d) {
+        CHAR16 ch = (CHAR16)('a' + Usage - 0x04);
+
+        return Shift ? (CHAR16)(ch - ('a' - 'A')) : ch;
+    }
+    if (Usage >= 0x1e && Usage <= 0x27) {
+        UINTN index = Usage - 0x1e;
+
+        return Shift ? (CHAR16)shifted_digits[index] :
+                       (CHAR16)normal_digits[index];
+    }
+
+    switch (Usage) {
+    case 0x28: return '\r';
+    case 0x2a: return '\b';
+    case 0x2b: return '\t';
+    case 0x2c: return ' ';
+    case 0x2d: return Shift ? '_' : '-';
+    case 0x2e: return Shift ? '+' : '=';
+    case 0x2f: return Shift ? '{' : '[';
+    case 0x30: return Shift ? '}' : ']';
+    case 0x31: return Shift ? '|' : '\\';
+    case 0x33: return Shift ? ':' : ';';
+    case 0x34: return Shift ? '"' : '\'';
+    case 0x35: return Shift ? '~' : '`';
+    case 0x36: return Shift ? '<' : ',';
+    case 0x37: return Shift ? '>' : '.';
+    case 0x38: return Shift ? '?' : '/';
+    default: return 0;
+    }
+}
+
+static UINT16 usb_keyboard_usage_to_scan(UINT8 Usage)
+{
+    switch (Usage) {
+    case 0x29: return EFI_SCAN_ESC;
+    case 0x3a: return EFI_SCAN_F1;
+    case 0x3b: return EFI_SCAN_F2;
+    case 0x3c: return EFI_SCAN_F3;
+    case 0x3d: return EFI_SCAN_F4;
+    case 0x3e: return EFI_SCAN_F5;
+    case 0x3f: return EFI_SCAN_F6;
+    case 0x40: return EFI_SCAN_F7;
+    case 0x41: return EFI_SCAN_F8;
+    case 0x42: return EFI_SCAN_F9;
+    case 0x43: return EFI_SCAN_F10;
+    case 0x44: return EFI_SCAN_F11;
+    case 0x45: return EFI_SCAN_F12;
+    case 0x49: return EFI_SCAN_INSERT;
+    case 0x4a: return EFI_SCAN_HOME;
+    case 0x4b: return EFI_SCAN_PAGE_UP;
+    case 0x4c: return EFI_SCAN_DELETE;
+    case 0x4d: return EFI_SCAN_END;
+    case 0x4e: return EFI_SCAN_PAGE_DOWN;
+    case 0x4f: return EFI_SCAN_RIGHT;
+    case 0x50: return EFI_SCAN_LEFT;
+    case 0x51: return EFI_SCAN_DOWN;
+    case 0x52: return EFI_SCAN_UP;
+    default: return 0;
+    }
+}
+
+static BOOLEAN usb_keyboard_report_to_key(EFI_INPUT_KEY *Key)
+{
+    BOOLEAN shift = (mUsbKeyboardReport[0] & ((1U << 1) | (1U << 5))) != 0;
+    UINTN i;
+
+    for (i = 2; i < OHCI_USB_KEYBOARD_REPORT_SIZE; i++) {
+        UINT8 usage = mUsbKeyboardReport[i];
+
+        if (usage == 0 ||
+            usb_keyboard_report_has_usage(mUsbKeyboardPreviousReport, usage)) {
+            continue;
+        }
+
+        Key->ScanCode = usb_keyboard_usage_to_scan(usage);
+        Key->UnicodeChar = 0;
+        if (Key->ScanCode == 0) {
+            Key->UnicodeChar = usb_keyboard_usage_to_char(usage, shift);
+        }
+        if (Key->ScanCode != 0 || Key->UnicodeChar != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static EFI_STATUS __attribute__((noinline, used))
+usb_keyboard_read_key(EFI_INPUT_KEY *Key)
+{
+    UINT32 head;
+    UINT32 cc;
+    EFI_STATUS status = EFI_NOT_READY;
+
+    if (!usb_keyboard_init()) {
+        return EFI_NOT_READY;
+    }
+
+    head = usb_ohci_ed_head(&mUsbOhciInterruptEd) & OHCI_DPTR_MASK;
+    if (head != usb_ohci_ed_tail(&mUsbOhciInterruptEd)) {
+        return EFI_NOT_READY;
+    }
+    usb_dma_barrier();
+
+    cc = usb_ohci_td_condition_code(&mUsbOhciInterruptTd[0]);
+    if (cc == OHCI_TD_CC_NOERROR) {
+        if (usb_keyboard_report_to_key(Key)) {
+            status = EFI_SUCCESS;
+        }
+        fw_copy_mem(mUsbKeyboardPreviousReport, mUsbKeyboardReport,
+                    sizeof(mUsbKeyboardPreviousReport));
+    } else {
+        fw_set_mem(mUsbKeyboardPreviousReport,
+                   sizeof(mUsbKeyboardPreviousReport), 0);
+    }
+    usb_keyboard_submit_interrupt_td();
+    return status;
+}
+
 /*
  * Wait briefly for the next serial byte.  Escape-sequence bytes for a single
  * key (e.g. ESC '[' 'B') arrive as a burst, so a bounded spin suffices to tell
@@ -5342,6 +5862,10 @@ static EFI_STATUS conin_read_device_key(EFI_INPUT_KEY *Key)
         }
 
         Key->UnicodeChar = (ch == '\n') ? '\r' : (CHAR16)ch;
+        return EFI_SUCCESS;
+    }
+
+    if (usb_keyboard_read_key(Key) == EFI_SUCCESS) {
         return EFI_SUCCESS;
     }
 
@@ -5443,6 +5967,10 @@ static EFI_STATUS conin_reset(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This,
     (void)This; (void)ExtendedVerification;
     mConInBufferedKeyValid = 0;
     fw_set_mem(&mConInBufferedKey, sizeof(mConInBufferedKey), 0);
+    mUsbKeyboardTried = 0;
+    mUsbKeyboardReady = 0;
+    fw_set_mem(mUsbKeyboardPreviousReport,
+               sizeof(mUsbKeyboardPreviousReport), 0);
     ps2_init_controller();
     return EFI_SUCCESS;
 }
@@ -11753,6 +12281,53 @@ static BOOLEAN __attribute__((noinline)) uefi_ps2_scancode_selftest(void)
     mPs2Extended = saved_extended;
     mPs2Shift = saved_shift;
     mPs2Translated = saved_translated;
+    return ok;
+}
+
+static BOOLEAN __attribute__((noinline)) uefi_usb_keyboard_selftest(void)
+{
+    UINT8 saved_report[OHCI_USB_KEYBOARD_REPORT_SIZE];
+    UINT8 saved_previous[OHCI_USB_KEYBOARD_REPORT_SIZE];
+    EFI_INPUT_KEY key;
+    BOOLEAN ok = 1;
+
+    fw_copy_mem(saved_report, mUsbKeyboardReport, sizeof(saved_report));
+    fw_copy_mem(saved_previous, mUsbKeyboardPreviousReport,
+                sizeof(saved_previous));
+    fw_set_mem(mUsbKeyboardReport, sizeof(mUsbKeyboardReport), 0);
+    fw_set_mem(mUsbKeyboardPreviousReport,
+               sizeof(mUsbKeyboardPreviousReport), 0);
+
+    mUsbKeyboardReport[2] = 0x04;
+    if (!usb_keyboard_report_to_key(&key) ||
+        key.ScanCode != 0 || key.UnicodeChar != 'a') {
+        ok = 0;
+    }
+    fw_copy_mem(mUsbKeyboardPreviousReport, mUsbKeyboardReport,
+                sizeof(mUsbKeyboardPreviousReport));
+    if (usb_keyboard_report_to_key(&key)) {
+        ok = 0;
+    }
+
+    fw_set_mem(mUsbKeyboardPreviousReport,
+               sizeof(mUsbKeyboardPreviousReport), 0);
+    mUsbKeyboardReport[0] = 1U << 1;
+    mUsbKeyboardReport[2] = 0x04;
+    if (!usb_keyboard_report_to_key(&key) ||
+        key.ScanCode != 0 || key.UnicodeChar != 'A') {
+        ok = 0;
+    }
+
+    mUsbKeyboardReport[0] = 0;
+    mUsbKeyboardReport[2] = 0x51;
+    if (!usb_keyboard_report_to_key(&key) ||
+        key.ScanCode != EFI_SCAN_DOWN || key.UnicodeChar != 0) {
+        ok = 0;
+    }
+
+    fw_copy_mem(mUsbKeyboardReport, saved_report, sizeof(saved_report));
+    fw_copy_mem(mUsbKeyboardPreviousReport, saved_previous,
+                sizeof(saved_previous));
     return ok;
 }
 
@@ -24737,7 +25312,8 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
               "graphics output handle verified\r\n" :
               "verification failed\r\n");
     uart_puts("Console In:           ");
-    uart_puts(uefi_conin_wait_key_selftest() ? "Serial/PS2 WaitForKey ready\r\n" :
+    uart_puts(uefi_conin_wait_key_selftest() ?
+              "Serial/PS2/USB WaitForKey ready\r\n" :
               "verification failed\r\n");
     uart_puts("Console In Buffer:    ");
     uart_puts(uefi_conin_buffer_selftest() ?
@@ -24746,6 +25322,10 @@ void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
     uart_puts("PS/2 Scancode Test:   ");
     uart_puts(uefi_ps2_scancode_selftest() ?
               "translated set1/set2 decode verified\r\n" :
+              "verification failed\r\n");
+    uart_puts("USB Keyboard Test:    ");
+    uart_puts(uefi_usb_keyboard_selftest() ?
+              "HID boot report decode verified\r\n" :
               "verification failed\r\n");
     uart_puts("Console In Ex:        ");
     uart_puts(uefi_conin_ex_selftest() ? "SimpleTextInputEx ready\r\n" :
