@@ -576,7 +576,6 @@ typedef struct CPUArchState {
     uint16_t      tlb_inst_count;
     uint16_t      tlb_data_replace;
     uint16_t      tlb_inst_replace;
-    bool          itlb_tb_flush_pending;
 
     /* pending external interrupt */
     uint8_t pending_extint;

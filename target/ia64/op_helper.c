@@ -747,19 +747,6 @@ static void ia64_invalidate_alat_phys_range(CPUIA64State *env,
     }
 }
 
-static void ia64_defer_itlb_tb_flush(CPUIA64State *env)
-{
-    env->itlb_tb_flush_pending = true;
-}
-
-static void ia64_flush_deferred_itlb_tb(CPUIA64State *env)
-{
-    if (env->itlb_tb_flush_pending) {
-        env->itlb_tb_flush_pending = false;
-        queue_tb_flush(env_cpu(env));
-    }
-}
-
 static void ia64_invalidate_stacked_alat(CPUIA64State *env)
 {
     ia64_invalidate_alat_reg_range(env, IA64_STACKED_GR_BASE, IA64_GR_COUNT,
@@ -844,6 +831,7 @@ static inline uint32_t ia64_rse_nat_words_shrink(uint64_t addr, uint32_t nregs)
 static uint32_t ia64_rse_virt_to_phys(const CPUIA64State *env, uint32_t v)
 {
     uint32_t sor_regs = (uint32_t)env->cfm_sor << 3;
+    uint32_t p;
 
     if (v < sor_regs) {
         v += env->cfm_rrb_gr;
@@ -851,13 +839,16 @@ static uint32_t ia64_rse_virt_to_phys(const CPUIA64State *env, uint32_t v)
             v -= sor_regs;
         }
     }
-    return ia64_rse_wrap_phys(env->rse_bol + v);
+    p = env->rse_bol + v;
+    return p < IA64_STACKED_GR_COUNT ? p : p - IA64_STACKED_GR_COUNT;
 }
 
 /* Inverse of ia64_rse_virt_to_phys. */
 static uint32_t ia64_rse_phys_to_virt(const CPUIA64State *env, uint32_t p)
 {
-    uint32_t off = ia64_rse_wrap_phys((int32_t)p - (int32_t)env->rse_bol);
+    uint32_t off = p >= env->rse_bol ?
+                   p - env->rse_bol :
+                   p + IA64_STACKED_GR_COUNT - env->rse_bol;
     uint32_t sor_regs = (uint32_t)env->cfm_sor << 3;
 
     if (off < sor_regs) {
@@ -3523,66 +3514,57 @@ static void ia64_rotate_rotating_gr_right(CPUIA64State *env)
                                    IA64_STACKED_GR_BASE + count, false);
 }
 
+static void ia64_rotate_rotating_fr_u64_right(uint64_t values[IA64_FR_COUNT])
+{
+    uint64_t last = values[IA64_FR_COUNT - 1];
+
+    memmove(&values[IA64_ROTATING_FR_BASE + 1],
+            &values[IA64_ROTATING_FR_BASE],
+            (IA64_ROTATING_FR_COUNT - 1) * sizeof(values[0]));
+    values[IA64_ROTATING_FR_BASE] = last;
+}
+
+static void ia64_rotate_rotating_fr_u32_right(uint32_t values[IA64_FR_COUNT])
+{
+    uint32_t last = values[IA64_FR_COUNT - 1];
+
+    memmove(&values[IA64_ROTATING_FR_BASE + 1],
+            &values[IA64_ROTATING_FR_BASE],
+            (IA64_ROTATING_FR_COUNT - 1) * sizeof(values[0]));
+    values[IA64_ROTATING_FR_BASE] = last;
+}
+
+static void ia64_rotate_rotating_fr_bits_right(uint64_t bits[2])
+{
+    const uint64_t rotating_word0_mask = UINT64_MAX << IA64_ROTATING_FR_BASE;
+    uint64_t word0 = bits[0];
+    uint64_t word1 = bits[1];
+    uint64_t wrap_to_base = word1 >> 63;
+    uint64_t carry_to_word1 = word0 >> 63;
+
+    bits[0] = (word0 & ~rotating_word0_mask) |
+              ((word0 << 1) & rotating_word0_mask) |
+              (wrap_to_base << IA64_ROTATING_FR_BASE);
+    bits[1] = (word1 << 1) | carry_to_word1;
+}
+
 static void ia64_rotate_rotating_fr_right(CPUIA64State *env)
 {
-    uint64_t fr_tmp[IA64_ROTATING_FR_COUNT];
-    uint64_t int_value_tmp[IA64_ROTATING_FR_COUNT];
-    uint64_t ext_mant_tmp[IA64_ROTATING_FR_COUNT];
-    uint32_t ext_exp_tmp[IA64_ROTATING_FR_COUNT];
-    uint8_t nat_tmp[IA64_ROTATING_FR_COUNT];
-    uint8_t sig_tmp[IA64_ROTATING_FR_COUNT];
-    uint8_t ext_sign_tmp[IA64_ROTATING_FR_COUNT];
-    uint8_t ext_valid_tmp[IA64_ROTATING_FR_COUNT];
-    uint8_t int_origin_tmp[IA64_ROTATING_FR_COUNT];
-    uint32_t i;
+    const uint64_t rotating_word0_mask = UINT64_MAX << IA64_ROTATING_FR_BASE;
 
-    for (i = 0; i < IA64_ROTATING_FR_COUNT; i++) {
-        uint32_t src = (i + IA64_ROTATING_FR_COUNT - 1) %
-                       IA64_ROTATING_FR_COUNT;
-        uint32_t src_reg = IA64_ROTATING_FR_BASE + src;
+    ia64_rotate_rotating_fr_u64_right(env->fr);
+    ia64_rotate_rotating_fr_u64_right(env->fr_int_value);
+    ia64_rotate_rotating_fr_u64_right(env->fr_ext_mant);
+    ia64_rotate_rotating_fr_u32_right(env->fr_ext_exp);
 
-        fr_tmp[i] = env->fr[src_reg];
-        nat_tmp[i] = ia64_fr_nat_get(env, src_reg);
-        sig_tmp[i] = ia64_fr_sig_get(env, src_reg);
-        ext_mant_tmp[i] = env->fr_ext_mant[src_reg];
-        ext_exp_tmp[i] = env->fr_ext_exp[src_reg];
-        ext_sign_tmp[i] =
-            (env->fr_ext_sign[src_reg / 64] >> (src_reg % 64)) & 1;
-        ext_valid_tmp[i] =
-            (env->fr_ext_valid[src_reg / 64] >> (src_reg % 64)) & 1;
-        int_value_tmp[i] = env->fr_int_value[src_reg];
-        int_origin_tmp[i] = ia64_fr_int_origin_get(env, src_reg);
-    }
+    ia64_rotate_rotating_fr_bits_right(env->fr_nat);
+    ia64_rotate_rotating_fr_bits_right(env->fr_sig);
+    ia64_rotate_rotating_fr_bits_right(env->fr_ext_sign);
+    ia64_rotate_rotating_fr_bits_right(env->fr_ext_valid);
+    ia64_rotate_rotating_fr_bits_right(env->fr_int_origin);
 
-    for (i = 0; i < IA64_ROTATING_FR_COUNT; i++) {
-        uint32_t dst_reg = IA64_ROTATING_FR_BASE + i;
-
-        env->fr[dst_reg] = fr_tmp[i];
-        ia64_fr_nat_set(env, dst_reg, nat_tmp[i]);
-        if (sig_tmp[i] && !nat_tmp[i]) {
-            env->fr_sig[dst_reg / 64] |= 1ULL << (dst_reg % 64);
-        } else {
-            env->fr_sig[dst_reg / 64] &= ~(1ULL << (dst_reg % 64));
-        }
-        env->fr_ext_mant[dst_reg] = ext_mant_tmp[i];
-        env->fr_ext_exp[dst_reg] = ext_exp_tmp[i];
-        if (ext_sign_tmp[i]) {
-            env->fr_ext_sign[dst_reg / 64] |= 1ULL << (dst_reg % 64);
-        } else {
-            env->fr_ext_sign[dst_reg / 64] &= ~(1ULL << (dst_reg % 64));
-        }
-        if (ext_valid_tmp[i]) {
-            env->fr_ext_valid[dst_reg / 64] |= 1ULL << (dst_reg % 64);
-        } else {
-            env->fr_ext_valid[dst_reg / 64] &= ~(1ULL << (dst_reg % 64));
-        }
-        env->fr_int_value[dst_reg] = int_value_tmp[i];
-        if (int_origin_tmp[i]) {
-            env->fr_int_origin[dst_reg / 64] |= 1ULL << (dst_reg % 64);
-        } else {
-            env->fr_int_origin[dst_reg / 64] &= ~(1ULL << (dst_reg % 64));
-        }
-    }
+    env->fr_sig[0] &= ~(env->fr_nat[0] & rotating_word0_mask);
+    env->fr_sig[1] &= ~env->fr_nat[1];
     ia64_invalidate_rotating_fp_alat(env);
 }
 
@@ -3830,17 +3812,14 @@ void helper_tlb_serialize(CPUIA64State *env, uint32_t serialize_data,
     if (data_purged || inst_purged) {
         tlb_flush(env_cpu(env));
     }
+
     /*
-     * srlz.i and rfi re-initiate later instruction fetches.  They do not
-     * invalidate translations by themselves; they only make prior
-     * instruction-side translation/cache changes observable.
+     * An instruction translation change does not change guest code.  The
+     * softmmu flush also clears the virtual-PC jump cache, and the next
+     * global TB lookup resolves the new physical page before matching a TB.
+     * Keep the physical-page-keyed TBs so they can be reused when a mapping
+     * becomes current again.
      */
-    if (inst_purged) {
-        ia64_defer_itlb_tb_flush(env);
-    }
-    if (serialize_inst) {
-        ia64_flush_deferred_itlb_tb(env);
-    }
 }
 
 void helper_ssm(CPUIA64State *env, uint64_t imm)
@@ -4021,9 +4000,6 @@ void helper_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
                   " ps=0x%016" PRIx64 " pte=0x%016" PRIx64 "\n",
                   is_data ? 'd' : 'i', slot, va, rid, pa, ps, pte);
     tlb_flush(cs);
-    if (!is_data) {
-        ia64_defer_itlb_tb_flush(env);
-    }
 }
 
 void helper_ptr_purge(CPUIA64State *env, uint64_t ifa, uint64_t size_reg,
@@ -7034,9 +7010,6 @@ static void ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
      * host translation range covered by the installed TC.
      */
     ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
-    if (is_ifetch) {
-        ia64_defer_itlb_tb_flush(env);
-    }
 }
 
 /* ---- VHPT walker ---- */
@@ -7333,9 +7306,6 @@ void helper_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data)
                   is_data ? 'd' : 'i', matched ? "update" : "slot",
                   slot, va, rid, pa, ps, perm, pte);
     tlb_flush(cs);
-    if (!is_data) {
-        ia64_defer_itlb_tb_flush(env);
-    }
 }
 
 /* ---- mov from PSR helper ---- */
@@ -7399,9 +7369,19 @@ void helper_mov_grrr_write(CPUIA64State *env, uint64_t rr_addr, uint64_t value)
 {
     uint32_t rr_num = (rr_addr >> 61) & 7;
 
+    if (env->rr[rr_num] == value) {
+        return;
+    }
+
     env->rr[rr_num] = value;
+    /*
+     * The softmmu TLB and jump cache contain virtual-address state, so both
+     * must be discarded when the RID changes.  tlb_flush() does both.  The
+     * global TB hash is keyed by the translated physical page as well as the
+     * virtual PC, so its TBs remain valid and can be reused when this address
+     * space becomes current again.
+     */
     tlb_flush(env_cpu(env));
-    ia64_defer_itlb_tb_flush(env);
 }
 
 /* ---- mov from PKR helper ---- */

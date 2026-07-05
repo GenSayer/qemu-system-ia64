@@ -16811,6 +16811,30 @@ def test_srlz_i_without_pending_itlb_change_keeps_tb_cache(qemu):
         raise AssertionError(f"srlz.i caused TB flush:\n{output}")
 
 
+def test_itlb_mapping_change_keeps_reusable_tb_cache(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(19, 0x8000)),
+        (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itr_i(5, 18), nop_i(),
+         nop_i()),
+        (0x70, 0x00, srlz_i(), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+    ], entry=0x10)
+    if stats.get("TB count", 0) < 1:
+        raise AssertionError(f"missing translated TB:\n{output}")
+    if stats.get("TB flush count") != 0:
+        raise AssertionError(
+            f"instruction mapping change discarded reusable TBs:\n{output}")
+
+
 test_fwb_decode = require_registers("fwb_decode", [
     (0x10, 0x00, fwb(ignored36=1, ignored=0x73963), adds(23, 4, 0),
      nop_i()),
@@ -19866,6 +19890,8 @@ TEST_NAMES = {
     "alloc_predicated_illegal": test_alloc_predicated_illegal,
     "srlz_i_without_pending_itlb_change_keeps_tb_cache":
         test_srlz_i_without_pending_itlb_change_keeps_tb_cache,
+    "itlb_mapping_change_keeps_reusable_tb_cache":
+        test_itlb_mapping_change_keeps_reusable_tb_cache,
     "srlz_sync_ignored_bit_decode": test_srlz_sync_ignored_bit_decode,
     "fwb_decode": test_fwb_decode,
     "mf_ignored_bit_decode": test_mf_ignored_bit_decode,
