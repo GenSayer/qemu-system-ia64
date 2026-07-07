@@ -7484,6 +7484,8 @@ static void ia64_set_alat(CPUIA64State *env, uint32_t reg, uint64_t addr,
 {
     uint64_t pa;
     IA64MemorySpeculation spec;
+    int free_index = -1;
+    int match_index = -1;
     int i;
 
     if (!ia64_data_address_to_phys_attr(env, addr, &pa, &spec) ||
@@ -7492,19 +7494,32 @@ static void ia64_set_alat(CPUIA64State *env, uint32_t reg, uint64_t addr,
     }
 
     for (i = 0; i < IA64_ALAT_ENTRIES; i++) {
-        if (!env->alat[i].valid ||
-            (env->alat[i].reg == reg && env->alat[i].fp == fp)) {
-            if (!env->alat[i].valid) {
-                env->alat_active_count++;
+        if (!env->alat[i].valid) {
+            if (free_index < 0) {
+                free_index = i;
             }
-            env->alat[i].phys_addr = pa;
-            env->alat[i].size = size;
-            env->alat[i].reg = reg;
-            env->alat[i].fp = fp;
-            env->alat[i].valid = true;
-            return;
+        } else if (env->alat[i].reg == reg && env->alat[i].fp == fp) {
+            if (match_index < 0) {
+                match_index = i;
+            } else {
+                /* A register can name at most one ALAT entry. */
+                ia64_alat_invalidate_entry(env, &env->alat[i]);
+            }
         }
     }
+
+    i = match_index >= 0 ? match_index : free_index;
+    if (i < 0) {
+        return;
+    }
+    if (!env->alat[i].valid) {
+        env->alat_active_count++;
+    }
+    env->alat[i].phys_addr = pa;
+    env->alat[i].size = size;
+    env->alat[i].reg = reg;
+    env->alat[i].fp = fp;
+    env->alat[i].valid = true;
 }
 
 void helper_set_alat(CPUIA64State *env, uint32_t reg, uint64_t addr,

@@ -11539,6 +11539,36 @@ test_invala_e_gr_invalidates_selected_register = require_registers(
     ], {"ip": 0xa0, "r4": 0, "r5": 1, "r6": 0, "r7": 0},
     entry=0x10)
 
+test_alat_reloading_register_does_not_leave_duplicate = require_registers(
+    "alat_reloading_register_does_not_leave_duplicate", [
+        (0x10, 0x00, addl(3, 0x100, 0), addl(5, 0x110, 0),
+         nop_i()),
+        (0x20, 0x00, ld8_a(21, 3), nop_i(),
+         nop_i()),
+        (0x30, 0x00, ld8_a(22, 5), nop_i(),
+         nop_i()),
+        (0x40, 0x00, invala_e_gr(21), addl(5, 0x120, 0),
+         nop_i()),
+        (0x50, 0x00, ld8_a(22, 5), nop_i(),
+         nop_i()),
+        (0x60, 0x00, invala_e_gr(22), nop_i(),
+         nop_i()),
+        (0x70, 0x00, chk_a_nc_m(22, 0x70, 0xa0), nop_i(),
+         nop_i()),
+        (0x80, 0x00, adds(4, 1, 0), nop_i(),
+         nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_cond(0x90, 0x90)),
+        (0xa0, 0x10, nop_m(), nop_i(),
+         br_cond(0xa0, 0xa0)),
+        (0x100, 0x00, 0x1111111111111111, 0,
+         0),
+        (0x110, 0x00, 0x2222222222222222, 0,
+         0),
+        (0x120, 0x00, 0x3333333333333333, 0,
+         0),
+    ], {"ip": 0xa0, "r4": 0}, entry=0x10)
+
 test_invala_clears_all_alat_entries = require_registers(
     "invala_clears_all_alat_entries", [
         (0x10, 0x00, addl(3, 0x100, 0), nop_i(),
@@ -19281,6 +19311,8 @@ TEST_NAMES = {
     "chk_a_clr_removes_entry": test_chk_a_clr_removes_entry,
     "invala_e_gr_invalidates_selected_register":
         test_invala_e_gr_invalidates_selected_register,
+    "alat_reloading_register_does_not_leave_duplicate":
+        test_alat_reloading_register_does_not_leave_duplicate,
     "invala_clears_all_alat_entries": test_invala_clears_all_alat_entries,
     "ld8_c_nc_address_mismatch_reloads":
         test_ld8_c_nc_address_mismatch_reloads,
