@@ -25,6 +25,7 @@ typedef __SIZE_TYPE__    size_t;
 #define NULL ((void *)0)
 
 #define UART_BASE   0x00000047f0000000ULL
+#define DEBUG_UART_BASE 0x00000047f0001000ULL
 /* 16550 UART register offsets */
 #define UART_RBR    0x00   /* Receiver Buffer Register (read) */
 #define UART_THR    0x00   /* Transmit Holding Register (write) */
@@ -78,6 +79,7 @@ typedef __SIZE_TYPE__    size_t;
 #define ACPI_SCI_IRQ     9U
 #define ACPI_GAS_SYSTEM_MEMORY 0U
 #define ACPI_GAS_SYSTEM_IO     1U
+#define ACPI_DBGP_INTERFACE_16550_FULL 0U
 #define ACPI_FADT_FLAG_WBINVD        (1U << 0)
 #define ACPI_FADT_FLAG_PWR_BUTTON    (1U << 4)
 #define ACPI_FADT_FLAG_SLP_BUTTON    (1U << 5)
@@ -123,7 +125,8 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
 #define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
 #define FW_HANDOFF_MAGIC  0x4d41523436414951ULL /* "QIA64RAM" */
-#define FW_HANDOFF_VERSION 4ULL
+#define FW_HANDOFF_VERSION 5ULL
+#define FW_HANDOFF_DEBUG_PORT_PRESENT 1ULL
 #define FW_CONSOLE_POLICY_SERIAL 0ULL
 #define FW_CONSOLE_POLICY_VGA    1ULL
 #define EFI_MEMORY_UC     0x0000000000000001ULL
@@ -1143,12 +1146,12 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT64 Entry[7];
+    UINT64 Entry[8];
 } __attribute__((packed)) ACPI_XSDT;
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT32 Entry[7];
+    UINT32 Entry[8];
 } __attribute__((packed)) ACPI_RSDT;
 
 typedef struct {
@@ -1316,6 +1319,13 @@ typedef struct {
     HCDP_UART_DESCRIPTOR Uart[1];
     HCDP_DEVICE_DESCRIPTOR Device[1];
 } __attribute__((packed)) ACPI_HCDP;
+
+typedef struct {
+    ACPI_SDT_HEADER Hdr;
+    UINT8 InterfaceType;
+    UINT8 Reserved[3];
+    ACPI_GENERIC_ADDRESS BaseAddress;
+} __attribute__((packed)) ACPI_DBGP;
 
 /* SMBIOS 2.7 structures published through the UEFI configuration table. */
 typedef struct {
@@ -1711,8 +1721,8 @@ FW_STATIC_ASSERT(FW_BOOT_STACK_SIZE >=
                  IA64_EFI_MIN_STACK_BYTES,
                  efi_boot_stack_capacity);
 FW_STATIC_ASSERT(sizeof(ACPI_FADT) == 244, acpi_fadt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 92, acpi_xsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 64, acpi_rsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
 FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 487, acpi_dsdt_size);
@@ -1731,6 +1741,7 @@ FW_STATIC_ASSERT(sizeof(ACPI_GENERIC_ADDRESS) == 12, acpi_gas_size);
 FW_STATIC_ASSERT(sizeof(HCDP_UART_DESCRIPTOR) == 48, acpi_hcdp_uart_size);
 FW_STATIC_ASSERT(sizeof(HCDP_PCI_INTERFACE) == 34, acpi_hcdp_pci_size);
 FW_STATIC_ASSERT(sizeof(HCDP_DEVICE_DESCRIPTOR) == 41, acpi_hcdp_device_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DBGP) == 52, acpi_dbgp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_QWORD_ADDRESS_DESCRIPTOR) == 46,
                  acpi_qword_address_descriptor_size);
 FW_STATIC_ASSERT(sizeof(FW_PCI_ROOT_BRIDGE_RESOURCES) == 140,
@@ -1903,6 +1914,7 @@ static ACPI_MADT               mMadt;
 static ACPI_SRAT               mSrat;
 static ACPI_SLIT               mSlit;
 static ACPI_HCDP               mHcdp;
+static ACPI_DBGP               mDbgp;
 static ACPI_RSDP              *mAcpiRsdp;
 static ACPI_XSDT              *mAcpiXsdt;
 static ACPI_RSDT              *mAcpiRsdt;
@@ -1915,6 +1927,7 @@ static ACPI_MCFG              *mAcpiMcfg;
 static ACPI_SRAT              *mAcpiSrat;
 static ACPI_SLIT              *mAcpiSlit;
 static ACPI_HCDP              *mAcpiHcdp;
+static ACPI_DBGP              *mAcpiDbgp;
 static UINTN                   mAcpiTableEnd;
 
 static const UINT8 gEfiAcpi20TableGuid[16] = {
@@ -1985,6 +1998,8 @@ typedef struct {
     UINT64 Second;
     UINT64 ConsolePolicy;
     UINT64 IdeDmaEnabled;
+    UINT64 DebugPortFlags;
+    UINT64 DebugPortBase;
 } FW_HANDOFF;
 
 static BOOLEAN fw_handoff_valid(volatile FW_HANDOFF *Handoff)
@@ -2120,6 +2135,20 @@ static BOOLEAN fw_handoff_ide_dma_enabled(void)
 
     return !fw_handoff_valid(handoff) || handoff->Version < 4 ||
            handoff->IdeDmaEnabled != 0;
+}
+
+static UINT64 fw_handoff_debug_port_base(void)
+{
+    FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+
+    if (!fw_handoff_valid(handoff) ||
+        handoff->Version < 5 ||
+        (handoff->DebugPortFlags & FW_HANDOFF_DEBUG_PORT_PRESENT) == 0 ||
+        handoff->DebugPortBase == 0) {
+        return 0;
+    }
+
+    return handoff->DebugPortBase;
 }
 
 static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
@@ -3656,6 +3685,7 @@ static void acpi_use_static_tables(void)
     mAcpiSrat = &mSrat;
     mAcpiSlit = &mSlit;
     mAcpiHcdp = &mHcdp;
+    mAcpiDbgp = &mDbgp;
 
     end = (UINTN)&mRsdp + sizeof(mRsdp);
     if ((UINTN)&mFacs + sizeof(mFacs) > end) {
@@ -3691,6 +3721,9 @@ static void acpi_use_static_tables(void)
     if ((UINTN)&mHcdp + sizeof(mHcdp) > end) {
         end = (UINTN)&mHcdp + sizeof(mHcdp);
     }
+    if ((UINTN)&mDbgp + sizeof(mDbgp) > end) {
+        end = (UINTN)&mDbgp + sizeof(mDbgp);
+    }
     mAcpiTableEnd = end;
 }
 
@@ -3722,6 +3755,8 @@ static BOOLEAN acpi_assign_reclaim_tables(void)
     cursor = (UINTN)mAcpiSlit + sizeof(*mAcpiSlit);
     mAcpiHcdp = (ACPI_HCDP *)acpi_align_up(cursor, 8);
     cursor = (UINTN)mAcpiHcdp + sizeof(*mAcpiHcdp);
+    mAcpiDbgp = (ACPI_DBGP *)acpi_align_up(cursor, 8);
+    cursor = (UINTN)mAcpiDbgp + sizeof(*mAcpiDbgp);
     mAcpiTableEnd = cursor;
 
     if (mAcpiTableEnd < ACPI_RECLAIM_BASE ||
@@ -3746,6 +3781,7 @@ static void acpi_publish_reclaim_tables(void)
     fw_copy_mem(mAcpiSrat, &mSrat, sizeof(mSrat));
     fw_copy_mem(mAcpiSlit, &mSlit, sizeof(mSlit));
     fw_copy_mem(mAcpiHcdp, &mHcdp, sizeof(mHcdp));
+    fw_copy_mem(mAcpiDbgp, &mDbgp, sizeof(mDbgp));
 }
 
 static BOOLEAN acpi_published_range_valid(const VOID *Table, UINTN Size,
@@ -11552,6 +11588,10 @@ static void efi_init_platform_tables(void)
 {
     UINTN i;
     BOOLEAN vga_primary = fw_handoff_vga_console_primary();
+    UINT64 debug_port_base = fw_handoff_debug_port_base();
+    BOOLEAN debug_port_present = debug_port_base != 0;
+    UINT32 xsdt_length = 36 + (debug_port_present ? 8U : 7U) * 8U;
+    UINT32 rsdt_length = 36 + (debug_port_present ? 8U : 7U) * 4U;
 
     (void)acpi_assign_reclaim_tables();
 
@@ -11709,7 +11749,8 @@ static void efi_init_platform_tables(void)
     mSsdt.Hdr.Revision = 2;
     mSsdt.Hdr.Checksum = table_checksum8(&mSsdt, sizeof(mSsdt));
 
-    init_sdt_header(&mXsdt.Hdr, EFI_SIGNATURE_32('X', 'S', 'D', 'T'), sizeof(mXsdt));
+    init_sdt_header(&mXsdt.Hdr, EFI_SIGNATURE_32('X', 'S', 'D', 'T'),
+                    xsdt_length);
     mXsdt.Entry[0] = (UINT64)(UINTN)mAcpiFadt;
     mXsdt.Entry[1] = (UINT64)(UINTN)mAcpiMadt;
     mXsdt.Entry[2] = (UINT64)(UINTN)mAcpiSrat;
@@ -11717,10 +11758,11 @@ static void efi_init_platform_tables(void)
     mXsdt.Entry[4] = (UINT64)(UINTN)mAcpiHcdp;
     mXsdt.Entry[5] = (UINT64)(UINTN)mAcpiMcfg;
     mXsdt.Entry[6] = (UINT64)(UINTN)mAcpiSsdt;
-    mXsdt.Hdr.Checksum = table_checksum8(&mXsdt, sizeof(mXsdt));
+    mXsdt.Entry[7] = debug_port_present ? (UINT64)(UINTN)mAcpiDbgp : 0;
+    mXsdt.Hdr.Checksum = table_checksum8(&mXsdt, mXsdt.Hdr.Length);
 
     init_sdt_header(&mRsdt.Hdr, EFI_SIGNATURE_32('R', 'S', 'D', 'T'),
-                    sizeof(mRsdt));
+                    rsdt_length);
     mRsdt.Entry[0] = (UINT32)(UINTN)mAcpiFadt;
     mRsdt.Entry[1] = (UINT32)(UINTN)mAcpiMadt;
     mRsdt.Entry[2] = (UINT32)(UINTN)mAcpiSrat;
@@ -11728,7 +11770,8 @@ static void efi_init_platform_tables(void)
     mRsdt.Entry[4] = (UINT32)(UINTN)mAcpiHcdp;
     mRsdt.Entry[5] = (UINT32)(UINTN)mAcpiMcfg;
     mRsdt.Entry[6] = (UINT32)(UINTN)mAcpiSsdt;
-    mRsdt.Hdr.Checksum = table_checksum8(&mRsdt, sizeof(mRsdt));
+    mRsdt.Entry[7] = debug_port_present ? (UINT32)(UINTN)mAcpiDbgp : 0;
+    mRsdt.Hdr.Checksum = table_checksum8(&mRsdt, mRsdt.Hdr.Length);
 
     init_sdt_header(&mMcfg.Hdr, EFI_SIGNATURE_32('M', 'C', 'F', 'G'),
                     sizeof(mMcfg));
@@ -11844,6 +11887,15 @@ static void efi_init_platform_tables(void)
     mHcdp.Device[0].Pci.Translation = HCDP_PCI_TRANSLATE_IOPORT;
     mHcdp.Device[0].Vga.Count = 0;
     mHcdp.Hdr.Checksum = table_checksum8(&mHcdp, sizeof(mHcdp));
+
+    init_sdt_header(&mDbgp.Hdr, EFI_SIGNATURE_32('D', 'B', 'G', 'P'),
+                    sizeof(mDbgp));
+    mDbgp.InterfaceType = ACPI_DBGP_INTERFACE_16550_FULL;
+    mDbgp.Reserved[0] = 0;
+    mDbgp.Reserved[1] = 0;
+    mDbgp.Reserved[2] = 0;
+    mDbgp.BaseAddress = acpi_system_memory_gas(8, debug_port_base);
+    mDbgp.Hdr.Checksum = table_checksum8(&mDbgp, sizeof(mDbgp));
 
     for (i = 0; i < 8; i++) {
         mRsdp.Signature[i] = "RSD PTR "[i];
@@ -11963,6 +12015,10 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     static const UINT8 crs_name[] = { '_', 'C', 'R', 'S' };
     static const UINT8 prt_name[] = { '_', 'P', 'R', 'T' };
     UINTN i;
+    UINT64 debug_port_base = fw_handoff_debug_port_base();
+    BOOLEAN debug_port_present = debug_port_base != 0;
+    UINT32 xsdt_length = 36 + (debug_port_present ? 8U : 7U) * 8U;
+    UINT32 rsdt_length = 36 + (debug_port_present ? 8U : 7U) * 4U;
 
     if (mSalSystemTable.Signature != EFI_SIGNATURE_32('S', 'S', 'T', '_') ||
         mSalSystemTable.Length != sizeof(mSalSystemTable) ||
@@ -11993,7 +12049,8 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         !acpi_published_range_valid(mAcpiMcfg, sizeof(*mAcpiMcfg), 8) ||
         !acpi_published_range_valid(mAcpiSrat, sizeof(*mAcpiSrat), 8) ||
         !acpi_published_range_valid(mAcpiSlit, sizeof(*mAcpiSlit), 8) ||
-        !acpi_published_range_valid(mAcpiHcdp, sizeof(*mAcpiHcdp), 8)) {
+        !acpi_published_range_valid(mAcpiHcdp, sizeof(*mAcpiHcdp), 8) ||
+        !acpi_published_range_valid(mAcpiDbgp, sizeof(*mAcpiDbgp), 8)) {
         return 0;
     }
 
@@ -12014,10 +12071,10 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
                                   sizeof(*mAcpiFadt)) ||
         !acpi_sdt_integrity_valid(&mAcpiXsdt->Hdr,
                                   EFI_SIGNATURE_32('X', 'S', 'D', 'T'),
-                                  sizeof(*mAcpiXsdt)) ||
+                                  xsdt_length) ||
         !acpi_sdt_integrity_valid(&mAcpiRsdt->Hdr,
                                   EFI_SIGNATURE_32('R', 'S', 'D', 'T'),
-                                  sizeof(*mAcpiRsdt)) ||
+                                  rsdt_length) ||
         !acpi_sdt_integrity_valid(&mAcpiSsdt->Hdr,
                                   EFI_SIGNATURE_32('S', 'S', 'D', 'T'),
                                   sizeof(*mAcpiSsdt)) ||
@@ -12033,6 +12090,9 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         !acpi_sdt_integrity_valid(&mAcpiHcdp->Hdr,
                                   EFI_SIGNATURE_32('H', 'C', 'D', 'P'),
                                   sizeof(*mAcpiHcdp)) ||
+        !acpi_sdt_integrity_valid(&mAcpiDbgp->Hdr,
+                                  EFI_SIGNATURE_32('D', 'B', 'G', 'P'),
+                                  sizeof(*mAcpiDbgp)) ||
         !acpi_sdt_integrity_valid(&mAcpiMcfg->Hdr,
                                   EFI_SIGNATURE_32('M', 'C', 'F', 'G'),
                                   sizeof(*mAcpiMcfg))) {
@@ -12079,7 +12139,9 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiXsdt->Entry[3] != (UINT64)(UINTN)mAcpiSlit ||
         mAcpiXsdt->Entry[4] != (UINT64)(UINTN)mAcpiHcdp ||
         mAcpiXsdt->Entry[5] != (UINT64)(UINTN)mAcpiMcfg ||
-        mAcpiXsdt->Entry[6] != (UINT64)(UINTN)mAcpiSsdt) {
+        mAcpiXsdt->Entry[6] != (UINT64)(UINTN)mAcpiSsdt ||
+        mAcpiXsdt->Entry[7] !=
+            (debug_port_present ? (UINT64)(UINTN)mAcpiDbgp : 0)) {
         return 0;
     }
 
@@ -12089,7 +12151,19 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiRsdt->Entry[3] != (UINT32)(UINTN)mAcpiSlit ||
         mAcpiRsdt->Entry[4] != (UINT32)(UINTN)mAcpiHcdp ||
         mAcpiRsdt->Entry[5] != (UINT32)(UINTN)mAcpiMcfg ||
-        mAcpiRsdt->Entry[6] != (UINT32)(UINTN)mAcpiSsdt) {
+        mAcpiRsdt->Entry[6] != (UINT32)(UINTN)mAcpiSsdt ||
+        mAcpiRsdt->Entry[7] !=
+            (debug_port_present ? (UINT32)(UINTN)mAcpiDbgp : 0)) {
+        return 0;
+    }
+
+    if (mAcpiDbgp->InterfaceType != ACPI_DBGP_INTERFACE_16550_FULL ||
+        mAcpiDbgp->Reserved[0] != 0 ||
+        mAcpiDbgp->Reserved[1] != 0 ||
+        mAcpiDbgp->Reserved[2] != 0 ||
+        (debug_port_present &&
+         !acpi_gas_matches(&mAcpiDbgp->BaseAddress,
+                           ACPI_GAS_SYSTEM_MEMORY, 8, debug_port_base))) {
         return 0;
     }
 

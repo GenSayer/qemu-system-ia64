@@ -38,6 +38,7 @@
 #include "target/ia64/cpu.h"
 
 #define IA64_UART_BASE  0x00000047f0000000ULL
+#define IA64_DEBUG_UART_BASE 0x00000047f0001000ULL
 #define IA64_FW_BASE    0x0000000000100000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
@@ -69,9 +70,10 @@
 #define IA64_ACPI_SCI_IRQ       9
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION      4ULL
+#define IA64_FW_HANDOFF_VERSION      5ULL
 #define IA64_FW_CONSOLE_SERIAL       0ULL
 #define IA64_FW_CONSOLE_VGA          1ULL
+#define IA64_FW_DEBUG_PORT_PRESENT   1ULL
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
@@ -302,8 +304,9 @@ static void ia64_vpc_map_firmware_address_space(void)
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
 {
-    uint8_t handoff[96] = { 0 };
+    uint8_t handoff[112] = { 0 };
     struct tm tm;
+    bool debug_port_present = debug_port_get_chardev() != NULL;
 
     stq_le_p(handoff, IA64_FW_HANDOFF_MAGIC);
     stq_le_p(handoff + 8, IA64_FW_HANDOFF_VERSION);
@@ -318,6 +321,9 @@ static void ia64_vpc_write_firmware_handoff(MachineState *machine)
     stq_le_p(handoff + 72, tm.tm_sec);
     stq_le_p(handoff + 80, ia64_vpc_firmware_console);
     stq_le_p(handoff + 88, ia64_vpc_firmware_ide_dma);
+    stq_le_p(handoff + 96,
+             debug_port_present ? IA64_FW_DEBUG_PORT_PRESENT : 0);
+    stq_le_p(handoff + 104, debug_port_present ? IA64_DEBUG_UART_BASE : 0);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
 }
 
@@ -769,6 +775,12 @@ static void ia64_vpc_init(MachineState *machine)
     serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
                    qdev_get_gpio_in(iosapic, 4),
                    115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    if (debug_port_get_chardev()) {
+        serial_mm_init(get_system_memory(), IA64_DEBUG_UART_BASE, 0,
+                       qdev_get_gpio_in(iosapic, 3),
+                       115200, debug_port_get_chardev(),
+                       DEVICE_LITTLE_ENDIAN);
+    }
 
     if (machine->firmware) {
         if (rom_add_file_fixed(machine->firmware, IA64_FW_BASE, -1)) {

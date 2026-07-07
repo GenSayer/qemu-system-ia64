@@ -4949,6 +4949,18 @@ SRST
     graphical mode.
 ERST
 
+DEF("debug-port", HAS_ARG, QEMU_OPTION_debug_port, \
+    "-debug-port dev redirect the ACPI debug port to char device 'dev'\n",
+    QEMU_ARCH_IA64)
+SRST
+``-debug-port dev``
+    Redirect the IA-64 ACPI debug port to host character device dev
+    (same devices as the serial port).  At most one debug port can be
+    configured.  Use ``-debug-port none`` to suppress the debug port.
+    Raw TCP debug ports default to ``nodelay=on,ipv4=on,ipv6=off``
+    unless those options are specified explicitly.
+ERST
+
 DEF("pidfile", HAS_ARG, QEMU_OPTION_pidfile, \
     "-pidfile file   write PID to 'file'\n", QEMU_ARCH_ALL)
 SRST

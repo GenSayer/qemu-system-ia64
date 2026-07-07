@@ -187,6 +187,7 @@ static const char *vga_model = NULL;
 static DisplayOptions dpy;
 static int num_serial_hds;
 static Chardev **serial_hds;
+static Chardev *debug_port_hd;
 static const char *log_mask;
 static const char *log_file;
 static bool list_data_dirs;
@@ -1284,6 +1285,7 @@ struct device_config {
         DEV_SERIAL,    /* -serial        */
         DEV_PARALLEL,  /* -parallel      */
         DEV_DEBUGCON,  /* -debugcon */
+        DEV_DEBUG_PORT,/* -debug-port    */
         DEV_GDB,       /* -gdb, -s */
         DEV_SCLP,      /* s390 sclp */
     } type;
@@ -1489,6 +1491,70 @@ Chardev *serial_hd(int i)
     return NULL;
 }
 
+Chardev *debug_port_get_chardev(void)
+{
+    return debug_port_hd;
+}
+
+static bool debug_port_has_tcp_delay_option(const char *devname)
+{
+    const char *opt = strchr(devname, ',');
+
+    while (opt) {
+        opt++;
+        if ((!strncmp(opt, "delay", 5) &&
+             (opt[5] == '\0' || opt[5] == ',' || opt[5] == '=')) ||
+            (!strncmp(opt, "nodelay", 7) &&
+             (opt[7] == '\0' || opt[7] == ',' || opt[7] == '='))) {
+            return true;
+        }
+        opt = strchr(opt, ',');
+    }
+
+    return false;
+}
+
+static bool debug_port_has_tcp_family_option(const char *devname)
+{
+    const char *opt = strchr(devname, ',');
+
+    while (opt) {
+        opt++;
+        if ((!strncmp(opt, "ipv4", 4) &&
+             (opt[4] == '\0' || opt[4] == ',' || opt[4] == '=')) ||
+            (!strncmp(opt, "ipv6", 4) &&
+             (opt[4] == '\0' || opt[4] == ',' || opt[4] == '='))) {
+            return true;
+        }
+        opt = strchr(opt, ',');
+    }
+
+    return false;
+}
+
+static char *debug_port_normalize_chardev(const char *devname)
+{
+    const char *p = devname;
+    GString *normalized;
+
+    /* Preserve muxed monitor syntax, but inspect the underlying backend. */
+    (void)strstart(p, "mon:", &p);
+
+    if (!strstart(p, "tcp:", NULL)) {
+        return g_strdup(devname);
+    }
+
+    normalized = g_string_new(devname);
+    if (!debug_port_has_tcp_delay_option(devname)) {
+        g_string_append(normalized, ",nodelay=on");
+    }
+    if (!debug_port_has_tcp_family_option(devname)) {
+        g_string_append(normalized, ",ipv4=on,ipv6=off");
+    }
+
+    return g_string_free(normalized, false);
+}
+
 static bool parallel_parse(const char *devname, Error **errp)
 {
     static int index = 0;
@@ -1508,6 +1574,35 @@ static bool parallel_parse(const char *devname, Error **errp)
         return false;
     }
     index++;
+    return true;
+}
+
+static bool debug_port_parse(const char *devname, Error **errp)
+{
+    static bool parsed;
+    char *debug_port_devname;
+
+    if (parsed) {
+        error_setg(errp, "only one -debug-port option is supported");
+        return false;
+    }
+    parsed = true;
+
+    if (strcmp(devname, "none") == 0) {
+        debug_port_hd = NULL;
+        return true;
+    }
+
+    debug_port_devname = debug_port_normalize_chardev(devname);
+    debug_port_hd = qemu_chr_new_mux_mon("debugport0", debug_port_devname,
+                                         NULL);
+    g_free(debug_port_devname);
+    if (!debug_port_hd) {
+        error_setg(errp, "could not connect debug port device"
+                   " to character backend '%s'", devname);
+        return false;
+    }
+
     return true;
 }
 
@@ -2116,6 +2211,7 @@ static void qemu_create_late_backends(void)
     foreach_device_config_or_exit(DEV_SERIAL, serial_parse);
     foreach_device_config_or_exit(DEV_PARALLEL, parallel_parse);
     foreach_device_config_or_exit(DEV_DEBUGCON, debugcon_parse);
+    foreach_device_config_or_exit(DEV_DEBUG_PORT, debug_port_parse);
 
     /* now chardevs have been created we may have semihosting to connect */
     qemu_semihosting_chardev_init();
@@ -3351,6 +3447,16 @@ void qemu_init(int argc, char **argv)
                 break;
             case QEMU_OPTION_debugcon:
                 add_device_config(DEV_DEBUGCON, optarg);
+                break;
+            case QEMU_OPTION_debug_port:
+                add_device_config(DEV_DEBUG_PORT, optarg);
+                if (strcmp(optarg, "stdio") == 0 ||
+                    strcmp(optarg, "mon:stdio") == 0) {
+                    default_serial = 0;
+                    default_monitor = 0;
+                } else if (strncmp(optarg, "mon:", 4) == 0) {
+                    default_monitor = 0;
+                }
                 break;
             case QEMU_OPTION_loadvm:
                 loadvm = optarg;

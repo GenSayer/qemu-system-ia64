@@ -74,6 +74,9 @@ extern unsigned int nb_prom_envs;
 /* Return the Chardev for serial port i, or NULL if none */
 Chardev *serial_hd(int i);
 
+/* Return the Chardev for the ACPI debug port, or NULL if none */
+Chardev *debug_port_get_chardev(void);
+
 /* parallel ports */
 
 #define MAX_PARALLEL_PORTS 3

@@ -37,7 +37,7 @@ EXPECTED_COUNTS = {
     "efi": 158,
     "pal": 56,
     "sal": 28,
-    "acpi": 28,
+    "acpi": 29,
 }
 
 INSTRUCTION_CATEGORY_REFS = {
@@ -275,7 +275,7 @@ ACPI_ASSERTIONS = [
     "64-bit IA-64 table pointers and EFI configuration-table GUIDs resolve to "
     "the architecturally appropriate physical ACPI reclaim or runtime firmware "
     "tables exposed to the OS loader",
-    "RSDP/RSDT/XSDT/FADT/FACS/DSDT/SSDT/MADT/MCFG/SRAT/SLIT/HCDP/SAL-table "
+    "RSDP/RSDT/XSDT/FADT/FACS/DSDT/SSDT/MADT/MCFG/SRAT/SLIT/HCDP/DBGP/SAL-table "
     "and SMBIOS structures match ACPI 2.0 IA-64, EFI, and SMBIOS layout and "
     "entry ordering requirements",
     "SAPIC, I/O SAPIC, PM block, SCI, PIB, and IOSAPIC MMIO behavior follows "

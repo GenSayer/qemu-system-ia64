@@ -12,6 +12,7 @@ import importlib.util
 import os
 import re
 import select
+import socket
 import struct
 import subprocess
 import sys
@@ -35,6 +36,7 @@ RSDP_SIGNATURE = b"RSD PTR "
 ACPI_RECLAIM_BASE = 0x00800000
 ACPI_RECLAIM_END = 0x00820000
 ACPI_PM_IO_BASE = 0x2000
+ACPI_GAS_SYSTEM_MEMORY = 0
 ACPI_GAS_SYSTEM_IO = 1
 ACPI_SCI_IRQ = 9
 ACPI_FADT_FLAG_WBINVD = 1 << 0
@@ -67,6 +69,7 @@ IOSAPIC_RTE_REMOTE_IRR = 1 << 14
 IOSAPIC_RTE_TRIGGER_LEVEL = 1 << 15
 IOSAPIC_RTE_MASKED = 1 << 16
 UART_BASE = 0x47F0000000
+DEBUG_UART_BASE = 0x47F0001000
 UART_BAUD = 115200
 HCDP_UART_IRQ = 4
 HCDP_UART_PRIMARY_CONSOLE = 1 << 2
@@ -434,7 +437,7 @@ def symbol_bytes(elf_path, symbols, name):
 
 
 def qemu_physical_bytes(qemu, firmware, ranges, machine="ia64-vpc",
-                        memory_mib=None):
+                        memory_mib=None, extra_args=None):
     commands = []
     for addr, size in ranges.values():
         commands.append(f"xp /{size}xb 0x{addr:x}")
@@ -453,6 +456,8 @@ def qemu_physical_bytes(qemu, firmware, ranges, machine="ia64-vpc",
         "-serial", "none",
         "-monitor", "stdio",
     ]
+    if extra_args:
+        args += extra_args
 
     proc = subprocess.Popen(
         args,
@@ -620,14 +625,26 @@ def validate_sdt(name, data, expected_signature, min_revision=1):
     if sdt_name(data) != expected_signature:
         raise RuntimeError(f"{name}: expected signature {expected_signature}")
     length = u32(data, 4)
-    if length != len(data):
-        raise RuntimeError(f"{name}: length field {length} != symbol size {len(data)}")
+    if length > len(data):
+        raise RuntimeError(f"{name}: length field {length} > bytes read {len(data)}")
     if data[8] < min_revision:
         raise RuntimeError(f"{name}: revision {data[8]} < {min_revision}")
-    if checksum8(data) != 0:
+    if checksum8(data[:length]) != 0:
         raise RuntimeError(f"{name}: checksum is not zero")
     if data[36:length] == b"":
         raise RuntimeError(f"{name}: missing body")
+
+
+def validate_dbgp(data):
+    validate_sdt("mDbgp", data, "DBGP", 1)
+    if u32(data, 4) != 52:
+        raise RuntimeError("DBGP length mismatch")
+    if data[36] != 0 or data[37:40] != b"\0\0\0":
+        raise RuntimeError("DBGP interface type/reserved fields mismatch")
+    if (data[40] != ACPI_GAS_SYSTEM_MEMORY or data[41] != 8 or
+            data[42] != 0 or data[43] != 0 or
+            gas_address(data, 40) != DEBUG_UART_BASE):
+        raise RuntimeError("DBGP base address GAS mismatch")
 
 
 def test_inputs(root, qemu, firmware):
@@ -640,6 +657,106 @@ def test_inputs(root, qemu, firmware):
             missing.append(path)
     if missing:
         raise RuntimeError("missing inputs: " + ", ".join(missing))
+
+    result = subprocess.run(
+        [
+            qemu,
+            "-machine", "none",
+            "-display", "none",
+            "-monitor", "none",
+            "-serial", "none",
+            "-debug-port", "none",
+            "-debug-port", "none",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=8,
+    )
+    if (result.returncode == 0 or
+            "only one -debug-port option is supported" not in result.stdout):
+        raise RuntimeError("-debug-port must reject multiple instances\n" +
+                           result.stdout)
+
+    try:
+        result = subprocess.run(
+            [
+                qemu,
+                "-machine", "none",
+                "-nographic",
+                "-debug-port", "stdio",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=1,
+        )
+    except subprocess.TimeoutExpired:
+        result = None
+    if result is not None:
+        if ("cannot use stdio by multiple character devices" in
+                result.stdout):
+            raise RuntimeError("-debug-port stdio must own nographic stdio\n" +
+                               result.stdout)
+        if result.returncode != 0:
+            raise RuntimeError("-debug-port stdio failed under -nographic\n" +
+                               result.stdout)
+
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 0))
+        tcp_port = probe.getsockname()[1]
+    finally:
+        probe.close()
+    proc = subprocess.Popen(
+        [
+            qemu,
+            "-machine", "none",
+            "-display", "none",
+            "-monitor", "none",
+            "-serial", "none",
+            "-debug-port", f"tcp::{tcp_port},server=on,wait=off",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    connected = False
+    output = ""
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                output, _ = proc.communicate(timeout=1)
+                break
+            try:
+                with socket.create_connection(("127.0.0.1", tcp_port),
+                                              timeout=0.2):
+                    connected = True
+                    break
+            except OSError:
+                time.sleep(0.05)
+        if not connected:
+            if not output:
+                proc.terminate()
+                try:
+                    output, _ = proc.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    output, _ = proc.communicate(timeout=2)
+            raise RuntimeError("-debug-port tcp server did not accept\n" +
+                               output)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+
     if LEGACY_IO_BASE & (PCI_IO_SPARSE_SIZE - 1):
         raise RuntimeError("legacy PCI I/O base must be aligned for sparse I/O")
     for port in [
@@ -784,7 +901,7 @@ def test_csv_rows_are_bound_to_execution(root, qemu1, qemu2):
     expected_counts = {
         "efi": 158,
         "sal": 28,
-        "acpi": 28,
+        "acpi": 29,
     }
     for domain, count in expected_counts.items():
         if len(rows[domain]) != count:
@@ -1191,6 +1308,46 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     table_addrs = dict(zip(expected_xsdt_symbols, xsdt_entries))
     for name, addr in table_addrs.items():
         require_acpi_reclaim(name, addr, symbols[name][1])
+    if "mDbgp" in table_addrs:
+        raise RuntimeError("DBGP must not be present without -debug-port")
+
+    debug_rsdp = qemu_physical_bytes(
+        qemu, firmware,
+        {"RSDP": (ACPI_RECLAIM_BASE, symbols["mRsdp"][1])},
+        extra_args=["-debug-port", "null"],
+    )["RSDP"]
+    debug_rsdt_addr = u32(debug_rsdp, 16)
+    debug_xsdt_addr = u64(debug_rsdp, 24)
+    debug_roots = qemu_physical_bytes(
+        qemu, firmware,
+        {
+            "mXsdt": (debug_xsdt_addr, symbols["mXsdt"][1]),
+            "mRsdt": (debug_rsdt_addr, symbols["mRsdt"][1]),
+        },
+        extra_args=["-debug-port", "null"],
+    )
+    debug_xsdt = debug_roots["mXsdt"]
+    debug_rsdt = debug_roots["mRsdt"]
+    validate_sdt("debug-port mXsdt", debug_xsdt, "XSDT", 1)
+    validate_sdt("debug-port mRsdt", debug_rsdt, "RSDT", 1)
+    debug_xsdt_entries = [
+        u64(debug_xsdt, off) for off in range(36, u32(debug_xsdt, 4), 8)
+    ]
+    debug_rsdt_entries = [
+        u32(debug_rsdt, off) for off in range(36, u32(debug_rsdt, 4), 4)
+    ]
+    if (len(debug_xsdt_entries) != len(expected_xsdt_symbols) + 1 or
+            debug_rsdt_entries !=
+            [addr & 0xffffffff for addr in debug_xsdt_entries]):
+        raise RuntimeError("debug-port RSDT/XSDT entry set mismatch")
+    debug_dbgp_addr = debug_xsdt_entries[-1]
+    debug_dbgp = qemu_physical_bytes(
+        qemu, firmware,
+        {"mDbgp": (debug_dbgp_addr, symbols["mDbgp"][1])},
+        extra_args=["-debug-port", "null"],
+    )["mDbgp"]
+    require_acpi_reclaim("DBGP", debug_dbgp_addr, symbols["mDbgp"][1])
+    validate_dbgp(debug_dbgp)
 
     tables = {
         "mFadt": ("FACP", 3),
