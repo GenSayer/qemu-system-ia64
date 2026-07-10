@@ -14,15 +14,15 @@ PC profile intended for firmware, boot loader, and operating-system bring-up:
 - 1 vCPU, 2 GiB default RAM
 - Local SAPIC and I/O SAPIC interrupt model
 - ACPI 2.0-style platform tables
-- PCI root bus, CMD646 IDE/ATAPI, LSI53C895A SCSI boot storage, ICH9 AHCI, OHCI/UHCI USB,
+- PCI root bus, CMD646 IDE/ATAPI (disabled by default), LSI53C895A SCSI boot storage, ICH9 AHCI, OHCI/UHCI USB,
   standard VGA, PS/2 input, and MMIO serial console
 
 ## Build
 
-Configure and build the IA-64 target:
+Configure and build the IA-64 target with GTK:
 
 ```sh
-./configure
+./configure --enable-gtk
 ninja -C build qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
 
@@ -34,15 +34,14 @@ The firmware build requires an IA-64 ELF cross toolchain named
 ```sh
 ./build/qemu-system-ia64 \
   -machine ia64-vpc \
-  -smp 1 \
-  -m 2048 \
   -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
   -drive file=<guest-media.iso>,media=cdrom,format=raw,readonly=on \
   -vga std \
   -display gtk
 ```
 
-Use `-serial stdio` to see the serial output.
+Use `-serial stdio` to see the serial output. `-debug-port ...` can publish a debug port that Microsoft Windows kernels may use, as standardized in ACPI standard as `DBGP`.
+To disable i8042, append `i8042=off` to the `-machine ia64-vpc` option, like `-machine ia64-vpc,i8042=off`. You can use `firmware-console=serial`, which might route the kernel's standard output to the serial.
 
 <img width="639" height="461" alt="Gentoo linux is booting on qemu-system-ia64" src="https://github.com/user-attachments/assets/d16ad66d-ffdb-4e27-8e3d-a056498e4ed7" />
 
@@ -64,8 +63,16 @@ floating-point corner cases, and device compatibility still need validation agai
 
 ## Legal disclaimer
 
-This repository does not contain any kind of unauthorised, unlicensed, or proprietary images, such as disk images and firmware, machine ROM dumps, or operating system binaries.
+This repository does not include third-party operating system images, disk images, firmware images, machine ROM dumps, proprietary firmware blobs, or operating system binaries.
 
-This project is not affiliated with or endorsed by Intel, HPE , the QEMU project, Gentoo Foundation or the Gentoo Project.
+Guest operating system images, firmware, installation media, and other third-party materials must be supplied by users under their own applicable licenses.
 
-Guest operating system images must be supplied by the user under their own applicable licences.
+This project is an independent experimental QEMU IA-64 system emulation project. It is not affiliated with, endorsed by, sponsored by, or supported by Intel, HPE, the QEMU Project, the Gentoo Foundation, the Gentoo Project, or Microsoft Corporation.
+
+QEMU is used as the upstream base for this fork. QEMU as a whole is licensed under the GNU General Public License, version 2. See the license files in this repository for details.
+
+Gentoo is a trademark of the Gentoo Foundation, Inc. and of Förderverein Gentoo e.V.
+
+Microsoft and Windows are trademarks of the Microsoft group of companies.
+
+All other product names, project names, company names, and trademarks are the property of their respective owners.
