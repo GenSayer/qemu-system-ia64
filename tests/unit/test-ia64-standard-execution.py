@@ -64,6 +64,8 @@ PCI_IO_TRANSLATION_OFFSET = 0
 PCI_INTX_GSI_BASE = 16
 PCI_INTX_LINES = 4
 IOSAPIC_BASE = 0x80110000
+LOCAL_SAPIC_BASE = 0xFEE00000
+LOCAL_SAPIC_SIZE = 0x00200000
 IOSAPIC_RTE_DELIVERY_STATUS = 1 << 12
 IOSAPIC_RTE_REMOTE_IRR = 1 << 14
 IOSAPIC_RTE_TRIGGER_LEVEL = 1 << 15
@@ -1531,12 +1533,17 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     )
     expected_high_ranges = [
         (FW_HIGH_RAM_BASE, PCI_MMIO_BASE),
-        (FW_HIGH_RAM_AFTER_PCI_BASE, FW_FIRMWARE_ADDRESS_SPACE_BASE),
+        (FW_HIGH_RAM_AFTER_PCI_BASE, LOCAL_SAPIC_BASE),
+        (FW_FIRMWARE_ADDRESS_SPACE_BASE + FW_FIRMWARE_ADDRESS_SPACE_SIZE,
+         0x111400000),
     ]
     if (high_guest_ram_size != 0x100000000 or
             high_low_ram_end != 0x80000000 or
             high_guest_ranges != expected_high_ranges):
         raise RuntimeError("4 GiB guest RAM range split mismatch")
+    if (high_low_ram_end + sum(end - start for start, end in
+                              high_guest_ranges) != high_guest_ram_size):
+        raise RuntimeError("4 GiB EFI RAM ranges lose installed memory")
     for start, end in expected_high_ranges:
         find_efi_descriptor_in(
             high_memory_map, "4 GiB high conventional memory",
@@ -1545,6 +1552,11 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     find_efi_descriptor_in(
         high_memory_map, "4 GiB PCI MMIO window",
         EFI_MEMORY_MAPPED_IO, PCI_MMIO_BASE, PCI_MMIO_SIZE, EFI_MEMORY_UC,
+    )
+    find_efi_descriptor_in(
+        high_memory_map, "4 GiB local SAPIC window",
+        EFI_MEMORY_MAPPED_IO, LOCAL_SAPIC_BASE, LOCAL_SAPIC_SIZE,
+        EFI_MEMORY_UC,
     )
     find_efi_descriptor_in(
         high_memory_map, "4 GiB PAL/SAL firmware address space",

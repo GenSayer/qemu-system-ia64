@@ -418,7 +418,7 @@ def main():
     high_console = firmware_console(qemu, firmware, 4096)
     for line in [
             "Memory Map:           low RAM end=0x0000000080000000",
-            "Memory Map:           high RAM ranges=0000000000000002 total=0x000000006EE00000",
+            "Memory Map:           high RAM ranges=0000000000000003 total=0x0000000080000000",
             "EFI Boot Stack:       0x000000007FC00000-0x0000000080000000",
             "Memory Map Test:      descriptor and pool placement verified",
             "SMBIOS Table Checks:  entry point verified",
@@ -463,7 +463,7 @@ def main():
                 qemu,
                 "-machine", "ia64-vpc",
                 "-smp", "1",
-                "-m", "1024",
+                "-m", "4096",
                 "-bios", firmware,
                 "-display", "none",
                 "-serial", "none",
@@ -484,6 +484,18 @@ def main():
         mtree.returncode = -1
         mtree.stdout = stdout
     mtree_checks = [
+        ("0000000000000000-000000007fffffff" in mtree.stdout and
+         "alias ia64-vpc.low-ram @ia64-vpc.ram" in mtree.stdout,
+         "low RAM alias does not end at 2 GiB"),
+        ("0000000080200000-00000000c0ffffff" in mtree.stdout and
+         "alias ia64-vpc.high-ram-below-pci @ia64-vpc.ram" in mtree.stdout,
+         "RAM below the PCI aperture is not mapped"),
+        ("00000000d1000000-00000000fedfffff" in mtree.stdout and
+         "alias ia64-vpc.high-ram-above-pci @ia64-vpc.ram" in mtree.stdout,
+         "RAM above the PCI aperture is not mapped"),
+        ("0000000100000000-00000001113fffff" in mtree.stdout and
+         "alias ia64-vpc.high-ram-above-4g @ia64-vpc.ram" in mtree.stdout,
+         "RAM displaced below 4 GiB is not remapped above 4 GiB"),
         ("0000000080110000-0000000080111fff" in mtree.stdout and
          "iosapic" in mtree.stdout,
          "IOSAPIC aperture is not two EFI pages"),

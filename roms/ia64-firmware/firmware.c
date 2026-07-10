@@ -115,6 +115,8 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_HIGH_RAM_BASE  0x0000000080200000ULL
 #define FW_HIGH_RAM_BELOW_PCI_END PCI_MMIO_BASE
 #define FW_HIGH_RAM_AFTER_PCI_BASE (PCI_MMIO_BASE + PCI_MMIO_SIZE)
+#define FW_LOCAL_SAPIC_BASE 0x00000000fee00000ULL
+#define FW_LOCAL_SAPIC_SIZE 0x0000000000200000ULL
 #define FW_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
 #define FW_FIRMWARE_ADDRESS_SPACE_SIZE 0x0000000001000000ULL
 #define FW_FIRMWARE_ADDRESS_SPACE_END \
@@ -2060,27 +2062,29 @@ static UINT64 fw_guest_ram_size(void)
 }
 
 static void fw_add_guest_high_ram_range(UINT64 Base, UINT64 Limit,
-                                        UINT64 RamSize)
+                                        UINT64 *Remaining)
 {
     FW_RAM_RANGE *range;
+    UINT64 size;
     UINT64 end;
 
-    if (mGuestHighRamCount >= FW_HIGH_RAM_RANGE_MAX || RamSize <= Base) {
+    if (mGuestHighRamCount >= FW_HIGH_RAM_RANGE_MAX ||
+        Remaining == NULL || *Remaining == 0 || Limit <= Base) {
         return;
     }
 
-    end = RamSize < Limit ? RamSize : Limit;
-    if (end <= Base) {
-        return;
-    }
+    size = *Remaining < Limit - Base ? *Remaining : Limit - Base;
+    end = Base + size;
 
     range = &mGuestHighRam[mGuestHighRamCount++];
     range->Base = Base;
     range->End = end;
+    *Remaining -= size;
 }
 
 static void fw_init_guest_high_ram_ranges(UINT64 RamSize)
 {
+    UINT64 remaining;
     UINTN i;
 
     mGuestHighRamCount = 0;
@@ -2088,14 +2092,17 @@ static void fw_init_guest_high_ram_ranges(UINT64 RamSize)
         mGuestHighRam[i].Base = 0;
         mGuestHighRam[i].End = 0;
     }
+
+    /* Consume installed RAM across the same platform holes used by QEMU. */
+    remaining = RamSize > mGuestLowRamEnd ? RamSize - mGuestLowRamEnd : 0;
     fw_add_guest_high_ram_range(FW_HIGH_RAM_BASE,
                                 FW_HIGH_RAM_BELOW_PCI_END,
-                                RamSize);
+                                &remaining);
     fw_add_guest_high_ram_range(FW_HIGH_RAM_AFTER_PCI_BASE,
-                                FW_FIRMWARE_ADDRESS_SPACE_BASE,
-                                RamSize);
+                                FW_LOCAL_SAPIC_BASE,
+                                &remaining);
     fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
-                                RamSize, RamSize);
+                                ~0ULL, &remaining);
 }
 
 static UINT64 fw_guest_high_ram_total(void)
@@ -10509,6 +10516,11 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IOSAPIC_BASE,
                                        IOSAPIC_BASE + IOSAPIC_SIZE,
                                        EFI_MEMORY_UC) ||
+        !efi_memory_map_has_descriptor(EfiMemoryMappedIO,
+                                       FW_LOCAL_SAPIC_BASE,
+                                       FW_LOCAL_SAPIC_BASE +
+                                           FW_LOCAL_SAPIC_SIZE,
+                                       EFI_MEMORY_UC) ||
         !efi_memory_map_has_descriptor(
             EfiMemoryMappedIO, PCI_CONFIG_ECAM_BASE,
             PCI_CONFIG_ECAM_BASE + PCI_CONFIG_ECAM_SIZE,
@@ -10840,6 +10852,10 @@ static void efi_init_memory_map(void)
                              mGuestHighRam[i].Base, mGuestHighRam[i].End,
                              EFI_MEMORY_WB);
     }
+
+    efi_add_memory_range(&index, EfiMemoryMappedIO, FW_LOCAL_SAPIC_BASE,
+                         FW_LOCAL_SAPIC_BASE + FW_LOCAL_SAPIC_SIZE,
+                         EFI_MEMORY_UC);
 
     /* IA-64 defines a single memory-mapped I/O port translation window. */
     efi_add_memory_range(&index, EfiMemoryMappedIOPortSpace, LEGACY_IO_BASE,

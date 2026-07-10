@@ -40,8 +40,12 @@
 #define IA64_UART_BASE  0x00000047f0000000ULL
 #define IA64_DEBUG_UART_BASE 0x00000047f0001000ULL
 #define IA64_FW_BASE    0x0000000000100000ULL
+#define IA64_LOW_RAM_LIMIT 0x0000000080000000ULL
+#define IA64_HIGH_RAM_BASE 0x0000000080200000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
+#define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE \
+    (IA64_FIRMWARE_ADDRESS_SPACE_BASE + IA64_FIRMWARE_ADDRESS_SPACE_SIZE)
 #define IA64_FW_BOOTSTRAP_STACK_TOP (128 * MiB)
 #define IA64_FW_LOW_RAM_MIN IA64_FW_BOOTSTRAP_STACK_TOP
 #define IA64_IVT_BASE   0x10000ULL
@@ -294,6 +298,69 @@ static void ia64_vpc_map_firmware_address_space(void)
     memory_region_add_subregion_overlap(get_system_memory(),
                                         IA64_FIRMWARE_ADDRESS_SPACE_BASE,
                                         &ia64_vpc_firmware_space, 1);
+}
+
+static uint64_t ia64_vpc_map_ram_alias(MachineState *machine,
+                                       hwaddr guest_base,
+                                       uint64_t backing_offset,
+                                       uint64_t remaining,
+                                       uint64_t capacity,
+                                       const char *name)
+{
+    MemoryRegion *alias;
+    uint64_t size = MIN(remaining, capacity);
+
+    if (size == 0) {
+        return 0;
+    }
+
+    alias = g_new(MemoryRegion, 1);
+    memory_region_init_alias(alias, OBJECT(machine), name, machine->ram,
+                             backing_offset, size);
+    memory_region_add_subregion(get_system_memory(), guest_base, alias);
+    return size;
+}
+
+static void ia64_vpc_map_ram(MachineState *machine)
+{
+    uint64_t remaining = machine->ram_size;
+    uint64_t offset = 0;
+    uint64_t size;
+
+    if (machine->ram == NULL) {
+        return;
+    }
+
+    /*
+     * Keep the RAM backing densely packed while leaving the platform's
+     * firmware and PCI apertures free in the guest physical address space.
+     * RAM displaced by those apertures is mapped above 4 GiB instead of
+     * being hidden by higher-priority device regions.
+     */
+    size = ia64_vpc_map_ram_alias(machine, 0, offset, remaining,
+                                  IA64_LOW_RAM_LIMIT,
+                                  "ia64-vpc.low-ram");
+    offset += size;
+    remaining -= size;
+
+    size = ia64_vpc_map_ram_alias(machine, IA64_HIGH_RAM_BASE, offset,
+                                  remaining,
+                                  IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE,
+                                  "ia64-vpc.high-ram-below-pci");
+    offset += size;
+    remaining -= size;
+
+    size = ia64_vpc_map_ram_alias(
+        machine, IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE, offset, remaining,
+        IA64_LOCAL_SAPIC_PA -
+            (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE),
+        "ia64-vpc.high-ram-above-pci");
+    offset += size;
+    remaining -= size;
+
+    ia64_vpc_map_ram_alias(machine, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
+                           offset, remaining, remaining,
+                           "ia64-vpc.high-ram-above-4g");
 }
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
@@ -731,9 +798,7 @@ static void ia64_vpc_init(MachineState *machine)
         exit(1);
     }
 
-    if (machine->ram) {
-        memory_region_add_subregion(get_system_memory(), 0, machine->ram);
-    }
+    ia64_vpc_map_ram(machine);
     ia64_vpc_map_firmware_address_space();
     ia64_vpc_write_firmware_handoff(machine);
 
