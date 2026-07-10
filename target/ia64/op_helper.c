@@ -1311,6 +1311,9 @@ void helper_raise_unaligned(CPUIA64State *env, uint64_t addr,
 {
     env->cr_ifa = addr;
     env->cr_isr = isr_access;
+    if (ia64_current_code_tlb_ed(env)) {
+        env->cr_isr |= IA64_ISR_ED;
+    }
     helper_raise_exception(env, IA64_EXCP_UNALIGNED, fault_ip, 0,
                            fault_slot);
 }
@@ -5665,6 +5668,15 @@ void helper_setf_exp(CPUIA64State *env, uint32_t reg, uint64_t value)
     ia64_fr_write_ext(env, reg, (value >> 17) & 1,
                       value & 0x1ffff,
                       IA64_FP_SIGNIFICAND_INTEGER_BIT);
+}
+
+void helper_setf_s(CPUIA64State *env, uint32_t reg, uint64_t value)
+{
+    float_status status = env->fp_status;
+    floatx80 fp_value = float32_to_floatx80(make_float32(value), &status);
+
+    /* setf.s expands the single-precision encoding into register format. */
+    ia64_fr_write_floatx80(env, reg, fp_value);
 }
 
 void helper_fmov(CPUIA64State *env, uint32_t dst, uint32_t src)

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 #
 # IA-64 firmware storage acceptance and Block I/O test.
-# Boots an EFI application from IDE PIO, IDE DMA, and SCSI disks.  The
-# application performs a 128 KiB write/read/restore cycle through Block I/O.
+# Boots an EFI application from an explicitly requested CMD646 controller in
+# PIO/DMA modes and from the default SCSI disk.  The application performs a
+# 128 KiB write/read/restore cycle through Block I/O.
 
 import os
 import select
@@ -171,9 +172,6 @@ def make_storage_disk(path, efi_path):
 
 
 def run_qemu(qemu, firmware, disk, machine, interface, trace_ide_dma):
-    drive = f"file={disk},format=raw"
-    if interface is not None:
-        drive += f",if={interface}"
     args = [
         qemu,
         "-machine", machine,
@@ -182,8 +180,15 @@ def run_qemu(qemu, firmware, disk, machine, interface, trace_ide_dma):
         "-display", "none",
         "-serial", "stdio",
         "-monitor", "none",
-        "-drive", drive,
     ]
+    if interface == "ide":
+        args += [
+            "-drive", f"file={disk},format=raw,if=none,id=storage-disk",
+            "-device", "cmd646-ide,id=ide,secondary=1,addr=0",
+            "-device", "ide-hd,drive=storage-disk,bus=ide.0,unit=0",
+        ]
+    else:
+        args += ["-drive", f"file={disk},format=raw,if={interface}"]
     if trace_ide_dma:
         args += ["-trace", "enable=bmdma_cmd_writeb"]
     proc = subprocess.Popen(

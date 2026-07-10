@@ -41,6 +41,7 @@ IA64_ISR_RS = 1 << 37
 IA64_ISR_IR = 1 << 38
 IA64_ISR_NI = 1 << 39
 IA64_ISR_EI_SHIFT = 41
+IA64_ISR_ED = 1 << 43
 IA64_DCR_PP = 1 << 0
 IA64_DCR_BE = 1 << 1
 IA64_DCR_DM = 1 << 8
@@ -1288,6 +1289,14 @@ def ld8_a(r1, r3, qp=0):
 def ld8_sa(r1, r3, qp=0):
     return op(4) | bitfield(2, 27, 2) | bitfield(0x0f, 30, 6) | bitfield(r3, 20, 7) | bitfield(r1, 6, 7) | bitfield(qp, 0, 6)
 
+def ld2_sa(r1, r3, qp=0):
+    return (op(4) | bitfield(2, 27, 2) | bitfield(0x0d, 30, 6)
+            | bitfield(r3, 20, 7) | bitfield(r1, 6, 7)
+            | bitfield(qp, 0, 6))
+
+def ld2_c_clr(r1, r3, qp=0):
+    return load_mem(0x21, r1, r3, qp)
+
 def ld4_a(r1, r3, qp=0):
     return (op(4) | bitfield(2, 27, 2) | bitfield(0x0a, 30, 6)
             | bitfield(r3, 20, 7) | bitfield(r1, 6, 7)
@@ -1492,6 +1501,15 @@ def setf_d(f1, r2, qp=0):
     return (
         op(6)
         | bitfield(0xf9, 27, 9)
+        | bitfield(r2, 13, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def setf_s(f1, r2, qp=0):
+    return (
+        op(6)
+        | bitfield(0xf1, 27, 9)
         | bitfield(r2, 13, 7)
         | bitfield(f1, 6, 7)
         | bitfield(qp, 0, 6)
@@ -8201,6 +8219,46 @@ test_speculative_recovery_unaligned_defers = require_registers(
         "r26": 1,
     }, entry=0x10)
 
+test_ws2003_cmd646_unaligned_check_load_sets_ed = require_registers(
+    "ws2003_cmd646_unaligned_check_load_sets_ed", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | PTE_ED)),
+        (0x20, 0x00, nop_m(), addl(3, 0x101, 0),
+         nop_i()),
+        (0x30, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_IT | IA64_PSR_AC)),
+        (0x40, 0x00, adds(7, 16 << 2, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+         nop_i()),
+        (0x60, 0x00, itr_i(5, 18), nop_i(),
+         nop_i()),
+        (0x70, 0x00, srlz_i(), adds(31, 0x430, 0),
+         nop_i()),
+        *rfi_to_gr(0x80, 19, 31),
+        (0x4000430, 0x00, ld2_sa(30, 3), nop_i(),
+         nop_i()),
+        (0x4000440, 0x00, ld2_c_clr(30, 3), nop_i(),
+         nop_i()),
+        (0x4000000 + IA64_UNALIGNED_VECTOR, 0x00,
+         mov_m_cr_gr(14, 20),
+         nop_i(), nop_i()),
+        (0x4000000 + IA64_UNALIGNED_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(15, 17),
+         nop_i(), nop_i()),
+        (0x4000000 + IA64_UNALIGNED_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(16, 22),
+         nop_i(), nop_i()),
+        (0x4000000 + IA64_UNALIGNED_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_UNALIGNED_VECTOR + 0x30,
+                 IA64_UNALIGNED_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_UNALIGNED_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r14": 0x101,
+        "r15": IA64_ISR_R | IA64_ISR_ED,
+        "r16": 0x430,
+    }, entry=0x10)
+
 test_ld8_s_d2_hint_decode = require_registers("ld8_s_d2_hint_decode", [
     (0x10, 0x00, addl(3, 0x100, 0), nop_i(),
      nop_i()),
@@ -10808,6 +10866,31 @@ test_w2k_frcpa_capacity_calc = require_registers("w2k_frcpa_capacity_calc", [
     (0xc0, 0x10, nop_m(), nop_i(),
      br_cond(0xc0, 0xc0)),
 ], {"ip": 0xc0, "r4": 1, "r5": 1}, entry=0x10)
+
+test_ws2003_vga_frcpa_integer_division = require_registers(
+    "ws2003_vga_frcpa_integer_division", [
+        (0x10, *movl_mlx(26, 0x3f800040)),
+        (0x20, 0x00, addl(24, 400, 0), adds(25, 12, 0),
+         nop_i()),
+        (0x30, 0x09, setf_sig(10, 24), setf_sig(9, 25),
+         nop_i()),
+        (0x40, 0x0d, setf_s(8, 26), fnorm(10, 0, 10),
+         nop_i()),
+        (0x50, 0x0d, nop_m(), fnorm(9, 0, 9),
+         nop_i()),
+        (0x60, 0x0d, nop_m(), frcpa(6, 6, 10, 9),
+         nop_i()),
+        (0x70, 0x0d, nop_m(), fmpy_s1(10, 6, 10, qp=6),
+         nop_i()),
+        (0x80, 0x1c, nop_m(), fnma_s1(9, 9, 6, 8, qp=6),
+         nop_b()),
+        (0x90, 0x1c, nop_m(), fma_s1(6, 9, 10, 10, qp=6),
+         nop_b()),
+        (0xa0, 0x0d, nop_m(), fcvt_fxu(6, 6),
+         nop_i()),
+        (0xb0, 0x10, getf_sig(4, 6), nop_i(),
+         br_cond(0xb0, 0xb0)),
+    ], {"ip": 0xb0, "r4": 33}, entry=0x10)
 
 _HIGH_SIG_DIVIDEND = 0xa0000001006ad328
 
@@ -19421,6 +19504,8 @@ TEST_NAMES = {
         test_speculative_recovery_dcr_dk_defers_key_miss,
     "speculative_recovery_unaligned_defers":
         test_speculative_recovery_unaligned_defers,
+    "ws2003_cmd646_unaligned_check_load_sets_ed":
+        test_ws2003_cmd646_unaligned_check_load_sets_ed,
     "ld8_s_d2_hint_decode": test_ld8_s_d2_hint_decode,
     "mov_crgr_clears_stale_nat": test_mov_crgr_clears_stale_nat,
     "lfetch_decode": test_lfetch_decode,
@@ -19517,6 +19602,8 @@ TEST_NAMES = {
     "setf_sig_direct_scalar_operand": test_setf_sig_direct_scalar_operand,
     "fr1_is_read_only_one": test_fr1_is_read_only_one,
     "w2k_frcpa_capacity_calc": test_w2k_frcpa_capacity_calc,
+    "ws2003_vga_frcpa_integer_division":
+        test_ws2003_vga_frcpa_integer_division,
     "frcpa_setf_sig_high_integer_remainder":
         test_frcpa_setf_sig_high_integer_remainder,
     "frcpa_double_normal_reciprocal": test_frcpa_double_normal_reciprocal,

@@ -215,6 +215,7 @@ typedef __SIZE_TYPE__    size_t;
 #define PCI_MMIO_TRANSLATION_OFFSET   0ULL
 #define PCI_CONFIG_ECAM_BASE          0x0000007FF0000000ULL
 #define PCI_CONFIG_ECAM_SIZE          0x0000000010000000ULL
+#define PCI_IDE_CMD646_ID             0x06461095U
 #define IA64_REGION6_BASE             0xC000000000000000ULL
 #define PS2_DATA_PORT                 (LEGACY_IO_BASE + 0x60U)
 #define PS2_STATUS_PORT               (LEGACY_IO_BASE + 0x64U)
@@ -1187,7 +1188,7 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[187];
+    UINT8 Aml[215];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -1726,7 +1727,7 @@ FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
 FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 487, acpi_dsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 223, acpi_ssdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 251, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
@@ -1884,29 +1885,33 @@ static ACPI_DSDT               mDsdt = {
 static ACPI_SSDT               mSsdt = {
     .Aml = {
         /*
-         * Scope (\_SB) {
-         *   Processor (CPU0, 0, 0, 0) {}
+         * Source: ssdt-platform-devices.asl
+         *
+         * Scope (\_SB) { Processor (CPU0, 0, 0, 0) {} }
+         * Scope (\_SB.PCI0) {
          *   Device (UAR0) { _HID PNP0501; _CRS { QWordMemory UART; IRQ 4 } }
          *   Device (PS2K) { _HID PNP0303; _CRS { IO 0x60; IO 0x64; IRQ 1 } }
          *   Device (PS2M) { _HID PNP0F13; _CRS { IRQ 12 } }
          * }
          */
-        0x10, 0x4a, 0x0b, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x83, 0x0b, 0x43,
-        0x50, 0x55, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x82, 0x46,
-        0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50,
-        0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08, 0x5f, 0x55, 0x49, 0x44,
-        0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x36, 0x0a, 0x33, 0x8a, 0x2b,
-        0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0xf0,
-        0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x10, 0x00, 0x79,
-        0x00, 0x5b, 0x82, 0x2d, 0x50, 0x53, 0x32, 0x4b, 0x08, 0x5f, 0x48, 0x49,
-        0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11,
-        0x18, 0x0a, 0x15, 0x47, 0x01, 0x60, 0x00, 0x60, 0x00, 0x01, 0x01, 0x47,
-        0x01, 0x64, 0x00, 0x64, 0x00, 0x01, 0x01, 0x22, 0x02, 0x00, 0x79, 0x00,
-        0x5b, 0x82, 0x1d, 0x50, 0x53, 0x32, 0x4d, 0x08, 0x5f, 0x48, 0x49, 0x44,
-        0x0c, 0x41, 0xd0, 0x0f, 0x13, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x08,
-        0x0a, 0x05, 0x22, 0x00, 0x10, 0x79, 0x00,
+        0xa0, 0x0f, 0x00, 0x15, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43,
+        0x49, 0x30, 0x06, 0x00, 0x10, 0x13, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b,
+        0x83, 0x0b, 0x43, 0x50, 0x55, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x10, 0x42, 0x0b, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43, 0x49,
+        0x30, 0x5b, 0x82, 0x46, 0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48,
+        0x49, 0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08,
+        0x5f, 0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x36,
+        0x0a, 0x33, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
+        0x07, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x22, 0x10, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x2d, 0x50, 0x53, 0x32, 0x4b,
+        0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x08, 0x5f,
+        0x43, 0x52, 0x53, 0x11, 0x18, 0x0a, 0x15, 0x47, 0x01, 0x60, 0x00, 0x60,
+        0x00, 0x01, 0x01, 0x47, 0x01, 0x64, 0x00, 0x64, 0x00, 0x01, 0x01, 0x22,
+        0x02, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x1d, 0x50, 0x53, 0x32, 0x4d, 0x08,
+        0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0f, 0x13, 0x08, 0x5f, 0x43,
+        0x52, 0x53, 0x11, 0x08, 0x0a, 0x05, 0x22, 0x00, 0x10, 0x79, 0x00,
     },
 };
 static ACPI_MCFG               mMcfg;
@@ -3423,13 +3428,13 @@ static BOOLEAN __attribute__((noinline)) sal_pci_config_selftest(void)
     mVirtualAddressMapApplied = saved_virtual_map_applied;
 
     id = sal_pci_config_read(0, 4, 0, 0, 0, 0, 0);
-    if (id.Status != SAL_STATUS_SUCCESS || (UINT32)id.Value0 != 0x06461095U) {
+    if (id.Status != SAL_STATUS_SUCCESS) {
         return 0;
     }
 
     id_ext = sal_pci_config_read(0, 4, 1, 0, 0, 0, 0);
     if (id_ext.Status != SAL_STATUS_SUCCESS ||
-        (UINT32)id_ext.Value0 != 0x06461095U) {
+        (UINT32)id_ext.Value0 != (UINT32)id.Value0) {
         return 0;
     }
 
@@ -13818,7 +13823,14 @@ static UINT32 mCdromBlocks;
 #define PCI_SUB_CLASS_IDE             0x01U
 #define PCI_IDE_BAR0_OFFSET           0x10U
 #define PCI_IDE_BAR1_OFFSET           0x14U
+#define PCI_IDE_BAR2_OFFSET           0x18U
+#define PCI_IDE_BAR3_OFFSET           0x1cU
 #define PCI_IDE_BAR4_OFFSET           0x20U
+#define PCI_IDE_DATA0_BAR             0x00000801U
+#define PCI_IDE_CTRL0_BAR             0x00000809U
+#define PCI_IDE_DATA1_BAR             0x00000811U
+#define PCI_IDE_CTRL1_BAR             0x00000819U
+#define PCI_IDE_BMDMA_BAR             0x0000c001U
 #define PCI_MAX_BUSES                 256U
 #define PCI_MAX_DEVICES               32U
 #define PCI_MAX_FUNCTIONS             8U
@@ -13965,7 +13977,7 @@ static BOOLEAN ide_io_bar_address(UINT32 Bar, UINT64 *Address)
     UINT64 io_base;
 
     if (Address == NULL || Bar == 0 || Bar == 0xffffffffU ||
-        (Bar & 1U) == 0) {
+        (Bar & 1U) == 0 || (Bar & ~(UINT64)3U) == 0) {
         return 0;
     }
 
@@ -14066,26 +14078,53 @@ static BOOLEAN ide_configure_primary_from_pci(void)
         !ide_io_bar_address(ctrl_bar, &ctrl_base) ||
         data_base + 7U >= LEGACY_IO_LIMIT ||
         ctrl_base + 2U >= LEGACY_IO_LIMIT) {
-        return 0;
+        /*
+         * Command-line PCI devices arrive with unassigned BARs.  Allocate the
+         * platform's reserved IDE I/O ranges only after an IDE controller has
+         * actually been requested.
+         */
+        data_bar = PCI_IDE_DATA0_BAR;
+        ctrl_bar = PCI_IDE_CTRL0_BAR;
+        bmdma_bar = PCI_IDE_BMDMA_BAR;
+        pci_config_write_value(0, location.Bus, location.Device,
+                               location.Function, PCI_IDE_BAR0_OFFSET, 4,
+                               data_bar);
+        pci_config_write_value(0, location.Bus, location.Device,
+                               location.Function, PCI_IDE_BAR1_OFFSET, 4,
+                               ctrl_bar);
+        pci_config_write_value(0, location.Bus, location.Device,
+                               location.Function, PCI_IDE_BAR2_OFFSET, 4,
+                               PCI_IDE_DATA1_BAR);
+        pci_config_write_value(0, location.Bus, location.Device,
+                               location.Function, PCI_IDE_BAR3_OFFSET, 4,
+                               PCI_IDE_CTRL1_BAR);
+        pci_config_write_value(0, location.Bus, location.Device,
+                               location.Function, PCI_IDE_BAR4_OFFSET, 4,
+                               bmdma_bar);
+        if (!ide_io_bar_address(data_bar, &data_base) ||
+            !ide_io_bar_address(ctrl_bar, &ctrl_base)) {
+            return 0;
+        }
     }
 
     gIde.data_base = data_base;
     gIde.ctrl_base = ctrl_base + 2U;
     gIde.has_bmdma = 0;
+    command = (UINT16)pci_config_read_value(0, location.Bus,
+                                            location.Device,
+                                            location.Function,
+                                            PCI_CFG_COMMAND_OFFSET, 2);
+    command |= PCI_CFG_COMMAND_IO_SPACE;
     if (fw_handoff_ide_dma_enabled() &&
         ide_io_bar_address(bmdma_bar, &bmdma_base) &&
         bmdma_base + 7U < LEGACY_IO_LIMIT) {
         gIde.bmdma_base = bmdma_base;
         gIde.has_bmdma = 1;
-        command = (UINT16)pci_config_read_value(0, location.Bus,
-                                                location.Device,
-                                                location.Function,
-                                                PCI_CFG_COMMAND_OFFSET, 2);
-        command |= PCI_CFG_COMMAND_IO_SPACE | PCI_CFG_COMMAND_BUS_MASTER;
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_CFG_COMMAND_OFFSET, 2,
-                               command);
+        command |= PCI_CFG_COMMAND_BUS_MASTER;
     }
+    pci_config_write_value(0, location.Bus, location.Device,
+                           location.Function, PCI_CFG_COMMAND_OFFSET, 2,
+                           command);
 
     uart_puts("IDE controller:       PCI BAR primary data=0x");
     uart_put_hex64(gIde.data_base);
@@ -14171,7 +14210,14 @@ static void ide_probe_primary_devices(void)
     UINTN i;
 
     if (!ide_configure_primary_from_pci()) {
-        uart_puts("IDE controller:       using fallback primary I/O ports\r\n");
+        uart_puts("IDE controller:       not present\r\n");
+        mHardDiskIdeDevice = NULL;
+        for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
+            mIdeDevices[i].present = 0;
+            mIdeDevices[i].is_atapi = 0;
+            mIdeDevices[i].last_lba = 0;
+        }
+        return;
     }
 
     mHardDiskIdeDevice = NULL;
@@ -21554,7 +21600,7 @@ static EFI_PCI_IO_PROTOCOL mPciVgaIoProto;
 static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     {
         &mPciIdeHandle, &mPciIdeIoProto, &mPciIdeDevicePath,
-        0, 0, 0, FW_PCI_IDE_ATTRIBUTES, 0x06461095U,
+        0, 0, 0, FW_PCI_IDE_ATTRIBUTES, PCI_IDE_CMD646_ID,
         4, 0x0000c001U, 0x10, "IDE", 1,
     },
     {
@@ -22249,7 +22295,7 @@ static BOOLEAN __attribute__((noinline)) pci_root_bridge_io_selftest(void)
 
     if (pci_root_cfg_read(&mPciRootBridgeIoProto, EfiPciWidthUint32,
                           0, 1, &ide_id) != EFI_SUCCESS ||
-        ide_id != 0x06461095U) {
+        ide_id == 0) {
         return 0;
     }
 
@@ -22307,8 +22353,13 @@ static BOOLEAN __attribute__((noinline)) pci_io_protocol_selftest(void)
         UINT16 command;
 
         if (pci_io_cfg_read(dev->Protocol, EfiPciWidthUint32, 0, 1,
-                            &id) != EFI_SUCCESS ||
-            id != dev->ExpectedId) {
+                            &id) != EFI_SUCCESS) {
+            return 0;
+        }
+        if (i == 0 && id == 0xffffffffU) {
+            continue;
+        }
+        if (id != dev->ExpectedId) {
             return 0;
         }
 

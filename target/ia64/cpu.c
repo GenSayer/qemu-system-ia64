@@ -9445,10 +9445,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_fr_nat_from_gr(insn->r1, insn->r2);
         break;
     case IA64_OP_SETF_S: {
-        TCGv_i64 val = tcg_temp_new_i64();
-
-        tcg_gen_ext32u_i64(val, ia64_gr_src(insn->r2));
-        ia64_gen_fr_mov(insn->r1, val);
+        gen_helper_setf_s(tcg_env, tcg_constant_i32(insn->r1),
+                          ia64_gr_src(insn->r2));
         ia64_gen_fr_nat_from_gr(insn->r1, insn->r2);
         break;
     }
@@ -10745,6 +10743,9 @@ static G_NORETURN void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
     env->fault_imm = 0;
     env->cr_ifa = addr;
     env->cr_isr = access_type == MMU_DATA_STORE ? IA64_ISR_W : IA64_ISR_R;
+    if (ia64_current_code_tlb_ed(env)) {
+        env->cr_isr |= IA64_ISR_ED;
+    }
     env->exception = IA64_EXCP_UNALIGNED;
     cs->exception_index = IA64_EXCP_UNALIGNED;
     cpu_loop_exit(cs);

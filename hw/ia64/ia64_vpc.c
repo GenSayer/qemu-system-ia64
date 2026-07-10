@@ -4,8 +4,8 @@
  * IA-64 virtual PC platform.
  *
  * Provides RAM, a bootstrap CPU, a memory-mapped serial console,
- * firmware ROM loading via -bios, a PCI host bridge, SCSI, IDE and AHCI
- * storage controllers, OHCI/UHCI USB, local SAPIC/I/O SAPIC wiring,
+ * firmware ROM loading via -bios, a PCI host bridge, SCSI and AHCI storage
+ * controllers, OHCI/UHCI USB, local SAPIC/I/O SAPIC wiring,
  * and ACPI fixed power-management registers.
  */
 
@@ -20,10 +20,10 @@
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "hw/ide/ahci-pci.h"
-#include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
 #include "hw/acpi/acpi.h"
 #include "hw/pci/pci.h"
+#include "hw/pci/pci_bus.h"
 #include "hw/isa/isa.h"
 #include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
@@ -46,11 +46,6 @@
 #define IA64_FW_LOW_RAM_MIN IA64_FW_BOOTSTRAP_STACK_TOP
 #define IA64_IVT_BASE   0x10000ULL
 #define IA64_IVT_SIZE   0x8000ULL
-#define IA64_IDE_DATA0_IO_BASE  0x00000800U
-#define IA64_IDE_CMD0_IO_BASE   0x00000808U
-#define IA64_IDE_DATA1_IO_BASE  0x00000810U
-#define IA64_IDE_CMD1_IO_BASE   0x00000818U
-#define IA64_IDE_BMDMA_IO_BASE  0x0000c000U
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
@@ -78,7 +73,6 @@
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
 
-static PCIDevice *ia64_vpc_ide_dev;
 static PCIDevice *ia64_vpc_ahci_dev;
 static PCIDevice *ia64_vpc_ohci_dev;
 static PCIDevice *ia64_vpc_uhci_dev;
@@ -327,26 +321,6 @@ static void ia64_vpc_write_firmware_handoff(MachineState *machine)
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
 }
 
-static void ia64_vpc_configure_ide(PCIDevice *pci_dev)
-{
-    if (pci_dev == NULL) {
-        return;
-    }
-
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
-                             IA64_IDE_DATA0_IO_BASE, 4);
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
-                             IA64_IDE_CMD0_IO_BASE, 4);
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_2,
-                             IA64_IDE_DATA1_IO_BASE, 4);
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_3,
-                             IA64_IDE_CMD1_IO_BASE, 4);
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_4,
-                             IA64_IDE_BMDMA_IO_BASE, 4);
-    pci_default_write_config(pci_dev, PCI_COMMAND,
-                             PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
-}
-
 static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
 {
     uint8_t pin;
@@ -436,13 +410,11 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
 
 static void ia64_vpc_configure_platform_pci(void)
 {
-    ia64_vpc_configure_ide(ia64_vpc_ide_dev);
     ia64_vpc_configure_ahci(ia64_vpc_ahci_dev);
     ia64_vpc_configure_ohci(ia64_vpc_ohci_dev);
     ia64_vpc_configure_uhci(ia64_vpc_uhci_dev);
     ia64_vpc_configure_lsi(ia64_vpc_lsi_dev);
     ia64_vpc_configure_vga(ia64_vpc_vga_dev);
-    ia64_vpc_configure_pci_irq(ia64_vpc_ide_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_ahci_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_ohci_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_uhci_dev);
@@ -809,6 +781,15 @@ static void ia64_vpc_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(pci_host), &error_fatal);
     pci_bus = PCI_BUS(qdev_get_child_bus(pci_host, "pci"));
 
+    /*
+     * Slot 0 is intentionally empty in the default machine.  Reserve it while
+     * creating the built-in devices so their historical slot numbers remain
+     * stable, then release it for an explicitly requested PCI controller.
+     */
+    pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
+    pci_io = pci_bus->address_space_io;
+    ia64_vpc_init_acpi_pm(machine, iosapic, pci_io);
+
     /* Leave ISA/SCI lines in the legacy range and route PCI INTx above 15. */
     for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
         qdev_connect_gpio_out(pci_host, i,
@@ -816,17 +797,9 @@ static void ia64_vpc_init(MachineState *machine)
                                                IA64_PCI_INTX_GSI_BASE + i));
     }
 
-    ia64_vpc_ide_dev = pci_new(-1, "cmd646-ide");
-    qdev_prop_set_uint32(&ia64_vpc_ide_dev->qdev, "secondary", 1);
-    pci_realize_and_unref(ia64_vpc_ide_dev, pci_bus, &error_fatal);
-    pci_ide_create_devs(ia64_vpc_ide_dev);
-    ia64_vpc_configure_ide(ia64_vpc_ide_dev);
-    pci_io = pci_address_space_io(ia64_vpc_ide_dev);
-    ia64_vpc_init_acpi_pm(machine, iosapic, pci_io);
-
     /*
-     * AHCI remains available for guests that support SATA, but firmware boot
-     * storage is provided by the LSI SCSI HBA below with IDE as compatibility.
+     * AHCI remains available for guests that support SATA.  Firmware boot
+     * storage is provided by the LSI SCSI HBA below.
      */
     ia64_vpc_ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
     ia64_vpc_configure_ahci(ia64_vpc_ahci_dev);
@@ -856,6 +829,7 @@ static void ia64_vpc_init(MachineState *machine)
     ia64_vpc_vga_dev = pci_vga_init(pci_bus);
     ia64_vpc_configure_vga(ia64_vpc_vga_dev);
     ia64_vpc_map_vga_fixed_windows(ia64_vpc_vga_dev);
+    pci_bus_clear_slot_reserved_mask(pci_bus, 1U << 0);
 
     ia64_vpc_powerdown_notifier.notify = ia64_vpc_powerdown_req;
     qemu_register_powerdown_notifier(&ia64_vpc_powerdown_notifier);

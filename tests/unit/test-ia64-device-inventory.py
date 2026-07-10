@@ -7,17 +7,13 @@ import subprocess
 import sys
 
 
-def main():
-    if len(sys.argv) != 2:
-        print("Bail out! usage: test-ia64-device-inventory.py QEMU_SYSTEM_IA64")
-        return 1
-
-    qemu = sys.argv[1]
-    proc = subprocess.run(
+def run_inventory(qemu, extra_args=()):
+    return subprocess.run(
         [
             qemu,
             "-machine",
             "ia64-vpc",
+        ] + list(extra_args) + [
             "-display",
             "none",
             "-serial",
@@ -50,6 +46,15 @@ def main():
         check=False,
     )
 
+
+def main():
+    if len(sys.argv) != 2:
+        print("Bail out! usage: test-ia64-device-inventory.py QEMU_SYSTEM_IA64")
+        return 1
+
+    qemu = sys.argv[1]
+    proc = run_inventory(qemu)
+
     print("TAP version 13")
     print("1..1")
 
@@ -60,8 +65,6 @@ def main():
         return 1
 
     required = {
-        "CMD646 IDE": r"IDE controller: PCI device 1095:0646",
-        "CMD646 IDE INTx": r"IDE controller: PCI device 1095:0646[\s\S]*?IRQ 16, pin A",
         "ICH9 AHCI": r"SATA controller: PCI device 8086:2922",
         "ICH9 AHCI INTx": r"SATA controller: PCI device 8086:2922[\s\S]*?IRQ 17, pin A",
         "OHCI USB": r"USB controller: PCI device 106b:003f",
@@ -74,12 +77,7 @@ def main():
         ),
         "VGA": r"VGA controller: PCI device 1234:1111",
         "SAL PCI config aperture": r"ia64-pci-config",
-        "SAL PCI config IDE read": r"7ff0000000:\s+0x06461095",
-        "SAL PCI config IDE BARs": (
-            r"7ff0000010:\s+0x00000801\s+0x00000809\s+"
-            r"0x00000811\s+0x00000819"
-        ),
-        "SAL PCI config IDE bus-master BAR": r"7ff0000020:\s+0x0000c001",
+        "empty PCI slot 0": r"7ff0000000:\s+0xffffffff",
         "SAL PCI config AHCI read": r"7ff0008000:\s+0x29228086",
         "SAL PCI config AHCI BARs": (
             r"7ff0008020:\s+0x0000c101\s+0xc1020000"
@@ -101,15 +99,35 @@ def main():
         name for name, pattern in required.items()
         if re.search(pattern, proc.stdout) is None
     ]
-    if missing:
+    unexpected = []
+    if re.search(r"IDE controller: PCI device", proc.stdout):
+        unexpected.append("default IDE controller")
+
+    explicit = run_inventory(
+        qemu, ("-device", "cmd646-ide,secondary=1,addr=0")
+    )
+    if explicit.returncode != 0:
+        unexpected.append("explicit CMD646 failed to start")
+    if re.search(r"IDE controller: PCI device 1095:0646", explicit.stdout) is None:
+        unexpected.append("explicit CMD646 controller")
+    if re.search(r"7ff0000000:\s+0x06461095", explicit.stdout) is None:
+        unexpected.append("explicit CMD646 SAL config read")
+
+    if missing or unexpected:
         print("not ok 1 - ia64-vpc PCI inventory")
         for name in missing:
             print(f"# missing {name}")
+        for name in unexpected:
+            print(f"# unexpected/missing explicit case: {name}")
         for line in proc.stdout.splitlines():
             print(f"# {line}")
+        if unexpected:
+            print("# explicit CMD646 output:")
+            for line in explicit.stdout.splitlines():
+                print(f"# {line}")
         return 1
 
-    print("ok 1 - ia64-vpc exposes PCI devices and SAL config aperture")
+    print("ok 1 - ia64-vpc omits IDE by default and accepts explicit CMD646")
     return 0
 
 

@@ -49,7 +49,9 @@ def run_qemu(qemu, firmware, disk):
         "-display", "none",
         "-serial", "stdio",
         "-monitor", "none",
-        "-drive", f"file={disk},if=ide,format=raw",
+        "-drive", f"file={disk},if=none,format=raw,id=ata-disk",
+        "-device", "cmd646-ide,id=ide,secondary=1,addr=0",
+        "-device", "ide-hd,drive=ata-disk,bus=ide.0,unit=0",
     ]
     proc = subprocess.Popen(
         args,

@@ -228,7 +228,7 @@ def run_qemu(qemu, firmware, disk, qmp_socket):
         "-serial", "stdio",
         "-monitor", "none",
         "-qmp", f"unix:{qmp_socket},server=on,wait=off",
-        "-drive", f"file={disk},format=raw,if=ide",
+        "-drive", f"file={disk},format=raw",
     ]
     proc = subprocess.Popen(
         args,
