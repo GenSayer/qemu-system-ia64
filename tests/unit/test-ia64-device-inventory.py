@@ -7,12 +7,12 @@ import subprocess
 import sys
 
 
-def run_inventory(qemu, extra_args=()):
+def run_inventory(qemu, extra_args=(), machine="ia64-vpc"):
     return subprocess.run(
         [
             qemu,
             "-machine",
-            "ia64-vpc",
+            machine,
         ] + list(extra_args) + [
             "-display",
             "none",
@@ -25,6 +25,7 @@ def run_inventory(qemu, extra_args=()):
         input=(
             "info pci\n"
             "info mtree\n"
+            "info qtree\n"
             "xp /1wx 0x7ff0000000\n"
             "xp /5wx 0x7ff0000010\n"
             "xp /1wx 0x7ff0008000\n"
@@ -113,6 +114,18 @@ def main():
     if re.search(r"7ff0000000:\s+0x06461095", explicit.stdout) is None:
         unexpected.append("explicit CMD646 SAL config read")
 
+    usb_input = run_inventory(
+        qemu, ("-usb",), machine="ia64-vpc,i8042=off"
+    )
+    if usb_input.returncode != 0:
+        unexpected.append("default USB input failed to start")
+    for device in ("usb-kbd", "usb-mouse"):
+        if re.search(
+                rf"dev: {re.escape(device)},"
+                rf"(?:(?!\n\s*dev: )[\s\S])*?msos-desc = false",
+                usb_input.stdout) is None:
+            unexpected.append(f"{device} Microsoft OS descriptors enabled")
+
     if missing or unexpected:
         print("not ok 1 - ia64-vpc PCI inventory")
         for name in missing:
@@ -125,9 +138,12 @@ def main():
             print("# explicit CMD646 output:")
             for line in explicit.stdout.splitlines():
                 print(f"# {line}")
+            print("# default USB input output:")
+            for line in usb_input.stdout.splitlines():
+                print(f"# {line}")
         return 1
 
-    print("ok 1 - ia64-vpc omits IDE by default and accepts explicit CMD646")
+    print("ok 1 - ia64-vpc PCI and USB compatibility defaults")
     return 0
 
 

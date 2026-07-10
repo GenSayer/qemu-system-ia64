@@ -97,6 +97,19 @@ static bool ia64_vpc_i8042_enabled = true;
 static bool ia64_vpc_firmware_ide_dma = true;
 static uint64_t ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
 
+static GlobalProperty ia64_vpc_compat_defaults[] = {
+    /*
+     * Windows Server 2003's IA-64 USB hub driver performs an
+     * alignment-requiring 32-bit load from offset 10 of Microsoft OS
+     * extended-property descriptors.  The offset is packed by definition,
+     * so do not expose the optional selective-suspend property on HID input
+     * devices.
+     */
+    { "usb-kbd", "msos-desc", "off" },
+    { "usb-mouse", "msos-desc", "off" },
+    { "usb-tablet", "msos-desc", "off" },
+};
+
 static uint16_t ia64_lduw(const uint8_t *p)
 {
     return p[0] | (p[1] << 8);
@@ -921,6 +934,9 @@ static void ia64_vpc_machine_init(MachineClass *mc)
     mc->no_parallel = 1;
     mc->no_floppy = 1;
     mc->no_cdrom = 0;
+
+    compat_props_add(mc->compat_props, ia64_vpc_compat_defaults,
+                     G_N_ELEMENTS(ia64_vpc_compat_defaults));
 
     object_class_property_add_bool(oc, "i8042",
                                    ia64_vpc_get_i8042,
