@@ -3206,9 +3206,7 @@ static Ia64Instruction ia64_decode_insn(Ia64SlotUnit unit, uint64_t raw,
         return insn;
     }
 
-    if (unit == IA64_UNIT_I && ia64_b_op(raw) == 4 &&
-        !(ia64_bits(raw, 27, 9) == 0xe1 &&
-          ia64_bits(raw, 36, 1) == 0)) {
+    if (unit == IA64_UNIT_I && ia64_b_op(raw) == 4) {
         const uint64_t len = (ia64_bits(raw, 27, 4) + 1) & 0x3f;
         const uint64_t cpos = ia64_bits(raw, 31, 2) |
                               (ia64_bits(raw, 33, 1) << 2) |

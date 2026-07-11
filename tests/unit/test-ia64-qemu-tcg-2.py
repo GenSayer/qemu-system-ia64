@@ -11686,9 +11686,14 @@ test_dep_decode = require_registers("dep_decode", [
      nop_i()),
     (0x20, 0x01, nop_m(), dep(4, 2, 3, 8, 8),
      dep(5, 2, 3, 4, 12)),
-    (0x30, 0x10, nop_m(), nop_i(),
-     br_cond(0x30, 0x30)),
-], {"ip": 0x30, "r4": 0xab34, "r5": 0xab4}, entry=0x10)
+    # cpos=14 and len=2 encode bits 35:27 as 0xe1.  This remains a valid
+    # I15 dep; the same bits identify getf.sig only when used in an M-unit.
+    (0x30, 0x01, nop_m(), dep(6, 2, 3, 49, 2),
+     nop_i()),
+    (0x40, 0x10, nop_m(), nop_i(),
+     br_cond(0x40, 0x40)),
+], {"ip": 0x40, "r4": 0xab34, "r5": 0xab4,
+    "r6": 0x6000000001234}, entry=0x10)
 
 test_extr_u_ignored_bit36_decode = require_registers(
     "extr_u_ignored_bit36_decode", [
