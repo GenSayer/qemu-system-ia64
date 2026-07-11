@@ -25405,8 +25405,9 @@ static EFI_STATUS boot_image_from_load_option(UINT16 OptionNumber,
 
 static EFI_STATUS boot_image_from_boot_option(UINT16 OptionNumber)
 {
+    /* Do not retain a large firmware stack frame across StartImage(). */
+    static UINT8 option[NVRAM_VAR_DATA_MAX];
     CHAR16 name[9];
-    UINT8 option[NVRAM_VAR_DATA_MAX];
     UINTN option_size = sizeof(option);
     UINT32 attributes = 0;
     EFI_STATUS st;
