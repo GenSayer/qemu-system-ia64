@@ -401,6 +401,7 @@ typedef enum IA64Exception {
     IA64_EXCP_FP_FAULT = 28,
     IA64_EXCP_FP_TRAP = 29,
     IA64_EXCP_DISABLED_ISA_TRANSITION = 30,
+    IA64_EXCP_DISABLED_FP = 31,
     IA64_EXCP_MAX,
 } IA64Exception;
 
@@ -668,8 +669,11 @@ typedef struct CPUArchState {
     uint64_t fp_backup_fr_int_value[IA64_FR_COUNT];
     uint64_t fp_backup_fr_int_origin[2];
     uint64_t fp_backup_pr[IA64_PR_COUNT];
+    uint64_t fp_backup_psr_mf;
     float_status fp_status;
 } CPUIA64State;
+
+void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb);
 
 static inline bool ia64_key_check_enabled(const CPUIA64State *env,
                                           bool is_ifetch, bool is_rse)

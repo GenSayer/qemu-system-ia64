@@ -118,6 +118,7 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
     [IA64_EXCP_FP_FAULT]         = 0x5c00,
     [IA64_EXCP_FP_TRAP]          = 0x5d00,
     [IA64_EXCP_DISABLED_ISA_TRANSITION] = 0x5400,
+    [IA64_EXCP_DISABLED_FP]      = 0x5500,
 };
 
 typedef enum Ia64SlotUnit {
@@ -5006,6 +5007,14 @@ static void ia64_gen_fr_ext_clear(uint8_t reg)
                      ~(1ULL << (reg % 64)));
 }
 
+static void ia64_gen_fr_mark_written(uint8_t reg)
+{
+    if (reg > 1) {
+        tcg_gen_ori_i64(cpu_psr, cpu_psr,
+                        reg >= 32 ? IA64_PSR_MFH : IA64_PSR_MFL);
+    }
+}
+
 static void ia64_gen_fr_nat_set(uint8_t reg)
 {
     if (reg <= 1) {
@@ -5016,6 +5025,7 @@ static void ia64_gen_fr_nat_set(uint8_t reg)
                     1ULL << (reg % 64));
     ia64_gen_fr_sig_clear(reg);
     ia64_gen_fr_ext_clear(reg);
+    ia64_gen_fr_mark_written(reg);
 }
 
 static TCGv_i64 ia64_gen_fr_nat_read(uint8_t reg)
@@ -5072,6 +5082,7 @@ static void ia64_gen_fr_mov(uint8_t reg, TCGv_i64 value)
         ia64_gen_fr_nat_clear(reg);
         ia64_gen_fr_sig_clear(reg);
         ia64_gen_fr_ext_clear(reg);
+        ia64_gen_fr_mark_written(reg);
     }
 }
 
@@ -5082,6 +5093,7 @@ static void ia64_gen_fr_mov_sig(uint8_t reg, TCGv_i64 value)
         ia64_gen_fr_nat_clear(reg);
         ia64_gen_fr_sig_set(reg);
         ia64_gen_fr_ext_clear(reg);
+        ia64_gen_fr_mark_written(reg);
     }
 }
 
@@ -5094,6 +5106,7 @@ static void ia64_gen_fr_ld(uint8_t reg, TCGv_i64 addr, int mmu_idx, MemOp memop)
         ia64_gen_fr_nat_clear(reg);
         ia64_gen_fr_sig_clear(reg);
         ia64_gen_fr_ext_clear(reg);
+        ia64_gen_fr_mark_written(reg);
     }
 }
 
@@ -5107,6 +5120,7 @@ static void ia64_gen_fr_ld_sig(uint8_t reg, TCGv_i64 addr, int mmu_idx,
         ia64_gen_fr_nat_clear(reg);
         ia64_gen_fr_sig_set(reg);
         ia64_gen_fr_ext_clear(reg);
+        ia64_gen_fr_mark_written(reg);
     }
 }
 
@@ -7324,6 +7338,277 @@ static void ia64_gen_native_integer_nat(const Ia64Instruction *insn)
     }
 }
 
+static uint32_t ia64_fp_reg_set(uint8_t reg)
+{
+    if (reg >= 32) {
+        return 2;
+    }
+    if (reg >= 2) {
+        return 1;
+    }
+    return 0;
+}
+
+static uint32_t ia64_insn_fp_read_sets(const Ia64Instruction *insn)
+{
+    uint32_t sets;
+
+    switch (insn->opcode) {
+    case IA64_OP_LDFD:
+    case IA64_OP_LDFS:
+    case IA64_OP_LDF_FILL:
+    case IA64_OP_LDF8:
+    case IA64_OP_LDFE:
+    case IA64_OP_SETF_D:
+    case IA64_OP_SETF_S:
+    case IA64_OP_SETF_EXP:
+    case IA64_OP_SETF_SIG:
+        return 0;
+
+    case IA64_OP_LDFP8:
+    case IA64_OP_LDFPD:
+    case IA64_OP_LDFPS:
+        return 0;
+
+    case IA64_OP_STFD:
+    case IA64_OP_STFS:
+    case IA64_OP_STF_SPILL:
+    case IA64_OP_STF8:
+    case IA64_OP_STFE:
+    case IA64_OP_GETF_D:
+    case IA64_OP_GETF_S:
+    case IA64_OP_GETF_EXP:
+    case IA64_OP_GETF_SIG:
+    case IA64_OP_FCLASS:
+        return ia64_fp_reg_set(insn->r2);
+
+    case IA64_OP_CHK_S:
+    case IA64_OP_CHK_A:
+    case IA64_OP_CHK_A_CLR:
+        return insn->check_fp ? ia64_fp_reg_set(insn->r2) : 0;
+
+    case IA64_OP_FCMP:
+        return ia64_fp_reg_set(insn->r2) |
+               ia64_fp_reg_set(insn->r3);
+
+    case IA64_OP_FPABS:
+    case IA64_OP_FPNEG:
+    case IA64_OP_FPNEGABS:
+    case IA64_OP_FMOV:
+    case IA64_OP_FCVT_XF:
+    case IA64_OP_FCVT_FX:
+    case IA64_OP_FCVT_FXU:
+    case IA64_OP_FPCVT:
+        return ia64_fp_reg_set(insn->r2);
+
+    case IA64_OP_FPRSQRTA:
+    case IA64_OP_FRSQRTA:
+        return ia64_fp_reg_set(insn->r3);
+
+    case IA64_OP_FMA:
+    case IA64_OP_FMS:
+    case IA64_OP_FNMA:
+    case IA64_OP_FPMA:
+    case IA64_OP_FPMS:
+    case IA64_OP_FPNMA:
+    case IA64_OP_FSELECT:
+    case IA64_OP_XMA_L:
+    case IA64_OP_XMA_H:
+    case IA64_OP_XMA_HU:
+    case IA64_OP_XMPY_HU:
+        return ia64_fp_reg_set(insn->r2) |
+               ia64_fp_reg_set(insn->r3) |
+               ia64_fp_reg_set(insn->p1);
+
+    case IA64_OP_FADD:
+    case IA64_OP_FSUB:
+    case IA64_OP_FMPY:
+    case IA64_OP_FMIN:
+    case IA64_OP_FMAX:
+    case IA64_OP_FAMIN:
+    case IA64_OP_FAMAX:
+    case IA64_OP_FRCPA:
+    case IA64_OP_FPRCPA:
+    case IA64_OP_FNORM:
+    case IA64_OP_FPACK:
+    case IA64_OP_FAND:
+    case IA64_OP_FANDCM:
+    case IA64_OP_FOR:
+    case IA64_OP_FXOR:
+    case IA64_OP_FSWAP:
+    case IA64_OP_FSWAP_NL:
+    case IA64_OP_FSWAP_NR:
+    case IA64_OP_FMIX_LR:
+    case IA64_OP_FMIX_R:
+    case IA64_OP_FMIX_L:
+    case IA64_OP_FSXT_R:
+    case IA64_OP_FSXT_L:
+    case IA64_OP_FPMERGE:
+    case IA64_OP_FPMERGE_S:
+    case IA64_OP_FPMERGE_SE:
+    case IA64_OP_FPMIN:
+    case IA64_OP_FPMAX:
+    case IA64_OP_FPAMIN:
+    case IA64_OP_FPAMAX:
+    case IA64_OP_FPCMP:
+    case IA64_OP_FMERGE:
+    case IA64_OP_FMERGE_S:
+    case IA64_OP_FMERGE_SE:
+        sets = ia64_fp_reg_set(insn->r2);
+        sets |= ia64_fp_reg_set(insn->r3);
+        return sets;
+
+    default:
+        return 0;
+    }
+}
+
+static uint32_t ia64_insn_fp_write_sets(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_LDFD:
+    case IA64_OP_LDFS:
+    case IA64_OP_LDF_FILL:
+    case IA64_OP_LDF8:
+    case IA64_OP_LDFE:
+    case IA64_OP_SETF_D:
+    case IA64_OP_SETF_S:
+    case IA64_OP_SETF_EXP:
+    case IA64_OP_SETF_SIG:
+    case IA64_OP_FADD:
+    case IA64_OP_FSUB:
+    case IA64_OP_FMPY:
+    case IA64_OP_FMA:
+    case IA64_OP_FMS:
+    case IA64_OP_FNMA:
+    case IA64_OP_XMA_L:
+    case IA64_OP_XMA_H:
+    case IA64_OP_XMA_HU:
+    case IA64_OP_XMPY_HU:
+    case IA64_OP_FMIN:
+    case IA64_OP_FMAX:
+    case IA64_OP_FAMIN:
+    case IA64_OP_FAMAX:
+    case IA64_OP_FRCPA:
+    case IA64_OP_FPRCPA:
+    case IA64_OP_FSELECT:
+    case IA64_OP_FNORM:
+    case IA64_OP_FPABS:
+    case IA64_OP_FPNEG:
+    case IA64_OP_FPNEGABS:
+    case IA64_OP_FPRSQRTA:
+    case IA64_OP_FRSQRTA:
+    case IA64_OP_FPACK:
+    case IA64_OP_FAND:
+    case IA64_OP_FANDCM:
+    case IA64_OP_FOR:
+    case IA64_OP_FXOR:
+    case IA64_OP_FSWAP:
+    case IA64_OP_FSWAP_NL:
+    case IA64_OP_FSWAP_NR:
+    case IA64_OP_FMIX_LR:
+    case IA64_OP_FMIX_R:
+    case IA64_OP_FMIX_L:
+    case IA64_OP_FSXT_R:
+    case IA64_OP_FSXT_L:
+    case IA64_OP_FPMERGE:
+    case IA64_OP_FPMERGE_S:
+    case IA64_OP_FPMERGE_SE:
+    case IA64_OP_FPMIN:
+    case IA64_OP_FPMAX:
+    case IA64_OP_FPAMIN:
+    case IA64_OP_FPAMAX:
+    case IA64_OP_FPCMP:
+    case IA64_OP_FPCVT:
+    case IA64_OP_FPMA:
+    case IA64_OP_FPMS:
+    case IA64_OP_FPNMA:
+    case IA64_OP_FMOV:
+    case IA64_OP_FCVT_XF:
+    case IA64_OP_FCVT_FX:
+    case IA64_OP_FCVT_FXU:
+    case IA64_OP_FMERGE:
+    case IA64_OP_FMERGE_S:
+    case IA64_OP_FMERGE_SE:
+        return ia64_fp_reg_set(insn->r1);
+
+    case IA64_OP_LDFP8:
+    case IA64_OP_LDFPD:
+    case IA64_OP_LDFPS:
+        return ia64_fp_reg_set(insn->r1) |
+               ia64_fp_reg_set(insn->r2);
+
+    default:
+        return 0;
+    }
+}
+
+static uint64_t ia64_insn_disabled_fp_isr_flags(
+    const Ia64Instruction *insn)
+{
+    /* ISR.R/W describe the instruction's memory access, not its FP operands. */
+    switch (insn->opcode) {
+    case IA64_OP_LDFD:
+    case IA64_OP_LDFS:
+    case IA64_OP_LDF_FILL:
+    case IA64_OP_LDF8:
+    case IA64_OP_LDFE:
+    case IA64_OP_LDFP8:
+    case IA64_OP_LDFPD:
+    case IA64_OP_LDFPS:
+        return IA64_ISR_R |
+               (insn->fp_load_speculative ? IA64_ISR_SP : 0);
+
+    case IA64_OP_STFD:
+    case IA64_OP_STFS:
+    case IA64_OP_STF_SPILL:
+    case IA64_OP_STF8:
+    case IA64_OP_STFE:
+        return IA64_ISR_W;
+
+    default:
+        return 0;
+    }
+}
+
+static void ia64_gen_check_disabled_fp(const Ia64Instruction *insn)
+{
+    uint32_t reads = ia64_insn_fp_read_sets(insn);
+    uint32_t writes = ia64_insn_fp_write_sets(insn);
+    uint32_t sets = reads | writes;
+    uint64_t disabled_mask;
+    uint64_t isr_flags;
+    TCGv_i64 disabled;
+    TCGv_i64 isr;
+    TCGLabel *done;
+
+    if (sets == 0) {
+        return;
+    }
+
+    /*
+     * Check the live PSR: a mask instruction earlier in the same bundle can
+     * change dfl/dfh after the TB was translated.
+     */
+    done = gen_new_label();
+    disabled = tcg_temp_new_i64();
+    isr = tcg_temp_new_i64();
+    disabled_mask = ((sets & 1) ? IA64_PSR_DFL : 0) |
+                    ((sets & 2) ? IA64_PSR_DFH : 0);
+    isr_flags = ia64_insn_disabled_fp_isr_flags(insn);
+
+    tcg_gen_andi_i64(disabled, cpu_psr, disabled_mask);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, disabled, 0, done);
+    tcg_gen_shri_i64(isr, disabled, 18);
+    if (isr_flags != 0) {
+        tcg_gen_ori_i64(isr, isr, isr_flags);
+    }
+    tcg_gen_st_i64(isr, tcg_env, offsetof(CPUIA64State, cr_isr));
+    ia64_gen_raise_exception(IA64_EXCP_DISABLED_FP, insn->address,
+                             0, insn->slot);
+    gen_set_label(done);
+}
+
 static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                           bool record_iipa)
 {
@@ -7438,6 +7723,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_predicate_end(skip);
         return false;
     }
+
+    ia64_gen_check_disabled_fp(insn);
 
     switch (insn->opcode) {
     case IA64_OP_NOP:
@@ -11220,6 +11507,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     case IA64_EXCP_FP_FAULT:
     case IA64_EXCP_FP_TRAP:
     case IA64_EXCP_DISABLED_ISA_TRANSITION:
+    case IA64_EXCP_DISABLED_FP:
         isr_status = cpu->env.cr_isr;
         break;
     default:
@@ -11580,7 +11868,8 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
          excp == IA64_EXCP_PRIVILEGED_OP ||
          excp == IA64_EXCP_PRIVILEGED_REG ||
          excp == IA64_EXCP_RESERVED_REG_FIELD ||
-         excp == IA64_EXCP_DISABLED_ISA_TRANSITION)) {
+         excp == IA64_EXCP_DISABLED_ISA_TRANSITION ||
+         excp == IA64_EXCP_DISABLED_FP)) {
         /*
          * Bare loader tests have no IVT.  Keep decoder/sentinel faults at
          * the faulting bundle for inspection, and use break as a monitor stop.
@@ -11607,6 +11896,7 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     case IA64_EXCP_FP_FAULT:
     case IA64_EXCP_FP_TRAP:
     case IA64_EXCP_DISABLED_ISA_TRANSITION:
+    case IA64_EXCP_DISABLED_FP:
         fault_addr = cpu->env.fault_ip;
         break;
     case IA64_EXCP_UNIMPL_INST_ADDR:
@@ -11961,7 +12251,7 @@ static int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *buf, int reg)
             env->cfm_sol = (cfm >> 7) & 0x7f;
             env->cfm_sor = (cfm >> 14) & 0x0f;
             env->cfm_rrb_gr = (cfm >> 18) & 0x7f;
-            env->cfm_rrb_fr = (cfm >> 25) & 0x7f;
+            ia64_set_cfm_rrb_fr(env, (cfm >> 25) & 0x7f);
             env->cfm_rrb_pr = (cfm >> 32) & 0x3f;
             break;
         }

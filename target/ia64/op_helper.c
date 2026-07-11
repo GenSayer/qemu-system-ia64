@@ -69,6 +69,13 @@ static inline void ia64_fr_int_origin_clear(CPUIA64State *env, uint32_t reg)
     }
 }
 
+static inline void ia64_fr_mark_written(CPUIA64State *env, uint32_t reg)
+{
+    if (reg > 1) {
+        env->psr |= reg >= 32 ? IA64_PSR_MFH : IA64_PSR_MFL;
+    }
+}
+
 static inline void ia64_fr_write(CPUIA64State *env, uint32_t reg,
                                  uint64_t value)
 {
@@ -78,6 +85,7 @@ static inline void ia64_fr_write(CPUIA64State *env, uint32_t reg,
         env->fr_sig[reg / 64] &= ~(1ULL << (reg % 64));
         ia64_fr_ext_clear(env, reg);
         ia64_fr_int_origin_clear(env, reg);
+        ia64_fr_mark_written(env, reg);
     }
 }
 
@@ -91,6 +99,7 @@ static inline void ia64_fr_write_sig(CPUIA64State *env, uint32_t reg,
         ia64_fr_ext_clear(env, reg);
         env->fr_int_value[reg] = value;
         env->fr_int_origin[reg / 64] |= 1ULL << (reg % 64);
+        ia64_fr_mark_written(env, reg);
     }
 }
 
@@ -128,6 +137,7 @@ static void ia64_fr_write_ext(CPUIA64State *env, uint32_t reg, bool sign,
         env->fr_ext_sign[reg / 64] &= ~(1ULL << (reg % 64));
     }
     env->fr_ext_valid[reg / 64] |= 1ULL << (reg % 64);
+    ia64_fr_mark_written(env, reg);
 }
 
 static bool ia64_fr_ext_get(const CPUIA64State *env, uint32_t reg,
@@ -434,6 +444,7 @@ static void ia64_fr_write_nat(CPUIA64State *env, uint32_t reg)
         env->fr_sig[reg / 64] &= ~(1ULL << (reg % 64));
         ia64_fr_ext_clear(env, reg);
         ia64_fr_int_origin_clear(env, reg);
+        ia64_fr_mark_written(env, reg);
     }
 }
 
@@ -757,6 +768,89 @@ static void ia64_invalidate_rotating_fp_alat(CPUIA64State *env)
 {
     ia64_invalidate_alat_reg_range(env, IA64_ROTATING_FR_BASE, IA64_FR_COUNT,
                                    true);
+}
+
+static void ia64_rebase_rotating_fr_u64(uint64_t values[IA64_FR_COUNT],
+                                        uint32_t shift)
+{
+    uint64_t tmp[IA64_ROTATING_FR_COUNT];
+    uint32_t i;
+
+    for (i = 0; i < IA64_ROTATING_FR_COUNT; i++) {
+        uint32_t src = (i + shift) % IA64_ROTATING_FR_COUNT;
+
+        tmp[i] = values[IA64_ROTATING_FR_BASE + src];
+    }
+    memcpy(&values[IA64_ROTATING_FR_BASE], tmp, sizeof(tmp));
+}
+
+static void ia64_rebase_rotating_fr_u32(uint32_t values[IA64_FR_COUNT],
+                                        uint32_t shift)
+{
+    uint32_t tmp[IA64_ROTATING_FR_COUNT];
+    uint32_t i;
+
+    for (i = 0; i < IA64_ROTATING_FR_COUNT; i++) {
+        uint32_t src = (i + shift) % IA64_ROTATING_FR_COUNT;
+
+        tmp[i] = values[IA64_ROTATING_FR_BASE + src];
+    }
+    memcpy(&values[IA64_ROTATING_FR_BASE], tmp, sizeof(tmp));
+}
+
+static void ia64_rebase_rotating_fr_bits(uint64_t bits[2], uint32_t shift)
+{
+    const uint64_t low_nonrotating = bits[0] & UINT32_MAX;
+    uint64_t old[2] = { bits[0], bits[1] };
+    uint32_t i;
+
+    bits[0] = low_nonrotating;
+    bits[1] = 0;
+    for (i = 0; i < IA64_ROTATING_FR_COUNT; i++) {
+        uint32_t dst = IA64_ROTATING_FR_BASE + i;
+        uint32_t src = IA64_ROTATING_FR_BASE +
+                       (i + shift) % IA64_ROTATING_FR_COUNT;
+
+        if ((old[src / 64] >> (src % 64)) & 1) {
+            bits[dst / 64] |= 1ULL << (dst % 64);
+        }
+    }
+}
+
+/*
+ * Floating-point helpers index env->fr[] by the current logical register
+ * number.  Rebase every part of that representation when RRB.FR changes so
+ * that cover/call and rfi/return expose the physical registers selected by
+ * the new rotation base.
+ */
+void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb)
+{
+    const uint64_t rotating_word0_mask = UINT64_MAX << IA64_ROTATING_FR_BASE;
+    uint32_t old_rrb = env->cfm_rrb_fr % IA64_ROTATING_FR_COUNT;
+    uint32_t shift;
+
+    new_rrb %= IA64_ROTATING_FR_COUNT;
+    shift = (new_rrb + IA64_ROTATING_FR_COUNT - old_rrb) %
+            IA64_ROTATING_FR_COUNT;
+    if (shift == 0) {
+        env->cfm_rrb_fr = new_rrb;
+        return;
+    }
+
+    ia64_rebase_rotating_fr_u64(env->fr, shift);
+    ia64_rebase_rotating_fr_u64(env->fr_int_value, shift);
+    ia64_rebase_rotating_fr_u64(env->fr_ext_mant, shift);
+    ia64_rebase_rotating_fr_u32(env->fr_ext_exp, shift);
+    ia64_rebase_rotating_fr_bits(env->fr_nat, shift);
+    ia64_rebase_rotating_fr_bits(env->fr_sig, shift);
+    ia64_rebase_rotating_fr_bits(env->fr_ext_sign, shift);
+    ia64_rebase_rotating_fr_bits(env->fr_ext_valid, shift);
+    ia64_rebase_rotating_fr_bits(env->fr_int_origin, shift);
+    env->fr_sig[0] &= ~(env->fr_nat[0] & rotating_word0_mask);
+    env->fr_sig[1] &= ~env->fr_nat[1];
+
+    env->cfm_rrb_fr = new_rrb;
+    ia64_invalidate_rotating_fp_alat(env);
 }
 
 static uint64_t ia64_current_cfm(const CPUIA64State *env)
@@ -1099,7 +1193,7 @@ static void ia64_rse_restore_frame(CPUIA64State *env, uint32_t preserved,
         env->cfm_sol = 0;
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
-        env->cfm_rrb_fr = 0;
+        ia64_set_cfm_rrb_fr(env, 0);
         env->cfm_rrb_pr = 0;
         return;
     }
@@ -1185,7 +1279,8 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
     env->cfm_sol = new_sol;
     env->cfm_sor = (pfm & IA64_CFM_SOR_MASK) >> IA64_CFM_SOR_SHIFT;
     env->cfm_rrb_gr = (pfm & IA64_CFM_RRB_GR_MASK) >> IA64_CFM_RRB_GR_SHIFT;
-    env->cfm_rrb_fr = (pfm & IA64_CFM_RRB_FR_MASK) >> IA64_CFM_RRB_FR_SHIFT;
+    ia64_set_cfm_rrb_fr(env, (pfm & IA64_CFM_RRB_FR_MASK) >>
+                             IA64_CFM_RRB_FR_SHIFT);
     env->cfm_rrb_pr = (pfm & IA64_CFM_RRB_PR_MASK) >> IA64_CFM_RRB_PR_SHIFT;
     env->rse_bol = ia64_rse_wrap_phys((int32_t)env->rse_bol -
                                       (int32_t)preserved);
@@ -1544,7 +1639,7 @@ void helper_rfi(CPUIA64State *env)
         env->cfm_sol = 0;
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
-        env->cfm_rrb_fr = 0;
+        ia64_set_cfm_rrb_fr(env, 0);
         env->cfm_rrb_pr = 0;
         ia64_rse_invalidate_non_current(env);
         ia64_invalidate_stacked_alat(env);
@@ -3517,60 +3612,6 @@ static void ia64_rotate_rotating_gr_right(CPUIA64State *env)
                                    IA64_STACKED_GR_BASE + count, false);
 }
 
-static void ia64_rotate_rotating_fr_u64_right(uint64_t values[IA64_FR_COUNT])
-{
-    uint64_t last = values[IA64_FR_COUNT - 1];
-
-    memmove(&values[IA64_ROTATING_FR_BASE + 1],
-            &values[IA64_ROTATING_FR_BASE],
-            (IA64_ROTATING_FR_COUNT - 1) * sizeof(values[0]));
-    values[IA64_ROTATING_FR_BASE] = last;
-}
-
-static void ia64_rotate_rotating_fr_u32_right(uint32_t values[IA64_FR_COUNT])
-{
-    uint32_t last = values[IA64_FR_COUNT - 1];
-
-    memmove(&values[IA64_ROTATING_FR_BASE + 1],
-            &values[IA64_ROTATING_FR_BASE],
-            (IA64_ROTATING_FR_COUNT - 1) * sizeof(values[0]));
-    values[IA64_ROTATING_FR_BASE] = last;
-}
-
-static void ia64_rotate_rotating_fr_bits_right(uint64_t bits[2])
-{
-    const uint64_t rotating_word0_mask = UINT64_MAX << IA64_ROTATING_FR_BASE;
-    uint64_t word0 = bits[0];
-    uint64_t word1 = bits[1];
-    uint64_t wrap_to_base = word1 >> 63;
-    uint64_t carry_to_word1 = word0 >> 63;
-
-    bits[0] = (word0 & ~rotating_word0_mask) |
-              ((word0 << 1) & rotating_word0_mask) |
-              (wrap_to_base << IA64_ROTATING_FR_BASE);
-    bits[1] = (word1 << 1) | carry_to_word1;
-}
-
-static void ia64_rotate_rotating_fr_right(CPUIA64State *env)
-{
-    const uint64_t rotating_word0_mask = UINT64_MAX << IA64_ROTATING_FR_BASE;
-
-    ia64_rotate_rotating_fr_u64_right(env->fr);
-    ia64_rotate_rotating_fr_u64_right(env->fr_int_value);
-    ia64_rotate_rotating_fr_u64_right(env->fr_ext_mant);
-    ia64_rotate_rotating_fr_u32_right(env->fr_ext_exp);
-
-    ia64_rotate_rotating_fr_bits_right(env->fr_nat);
-    ia64_rotate_rotating_fr_bits_right(env->fr_sig);
-    ia64_rotate_rotating_fr_bits_right(env->fr_ext_sign);
-    ia64_rotate_rotating_fr_bits_right(env->fr_ext_valid);
-    ia64_rotate_rotating_fr_bits_right(env->fr_int_origin);
-
-    env->fr_sig[0] &= ~(env->fr_nat[0] & rotating_word0_mask);
-    env->fr_sig[1] &= ~env->fr_nat[1];
-    ia64_invalidate_rotating_fp_alat(env);
-}
-
 static void ia64_rotate_predicates_right(CPUIA64State *env)
 {
     uint8_t last = env->pr[63] & 1;
@@ -3587,7 +3628,6 @@ static void ia64_rotate_loop_regs(CPUIA64State *env)
 {
     ia64_rse_check(env, "ctop");
     ia64_rotate_rotating_gr_right(env);
-    ia64_rotate_rotating_fr_right(env);
     ia64_rotate_predicates_right(env);
     if (env->cfm_sor != 0) {
         uint8_t count = env->cfm_sor << 3;
@@ -3595,8 +3635,9 @@ static void ia64_rotate_loop_regs(CPUIA64State *env)
         env->cfm_rrb_gr = env->cfm_rrb_gr ?
                           env->cfm_rrb_gr - 1 : count - 1;
     }
-    env->cfm_rrb_fr = env->cfm_rrb_fr ?
-                      env->cfm_rrb_fr - 1 : IA64_ROTATING_FR_COUNT - 1;
+    ia64_set_cfm_rrb_fr(env, env->cfm_rrb_fr ?
+                             env->cfm_rrb_fr - 1 :
+                             IA64_ROTATING_FR_COUNT - 1);
     env->cfm_rrb_pr = env->cfm_rrb_pr ?
                       env->cfm_rrb_pr - 1 : 47;
 }
@@ -3613,7 +3654,7 @@ void helper_br_call_rse(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    env->cfm_rrb_fr = 0;
+    ia64_set_cfm_rrb_fr(env, 0);
     env->cfm_rrb_pr = 0;
     ia64_rse_sync_frame_in(env);
     ia64_invalidate_stacked_alat(env);
@@ -3657,7 +3698,7 @@ void helper_br_ia(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    env->cfm_rrb_fr = 0;
+    ia64_set_cfm_rrb_fr(env, 0);
     env->cfm_rrb_pr = 0;
     ia64_rse_invalidate_non_current(env);
     ia64_invalidate_stacked_alat(env);
@@ -5340,6 +5381,8 @@ static void ia64_fp_restore_state(CPUIA64State *env)
     memcpy(env->fr_int_origin, env->fp_backup_fr_int_origin,
            sizeof(env->fr_int_origin));
     memcpy(env->pr, env->fp_backup_pr, sizeof(env->pr));
+    env->psr = (env->psr & ~(IA64_PSR_MFL | IA64_PSR_MFH)) |
+               env->fp_backup_psr_mf;
 }
 
 static void ia64_raise_fp_fault(CPUIA64State *env, uint64_t isr)
@@ -5380,6 +5423,7 @@ void helper_fp_begin(CPUIA64State *env, uint32_t sf, uint32_t precision)
     memcpy(env->fp_backup_fr_int_origin, env->fr_int_origin,
            sizeof(env->fr_int_origin));
     memcpy(env->fp_backup_pr, env->pr, sizeof(env->pr));
+    env->fp_backup_psr_mf = env->psr & (IA64_PSR_MFL | IA64_PSR_MFH);
 
     set_float_rounding_mode(rounding[(controls >> 4) & 3],
                             &env->fp_status);
@@ -5907,7 +5951,7 @@ void helper_cover_rse(CPUIA64State *env)
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    env->cfm_rrb_fr = 0;
+    ia64_set_cfm_rrb_fr(env, 0);
     env->cfm_rrb_pr = 0;
     ia64_invalidate_stacked_alat(env);
     ia64_rse_check(env, "cover");
@@ -7486,7 +7530,7 @@ void helper_clrrrb_rse(CPUIA64State *env, uint32_t predicate_only)
         env->cfm_rrb_pr = 0;
     } else {
         env->cfm_rrb_gr = 0;
-        env->cfm_rrb_fr = 0;
+        ia64_set_cfm_rrb_fr(env, 0);
         env->cfm_rrb_pr = 0;
     }
     ia64_rse_sync_frame_in(env);

@@ -32,6 +32,7 @@ IA64_EXCP_PRIVILEGED_OP = 25
 IA64_EXCP_PRIVILEGED_REG = 26
 IA64_EXCP_RESERVED_REG_FIELD = 27
 IA64_EXCP_DISABLED_ISA_TRANSITION = 30
+IA64_EXCP_DISABLED_FP = 31
 IA64_ISR_X = 1 << 32
 IA64_ISR_W = 1 << 33
 IA64_ISR_R = 1 << 34
@@ -116,6 +117,7 @@ IA64_KEY_PERMISSION_VECTOR = 0x5100
 IA64_INST_ACCESS_VECTOR = 0x5200
 IA64_DATA_ACCESS_VECTOR = 0x5300
 IA64_GENERAL_VECTOR = 0x5400
+IA64_DISABLED_FP_VECTOR = 0x5500
 IA64_NAT_CONSUMPTION_VECTOR = 0x5600
 IA64_UNALIGNED_VECTOR = 0x5a00
 IA64_FP_FAULT_VECTOR = 0x5c00
@@ -3306,6 +3308,7 @@ IA64_EXCEPTION_VECTORS = {
     IA64_EXCP_PRIVILEGED_REG: IA64_GENERAL_VECTOR,
     IA64_EXCP_RESERVED_REG_FIELD: IA64_GENERAL_VECTOR,
     IA64_EXCP_DISABLED_ISA_TRANSITION: IA64_GENERAL_VECTOR,
+    IA64_EXCP_DISABLED_FP: IA64_DISABLED_FP_VECTOR,
 }
 
 
@@ -18563,6 +18566,67 @@ test_rfi_restores_interrupted_bsp_after_cover = require_registers(
         "cfm_sol": 4,
     }, entry=0x10)
 
+test_cover_rfi_rebases_rotating_floating_registers = require_registers(
+    "cover_rfi_rebases_rotating_floating_registers", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, *movl_mlx(3, 0x12345678)),
+        (0x30, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x40, 0x01, setf_sig(32, 3), mov_i_imm_ar(66, 1), nop_i()),
+        (0x50, 0x13, nop_m(), nop_b(), br_ctop_many(0x50, 0x50)),
+        (0x60, 0x00, getf_sig(4, 33), nop_i(), nop_i()),
+        (0x70, 0x00, break_m(0x42), nop_i(), nop_i()),
+        (0x80, 0x00, getf_sig(5, 33), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (IA64_BREAK_VECTOR, 0x10, nop_m(), nop_i(), cover_b()),
+        (IA64_BREAK_VECTOR + 0x10, 0x00, getf_sig(6, 32), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x20, *movl_mlx(20, 0x80)),
+        (IA64_BREAK_VECTOR + 0x30, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x40, 0x10, nop_m(), nop_i(), rfi_b()),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r4": 0x12345678,
+        "r5": 0x12345678,
+        "r6": 0x12345678,
+    }, entry=0x10)
+
+test_br_call_ret_rebases_rotating_floating_registers = require_registers(
+    "br_call_ret_rebases_rotating_floating_registers", [
+        (0x10, *movl_mlx(3, 0x12345678)),
+        (0x20, 0x01, setf_sig(32, 3), mov_i_imm_ar(66, 1), nop_i()),
+        (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+        (0x40, 0x00, getf_sig(4, 33), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, 0x100)),
+        (0x60, 0x00, getf_sig(6, 33), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+        (0x100, 0x00, getf_sig(5, 32), nop_i(), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r4": 0x12345678,
+        "r5": 0x12345678,
+        "r6": 0x12345678,
+    }, entry=0x10)
+
+test_clrrrb_rebases_rotating_floating_registers = require_registers(
+    "clrrrb_rebases_rotating_floating_registers", [
+        (0x10, *movl_mlx(3, 0x12345678)),
+        (0x20, 0x01, setf_sig(32, 3), mov_i_imm_ar(66, 1), nop_i()),
+        (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+        (0x40, 0x00, getf_sig(4, 33), nop_i(), nop_i()),
+        (0x50, 0x13, nop_m(), nop_b(), clrrrb_b()),
+        (0x60, 0x00, getf_sig(5, 32), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r4": 0x12345678,
+        "r5": 0x12345678,
+    }, entry=0x10)
+
 test_nested_exception_keeps_handler_return_state = require_registers(
     "nested_exception_keeps_handler_return_state", [
         (0x10, *movl_mlx(2, 1 << 13)),
@@ -18721,6 +18785,125 @@ test_rse_rfi_selects_matching_outer_exception_frame = require_registers(
         "r10": 0,
         "cfm_sof": 0,
         "cfm_sol": 0,
+    }, entry=0x10)
+
+test_disabled_fp_high_fault = require_registers(
+    "disabled_fp_high_fault", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFH)),
+        (0x20, *movl_mlx(3, 0x1234)),
+        (0x30, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, setf_sig(40, 3), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(8, 19),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x20,
+                 IA64_DISABLED_FP_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": 2,
+    }, entry=0x10)
+
+test_disabled_fp_low_fault = require_registers(
+    "disabled_fp_low_fault", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFL)),
+        (0x20, *movl_mlx(3, 0x1234)),
+        (0x30, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, setf_sig(8, 3), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(8, 19),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x20,
+                 IA64_DISABLED_FP_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": 1,
+    }, entry=0x10)
+
+test_disabled_fp_load_sets_isr_r = require_registers(
+    "disabled_fp_load_sets_isr_r", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFH)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x00, ldf8(40, 3), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x10,
+                 IA64_DISABLED_FP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r9": IA64_ISR_R | 2,
+    }, entry=0x10)
+
+test_disabled_fp_store_sets_isr_w = require_registers(
+    "disabled_fp_store_sets_isr_w", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFH)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x00, stfe(3, 40), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x10,
+                 IA64_DISABLED_FP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r9": IA64_ISR_W | 2,
+    }, entry=0x10)
+
+test_disabled_fp_mixed_sets_reports_both = require_registers(
+    "disabled_fp_mixed_sets_reports_both", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFL |
+                         IA64_PSR_DFH)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x0d, nop_m(), fmerge_ns(40, 8, 0), nop_i()),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x10,
+                 IA64_DISABLED_FP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r9": 3 | (1 << IA64_ISR_EI_SHIFT),
+    }, entry=0x10)
+
+test_fp_writes_set_psr_mfl_mfh = require_registers(
+    "fp_writes_set_psr_mfl_mfh", [
+        (0x10, *movl_mlx(2, 0x1234)),
+        (0x20, 0x00, setf_sig(8, 2), nop_i(), nop_i()),
+        (0x30, 0x00, setf_sig(40, 2), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_psr_gr(8), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "exception": IA64_EXCP_NONE,
+        "r8": IA64_PSR_MFL | IA64_PSR_MFH,
+    }, entry=0x10)
+
+test_predicated_off_disabled_fp_does_not_fault = require_registers(
+    "predicated_off_disabled_fp_does_not_fault", [
+        (0x10, *movl_mlx(2, IA64_PSR_DFH)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, setf_sig(40, 2, qp=1), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_DFH,
     }, entry=0x10)
 
 test_exception_illegal = require_exception("exception_illegal", [
@@ -20455,10 +20638,25 @@ TEST_NAMES = {
     "iipa_preserved_for_rfi_to_fault":
         test_iipa_preserved_for_rfi_to_fault,
     "exception_clears_ifs_keeps_cfm": test_exception_clears_ifs_keeps_cfm,
+    "disabled_fp_high_fault": test_disabled_fp_high_fault,
+    "disabled_fp_low_fault": test_disabled_fp_low_fault,
+    "disabled_fp_load_sets_isr_r": test_disabled_fp_load_sets_isr_r,
+    "disabled_fp_store_sets_isr_w": test_disabled_fp_store_sets_isr_w,
+    "disabled_fp_mixed_sets_reports_both":
+        test_disabled_fp_mixed_sets_reports_both,
+    "fp_writes_set_psr_mfl_mfh": test_fp_writes_set_psr_mfl_mfh,
+    "predicated_off_disabled_fp_does_not_fault":
+        test_predicated_off_disabled_fp_does_not_fault,
     "cover_saves_interrupted_cfm_to_ifs":
         test_cover_saves_interrupted_cfm_to_ifs,
     "rfi_restores_interrupted_bsp_after_cover":
         test_rfi_restores_interrupted_bsp_after_cover,
+    "cover_rfi_rebases_rotating_floating_registers":
+        test_cover_rfi_rebases_rotating_floating_registers,
+    "br_call_ret_rebases_rotating_floating_registers":
+        test_br_call_ret_rebases_rotating_floating_registers,
+    "clrrrb_rebases_rotating_floating_registers":
+        test_clrrrb_rebases_rotating_floating_registers,
     "nested_exception_keeps_handler_return_state": test_nested_exception_keeps_handler_return_state,
     "nested_exception_keeps_handler_interruption_state": test_nested_exception_keeps_handler_interruption_state,
     "rse_rfi_selects_matching_outer_exception_frame":
