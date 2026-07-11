@@ -11235,6 +11235,14 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
                   slot, cpu->env.psr, cpu->env.cr_ifa, cpu->env.cr_isr);
     psr_ic_inflight = cpu->env.psr_ic_inflight;
     collect = cpu->env.psr & IA64_PSR_IC;
+
+    /*
+     * An interruption is an instruction serialization operation and also
+     * performs data serialization (SDM Vol. 2, 3.1.4).  Complete any TLB
+     * purges before the handler can make instruction or data references.
+     */
+    helper_tlb_serialize(&cpu->env, 1, 1);
+
     if (collect) {
         cpu->env.cr_ipsr = (cpu->env.psr & ~IA64_PSR_RI_MASK) |
                            (((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT);

@@ -6820,6 +6820,19 @@ static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
      */
     entry = ia64_tlb_find(env->tlb_data, env->tlb_data_count, entry_va,
                           rid, false);
+    if (entry && entry->pending_purge) {
+        /*
+         * A purge may complete before its required serialization point.
+         * Do not use a pending translation to read the VHPT: a PTE fetched
+         * through it could install a new, non-pending TC entry which survives
+         * completion of the original purge.
+         */
+        qemu_log_mask(CPU_LOG_MMU,
+                      "ia64 vhpt entry pending purge va=0x%016" PRIx64
+                      " rid=0x%06" PRIx32 "\n",
+                      entry_va, rid);
+        return IA64_VHPT_ENTRY_TLB_MISS;
+    }
     if (entry) {
         IA64Exception excp;
         uint8_t ma = (entry->pte & IA64_PTE_MA_MASK) >> IA64_PTE_MA_SHIFT;

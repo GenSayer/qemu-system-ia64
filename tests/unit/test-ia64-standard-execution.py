@@ -57,6 +57,8 @@ FW_HIGH_RAM_BASE = 0x80200000
 FW_HIGH_RAM_AFTER_PCI_BASE = PCI_MMIO_BASE + PCI_MMIO_SIZE
 FW_FIRMWARE_ADDRESS_SPACE_BASE = 0xFF000000
 FW_FIRMWARE_ADDRESS_SPACE_SIZE = 0x01000000
+FW_NVRAM_BASE = 0xFFF00000
+FW_NVRAM_SIZE = 0x00010000
 PCI_IO_SIZE = 0x1000000
 PCI_IO_SPARSE_SIZE = 0x4000000
 LEGACY_IO_BASE = 0x800010000000
@@ -1098,8 +1100,21 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         PCI_MMIO_BASE, PCI_MMIO_SIZE, EFI_MEMORY_UC,
     )
     find_efi_descriptor(
-        "PAL/SAL firmware address space", EFI_MEMORY_MAPPED_IO,
-        FW_FIRMWARE_ADDRESS_SPACE_BASE, FW_FIRMWARE_ADDRESS_SPACE_SIZE,
+        "PAL/SAL firmware address space below NVRAM", EFI_MEMORY_MAPPED_IO,
+        FW_FIRMWARE_ADDRESS_SPACE_BASE,
+        FW_NVRAM_BASE - FW_FIRMWARE_ADDRESS_SPACE_BASE,
+        EFI_MEMORY_UC,
+    )
+    find_efi_descriptor(
+        "runtime NVRAM", EFI_MEMORY_MAPPED_IO,
+        FW_NVRAM_BASE, FW_NVRAM_SIZE,
+        EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
+    )
+    find_efi_descriptor(
+        "PAL/SAL firmware address space above NVRAM", EFI_MEMORY_MAPPED_IO,
+        FW_NVRAM_BASE + FW_NVRAM_SIZE,
+        FW_FIRMWARE_ADDRESS_SPACE_BASE + FW_FIRMWARE_ADDRESS_SPACE_SIZE -
+        (FW_NVRAM_BASE + FW_NVRAM_SIZE),
         EFI_MEMORY_UC,
     )
     io_port_descs = [
@@ -1559,9 +1574,23 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         EFI_MEMORY_UC,
     )
     find_efi_descriptor_in(
-        high_memory_map, "4 GiB PAL/SAL firmware address space",
+        high_memory_map, "4 GiB PAL/SAL firmware space below NVRAM",
         EFI_MEMORY_MAPPED_IO,
-        FW_FIRMWARE_ADDRESS_SPACE_BASE, FW_FIRMWARE_ADDRESS_SPACE_SIZE,
+        FW_FIRMWARE_ADDRESS_SPACE_BASE,
+        FW_NVRAM_BASE - FW_FIRMWARE_ADDRESS_SPACE_BASE,
+        EFI_MEMORY_UC,
+    )
+    find_efi_descriptor_in(
+        high_memory_map, "4 GiB runtime NVRAM", EFI_MEMORY_MAPPED_IO,
+        FW_NVRAM_BASE, FW_NVRAM_SIZE,
+        EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
+    )
+    find_efi_descriptor_in(
+        high_memory_map, "4 GiB PAL/SAL firmware space above NVRAM",
+        EFI_MEMORY_MAPPED_IO,
+        FW_NVRAM_BASE + FW_NVRAM_SIZE,
+        FW_FIRMWARE_ADDRESS_SPACE_BASE + FW_FIRMWARE_ADDRESS_SPACE_SIZE -
+        (FW_NVRAM_BASE + FW_NVRAM_SIZE),
         EFI_MEMORY_UC,
     )
 

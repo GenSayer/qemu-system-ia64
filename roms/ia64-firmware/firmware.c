@@ -121,6 +121,10 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_FIRMWARE_ADDRESS_SPACE_SIZE 0x0000000001000000ULL
 #define FW_FIRMWARE_ADDRESS_SPACE_END \
     (FW_FIRMWARE_ADDRESS_SPACE_BASE + FW_FIRMWARE_ADDRESS_SPACE_SIZE)
+#define FW_NVRAM_BASE 0x00000000fff00000ULL
+#define FW_NVRAM_SIZE 0x0000000000010000ULL
+#define FW_NVRAM_COMMIT_OFFSET (FW_NVRAM_SIZE - sizeof(UINT64))
+#define FW_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define FW_HIGH_RAM_RANGE_MAX 3U
 #define FW_MEMORY_AFFINITY_MAX (1U + FW_HIGH_RAM_RANGE_MAX)
 #define FW_HANDOFF_ADDR   0x00000000000ff000ULL
@@ -10873,6 +10877,12 @@ static void efi_init_memory_map(void)
 
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_FIRMWARE_ADDRESS_SPACE_BASE,
+                         FW_NVRAM_BASE, EFI_MEMORY_UC);
+    efi_add_memory_range(&index, EfiMemoryMappedIO,
+                         FW_NVRAM_BASE, FW_NVRAM_BASE + FW_NVRAM_SIZE,
+                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
+    efi_add_memory_range(&index, EfiMemoryMappedIO,
+                         FW_NVRAM_BASE + FW_NVRAM_SIZE,
                          FW_FIRMWARE_ADDRESS_SPACE_END, EFI_MEMORY_UC);
 
     mMemoryMapEntries = index;
@@ -15860,6 +15870,19 @@ static BOOLEAN fw_bytes_eq(const UINT8 *p, const char *s, UINTN len)
     return 1;
 }
 
+static BOOLEAN fw_byte_arrays_equal(const UINT8 *a, const UINT8 *b,
+                                    UINTN len)
+{
+    UINTN i;
+
+    for (i = 0; i < len; i++) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static BOOLEAN atapi_configure_el_torito(void)
 {
     static UINT8 sec[ATAPI_SECTOR_SIZE];
@@ -16530,6 +16553,7 @@ typedef struct {
     UINT32  cluster_size;
     UINT32  total_sectors;
     UINT32  cluster_count;
+    UINT32  lba_offset;
 } FW_FAT_VOLUME;
 
 typedef enum {
@@ -16621,6 +16645,16 @@ typedef struct {
     UINT64 PartitionStart;
     UINT64 PartitionSize;
 } __attribute__((packed)) FW_CDROM_DEVICE_PATH_NODE;
+
+typedef struct {
+    FW_DEVICE_PATH_NODE Header;
+    UINT32 PartitionNumber;
+    UINT64 PartitionStart;
+    UINT64 PartitionSize;
+    UINT8 PartitionSignature[16];
+    UINT8 MbrType;
+    UINT8 SignatureType;
+} __attribute__((packed)) FW_HARD_DRIVE_DEVICE_PATH_NODE;
 
 typedef struct {
     FW_DEVICE_PATH_NODE Header;
@@ -17202,6 +17236,15 @@ static BOOLEAN fw_device_path_is_end(const FW_DEVICE_PATH_NODE *node)
     return node != NULL && node->Type == 0x7f && node->SubType == 0xff;
 }
 
+static BOOLEAN fw_device_path_is_hard_drive(
+    const FW_DEVICE_PATH_NODE *node)
+{
+    /* Some legacy IA-64 EFI implementations include native tail padding. */
+    return node != NULL && node->Type == 0x04 && node->SubType == 0x01 &&
+           (node->Length == sizeof(FW_HARD_DRIVE_DEVICE_PATH_NODE) ||
+            node->Length == 48U);
+}
+
 static BOOLEAN fw_cdrom_node_is_whole_media(const FW_DEVICE_PATH_NODE *node)
 {
     const FW_CDROM_DEVICE_PATH_NODE *cdrom;
@@ -17262,6 +17305,9 @@ static void *fw_loaded_image_file_path(void *DevicePath)
     path = (FW_DEVICE_PATH_NODE *)DevicePath;
     if (path->Type == 0x04 && path->SubType == 0x04) {
         return DevicePath;
+    }
+    if (fw_device_path_is_hard_drive(path)) {
+        return (UINT8 *)DevicePath + path->Length;
     }
 
     matched = fw_device_path_prefix_length(
@@ -17483,6 +17529,10 @@ static BOOLEAN fw_device_path_file_name_eq_ascii(const FW_DEVICE_PATH_NODE *path
 static BOOLEAN __attribute__((noinline)) loaded_image_file_path_selftest(void)
 {
     EFI_LOADED_IMAGE_RECORD rec;
+    UINT8 padded_hard_drive_path[
+        48U + sizeof(mBootFullDevicePath.FileHeader) +
+        sizeof(mBootFullDevicePath.PathName) +
+        sizeof(mBootFullDevicePath.End)];
     void *full_path;
     void *file_path;
     UINT8 *file_bytes;
@@ -17505,8 +17555,21 @@ static BOOLEAN __attribute__((noinline)) loaded_image_file_path_selftest(void)
     }
 
     file_node = (FW_DEVICE_PATH_NODE *)file_path;
-    return file_node->Type == 0x04 && file_node->SubType == 0x04 &&
-           file_node->Length == mBootFullDevicePath.FileHeader.Length;
+    if (file_node->Type != 0x04 || file_node->SubType != 0x04 ||
+        file_node->Length != mBootFullDevicePath.FileHeader.Length) {
+        return 0;
+    }
+
+    fw_set_mem(padded_hard_drive_path, sizeof(padded_hard_drive_path), 0);
+    file_node = (FW_DEVICE_PATH_NODE *)padded_hard_drive_path;
+    file_node->Type = 0x04;
+    file_node->SubType = 0x01;
+    file_node->Length = 48U;
+    fw_copy_mem(padded_hard_drive_path + 48U,
+                &mBootFullDevicePath.FileHeader,
+                sizeof(padded_hard_drive_path) - 48U);
+    return fw_loaded_image_file_path(padded_hard_drive_path) ==
+           padded_hard_drive_path + 48U;
 }
 
 static BOOLEAN __attribute__((noinline)) windows_setup_boot_option_selftest(void)
@@ -18276,12 +18339,115 @@ static BOOLEAN fw_fat_lfn_matches(const char *lfn, const CHAR16 *name,
     return fw_char16_component_eq_ascii(name, len, lfn);
 }
 
+static BOOLEAN fw_gpt_find_esp(UINT32 *StartLba, UINT32 *SectorCount)
+{
+    static const UINT8 esp_type_guid[16] = {
+        0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
+        0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
+    };
+    static UINT8 entries[128U * 128U];
+    UINT8 header[512];
+    UINT64 entries_lba;
+    UINT64 device_last_lba;
+    UINT64 first_usable_lba;
+    UINT64 last_usable_lba;
+    UINT32 header_size;
+    UINT32 stored_header_crc;
+    UINT32 calculated_crc;
+    UINT32 entry_count;
+    UINT32 entry_size;
+    UINT32 entry_bytes;
+    UINT32 entry_sectors;
+    UINTN i;
+
+    if (StartLba == NULL || SectorCount == NULL ||
+        storage_is_cd(&mBootStorageDevice) ||
+        storage_block_size(&mBootStorageDevice) != 512U ||
+        !fw_read_512(header, 1) ||
+        !fw_bytes_eq(header, "EFI PART", 8)) {
+        return 0;
+    }
+
+    device_last_lba = storage_last_lba(&mBootStorageDevice);
+    header_size = fw_le32(header + 12);
+    stored_header_crc = fw_le32(header + 16);
+    if (fw_le32(header + 8) != 0x00010000U ||
+        header_size < 92U || header_size > sizeof(header) ||
+        fw_le32(header + 20) != 0 ||
+        fw_le64(header + 24) != 1U ||
+        fw_le64(header + 32) > device_last_lba ||
+        fw_le64(header + 32) == 1U) {
+        return 0;
+    }
+    header[16] = 0;
+    header[17] = 0;
+    header[18] = 0;
+    header[19] = 0;
+    if (bs_calculate_crc32(header, header_size, &calculated_crc) !=
+            EFI_SUCCESS || calculated_crc != stored_header_crc) {
+        return 0;
+    }
+
+    first_usable_lba = fw_le64(header + 40);
+    last_usable_lba = fw_le64(header + 48);
+    entries_lba = fw_le64(header + 72);
+    entry_count = fw_le32(header + 80);
+    entry_size = fw_le32(header + 84);
+    if (first_usable_lba > last_usable_lba ||
+        last_usable_lba > device_last_lba ||
+        entries_lba > 0xffffffffULL || entry_count == 0 ||
+        entry_size < 128U || (entry_size & 7U) != 0 ||
+        entry_size > sizeof(entries) ||
+        entry_count > sizeof(entries) / entry_size) {
+        return 0;
+    }
+
+    entry_bytes = entry_count * entry_size;
+    entry_sectors = (entry_bytes + 511U) >> 9;
+    if (entry_sectors == 0 ||
+        entries_lba + entry_sectors - 1U > device_last_lba ||
+        !fw_read_512s(entries, (UINT32)entries_lba, entry_sectors) ||
+        bs_calculate_crc32(entries, entry_bytes, &calculated_crc) !=
+            EFI_SUCCESS || calculated_crc != fw_le32(header + 88)) {
+        return 0;
+    }
+
+    for (i = 0; i < entry_count; i++) {
+        const UINT8 *entry = entries + i * entry_size;
+        UINT64 first_lba;
+        UINT64 last_lba;
+        UINT64 sectors;
+
+        if (!fw_byte_arrays_equal(entry, esp_type_guid,
+                                  sizeof(esp_type_guid))) {
+            continue;
+        }
+
+        first_lba = fw_le64(entry + 32);
+        last_lba = fw_le64(entry + 40);
+        if (first_lba < first_usable_lba || first_lba > last_lba ||
+            last_lba > last_usable_lba) {
+            return 0;
+        }
+        sectors = last_lba - first_lba + 1U;
+        if (first_lba > 0xffffffffULL || sectors > 0xffffffffULL) {
+            return 0;
+        }
+        *StartLba = (UINT32)first_lba;
+        *SectorCount = (UINT32)sectors;
+        return 1;
+    }
+    return 0;
+}
+
 static BOOLEAN fw_fat_init(void)
 {
     static UINT8 sec[512];
     FAT_BPB *bpb;
     UINT32 fat_size;
     UINT32 data_secs;
+    UINT32 partition_start = 0;
+    UINT32 partition_sectors = 0;
 
     if (mFatVolume.valid) {
         return 1;
@@ -18291,7 +18457,14 @@ static BOOLEAN fw_fat_init(void)
     }
     bpb = (FAT_BPB *)sec;
     if (!bpb_is_valid(bpb)) {
-        return 0;
+        if (!fw_gpt_find_esp(&partition_start, &partition_sectors) ||
+            !fw_read_512(sec, partition_start)) {
+            return 0;
+        }
+        bpb = (FAT_BPB *)sec;
+        if (!bpb_is_valid(bpb)) {
+            return 0;
+        }
     }
 
     fat_size = bpb->secs_per_fat_small;
@@ -18302,6 +18475,10 @@ static BOOLEAN fw_fat_init(void)
         mFatVolume.total_sectors = bpb->total_secs_small;
     } else {
         mFatVolume.total_sectors = bpb->total_secs_large;
+    }
+    if (partition_sectors != 0 &&
+        mFatVolume.total_sectors > partition_sectors) {
+        return 0;
     }
 
     mFatVolume.sec_per_cluster = bpb->sec_per_cluster;
@@ -18321,10 +18498,37 @@ static BOOLEAN fw_fat_init(void)
     data_secs = mFatVolume.total_sectors - mFatVolume.data_start;
     mFatVolume.cluster_count =
         fw_udiv32(data_secs, mFatVolume.sec_per_cluster);
+    if (mFatVolume.cluster_count >= 65525U) {
+        return 0;
+    }
     mFatVolume.is_fat16 = mFatVolume.cluster_count >= 4085;
     mFatVolume.eoc_cluster = mFatVolume.is_fat16 ? 0xfff8 : 0x0ff8;
+    mFatVolume.lba_offset = partition_start;
     mFatVolume.valid = 1;
     return 1;
+}
+
+static BOOLEAN fw_fat_read_512(UINT8 *buf, UINT32 lba)
+{
+    if (lba >= mFatVolume.total_sectors ||
+        lba > 0xffffffffU - mFatVolume.lba_offset) {
+        return 0;
+    }
+    return fw_read_512(buf, mFatVolume.lba_offset + lba);
+}
+
+static BOOLEAN fw_fat_read_512s(UINT8 *buf, UINT32 lba, UINT32 count)
+{
+    if (count == 0) {
+        return 1;
+    }
+    if (lba >= mFatVolume.total_sectors ||
+        count - 1U > mFatVolume.total_sectors - lba - 1U ||
+        lba > 0xffffffffU - mFatVolume.lba_offset ||
+        count - 1U > 0xffffffffU - mFatVolume.lba_offset - lba) {
+        return 0;
+    }
+    return fw_read_512s(buf, mFatVolume.lba_offset + lba, count);
 }
 
 static BOOLEAN fw_fat_is_data_cluster(UINT16 cluster)
@@ -18347,12 +18551,12 @@ static UINT16 fw_fat_next_cluster(UINT16 cluster)
         offset = cluster + (cluster >> 1);
         lba = mFatVolume.reserved_secs + (offset / 512);
         pos = offset & 511;
-        if (!fw_read_512(sec, lba)) {
+        if (!fw_fat_read_512(sec, lba)) {
             return 0xffff;
         }
         b0 = sec[pos];
         if (pos == 511) {
-            if (!fw_read_512(sec, lba + 1)) {
+            if (!fw_fat_read_512(sec, lba + 1)) {
                 return 0xffff;
             }
             b1 = sec[0];
@@ -18371,7 +18575,7 @@ static UINT16 fw_fat_next_cluster(UINT16 cluster)
     offset = cluster * 2;
     lba = mFatVolume.reserved_secs + (offset / 512);
 
-    if (!fw_read_512(sec, lba)) {
+    if (!fw_fat_read_512(sec, lba)) {
         return 0xffff;
     }
     return fw_le16(sec + (offset & 511));
@@ -18395,7 +18599,7 @@ static BOOLEAN fw_fat_find_in_dir(BOOLEAN root, UINT16 dir_cluster,
         root_lba = mFatVolume.root_dir_start;
         root_end = root_lba + mFatVolume.root_dir_sectors;
         for (; root_lba < root_end; root_lba++) {
-            if (!fw_read_512(sec, root_lba)) {
+            if (!fw_fat_read_512(sec, root_lba)) {
                 return 0;
             }
             for (off = 0; off + sizeof(FAT_DIR_ENTRY) <= 512; off += 32) {
@@ -18427,7 +18631,7 @@ static BOOLEAN fw_fat_find_in_dir(BOOLEAN root, UINT16 dir_cluster,
         for (s = 0; s < mFatVolume.sec_per_cluster; s++) {
             UINT32 lba = mFatVolume.data_start +
                          (cluster - 2) * mFatVolume.sec_per_cluster + s;
-            if (!fw_read_512(sec, lba)) {
+            if (!fw_fat_read_512(sec, lba)) {
                 return 0;
             }
             for (off = 0; off + sizeof(FAT_DIR_ENTRY) <= 512; off += 32) {
@@ -18535,7 +18739,7 @@ static EFI_STATUS fw_fat_read_file_entry(const FAT_DIR_ENTRY *entry,
                 sectors = mFatVolume.sec_per_cluster - s;
             }
             if (sectors > 0) {
-                if (!fw_read_512s(dst + done, lba, sectors)) {
+                if (!fw_fat_read_512s(dst + done, lba, sectors)) {
                     *ReadSize = done;
                     return EFI_DEVICE_ERROR;
                 }
@@ -18543,7 +18747,7 @@ static EFI_STATUS fw_fat_read_file_entry(const FAT_DIR_ENTRY *entry,
                 s += sectors - 1U;
                 continue;
             }
-            if (!fw_read_512(sec, lba)) {
+            if (!fw_fat_read_512(sec, lba)) {
                 *ReadSize = done;
                 return EFI_DEVICE_ERROR;
             }
@@ -20186,7 +20390,7 @@ static BOOLEAN fat_dir_read_raw_at(FW_FILE *file, UINT32 pos,
         off = cluster_pos & 511U;
     }
 
-    if (!fw_read_512(sec, lba)) {
+    if (!fw_fat_read_512(sec, lba)) {
         return 0;
     }
     fw_copy_mem(entry, sec + off, sizeof(*entry));
@@ -20309,7 +20513,7 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
                 }
             }
             if (sectors > 0) {
-                if (!fw_read_512s(dst + done, lba, sectors)) {
+                if (!fw_fat_read_512s(dst + done, lba, sectors)) {
                     *BufferSize = done;
                     return EFI_DEVICE_ERROR;
                 }
@@ -20317,7 +20521,7 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
                 cluster_off += sectors * 512;
                 continue;
             }
-            if (!fw_read_512(sec, lba)) {
+            if (!fw_fat_read_512(sec, lba)) {
                 *BufferSize = done;
                 return EFI_DEVICE_ERROR;
             }
@@ -20846,11 +21050,13 @@ static const UINT8 mDebugImageInfoTableGuid[16] = {
     0xb7, 0xa2, 0x7a, 0xfe, 0xfe, 0xd9, 0x5e, 0x8b
 };
 
-/* --- NVRAM Variable Store (in-memory) ------------------------------------- */
+/* --- NVRAM Variable Store ------------------------------------------------- */
 
-#define NVRAM_VAR_MAX 16
+#define NVRAM_STORE_MAGIC 0x524f545352415649ULL /* "IVARSTOR" */
+#define NVRAM_STORE_VERSION 1U
+#define NVRAM_VAR_MAX 32
 #define NVRAM_VAR_NAME_MAX 64
-#define NVRAM_VAR_DATA_MAX 256
+#define NVRAM_VAR_DATA_MAX 1024
 #define NVRAM_VAR_STORAGE_OVERHEAD (16U + sizeof(UINT32))
 #define NVRAM_VAR_SLOT_STORAGE \
     (NVRAM_VAR_NAME_MAX * sizeof(CHAR16) + NVRAM_VAR_DATA_MAX + \
@@ -20858,17 +21064,37 @@ static const UINT8 mDebugImageInfoTableGuid[16] = {
 
 typedef struct {
     UINT8  name[NVRAM_VAR_NAME_MAX * sizeof(CHAR16)];
-    UINTN  name_len;
+    UINT64 name_len;
     UINT8  guid[16];
     UINT8  data[NVRAM_VAR_DATA_MAX];
-    UINTN  data_size;
+    UINT64 data_size;
     UINT32 attributes;
     BOOLEAN valid;
     BOOLEAN deleted;
+    UINT8 reserved[2];
 } NVRAM_VARIABLE;
 
-static NVRAM_VARIABLE mNvramVars[NVRAM_VAR_MAX];
-static UINTN          mNvramVarCount;
+typedef struct {
+    UINT64 magic;
+    UINT32 version;
+    UINT32 count;
+    NVRAM_VARIABLE vars[NVRAM_VAR_MAX];
+} NVRAM_STORE;
+
+FW_STATIC_ASSERT(sizeof(NVRAM_VARIABLE) == 1192U,
+                 nvram_variable_format_size);
+FW_STATIC_ASSERT(__builtin_offsetof(NVRAM_STORE, vars) == 16U,
+                 nvram_store_header_size);
+FW_STATIC_ASSERT(sizeof(NVRAM_STORE) == 38160U,
+                 nvram_store_format_size);
+FW_STATIC_ASSERT(sizeof(NVRAM_STORE) <= FW_NVRAM_COMMIT_OFFSET,
+                 nvram_store_fits_mmio_window);
+
+static NVRAM_STORE *mNvramStore = (NVRAM_STORE *)(UINTN)FW_NVRAM_BASE;
+static BOOLEAN mNvramSelftestActive;
+
+#define mNvramVars (mNvramStore->vars)
+#define mNvramVarCount (mNvramStore->count)
 
 static const UINT8 mEfiGlobalVariableGuid[16] = {
     0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11,
@@ -20963,13 +21189,71 @@ static BOOLEAN rs_firmware_variable_enabled(const FW_FIRMWARE_VARIABLE *Var)
     return 1;
 }
 
+static void nvram_commit(void)
+{
+    /* The commit register is MMIO, so the store must not be optimized away. */
+    volatile UINT64 *commit;
+
+    if (mNvramSelftestActive) {
+        return;
+    }
+    /* This volatile cast targets the host-backed NVRAM MMIO register. */
+    commit = (volatile UINT64 *)(UINTN)(
+        (UINTN)mNvramStore + FW_NVRAM_COMMIT_OFFSET);
+    *commit = FW_NVRAM_COMMIT_MAGIC;
+}
+
+static BOOLEAN nvram_store_valid(void)
+{
+    UINTN i;
+
+    if (mNvramStore->magic != NVRAM_STORE_MAGIC ||
+        mNvramStore->version != NVRAM_STORE_VERSION ||
+        mNvramVarCount > NVRAM_VAR_MAX) {
+        return 0;
+    }
+    for (i = 0; i < mNvramVarCount; i++) {
+        NVRAM_VARIABLE *var = &mNvramVars[i];
+
+        if (var->valid > 1U || var->deleted > 1U) {
+            return 0;
+        }
+        if (!var->valid) {
+            continue;
+        }
+        if (var->name_len < 2 * sizeof(CHAR16) ||
+            var->name_len > sizeof(var->name) ||
+            (var->name_len & (sizeof(CHAR16) - 1U)) != 0 ||
+            var->name[var->name_len - 2U] != 0 ||
+            var->name[var->name_len - 1U] != 0 ||
+            var->data_size > sizeof(var->data) ||
+            (var->deleted && var->data_size != 0) ||
+            (var->attributes & ~EFI_VARIABLE_SUPPORTED_ATTRIBUTES) != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void nvram_init(void)
 {
     UINTN i;
-    mNvramVarCount = 0;
-    for (i = 0; i < NVRAM_VAR_MAX; i++) {
-        mNvramVars[i].valid = 0;
-        mNvramVars[i].deleted = 0;
+
+    mNvramSelftestActive = 0;
+    if (!nvram_store_valid()) {
+        fw_set_mem(mNvramStore, sizeof(*mNvramStore), 0);
+        mNvramStore->magic = NVRAM_STORE_MAGIC;
+        mNvramStore->version = NVRAM_STORE_VERSION;
+        return;
+    }
+
+    /* Variables without NON_VOLATILE do not survive a platform reset. */
+    for (i = 0; i < mNvramVarCount; i++) {
+        if (mNvramVars[i].valid &&
+            (mNvramVars[i].attributes & EFI_VARIABLE_NON_VOLATILE) == 0) {
+            mNvramVars[i].valid = 0;
+            mNvramVars[i].deleted = 0;
+        }
     }
 }
 
@@ -24007,6 +24291,7 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     UINTN runtime_acpi_pm1_cnt = mRuntimeAcpiPm1Cnt;
     UINTN runtime_ps2_command = mRuntimePs2Command;
     UINTN runtime_pci_config_ecam = mRuntimePciConfigEcam;
+    UINTN nvram_store = (UINTN)mNvramStore;
 
     st = rs_convert_required_uintn(&get_time);
     if (st != EFI_SUCCESS) {
@@ -24072,6 +24357,10 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     if (st != EFI_SUCCESS) {
         return st;
     }
+    st = rs_convert_required_uintn(&nvram_store);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
 
     mRuntimeServices.GetTime = get_time;
     mRuntimeServices.SetTime = set_time;
@@ -24090,6 +24379,7 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     mRuntimeAcpiPm1Cnt = runtime_acpi_pm1_cnt;
     mRuntimePs2Command = runtime_ps2_command;
     mRuntimePciConfigEcam = runtime_pci_config_ecam;
+    mNvramStore = (NVRAM_STORE *)nvram_store;
     return EFI_SUCCESS;
 }
 
@@ -24531,10 +24821,16 @@ EFI_STATUS rs_set_variable(CHAR16 *VariableName, void *VendorGuid,
             fw_copy_mem(mNvramVars[i].name, VariableName, name_size);
             mNvramVars[i].name_len = name_size;
             fw_copy_mem(mNvramVars[i].guid, VendorGuid, 16);
+            if ((existing_attributes & EFI_VARIABLE_NON_VOLATILE) != 0) {
+                nvram_commit();
+            }
             return EFI_SUCCESS;
         }
         mNvramVars[i].valid = 0;
         mNvramVars[i].deleted = 0;
+        if ((existing_attributes & EFI_VARIABLE_NON_VOLATILE) != 0) {
+            nvram_commit();
+        }
         return EFI_SUCCESS;
     }
 
@@ -24572,6 +24868,9 @@ EFI_STATUS rs_set_variable(CHAR16 *VariableName, void *VendorGuid,
     src = (UINT8 *)Data;
     for (n = 0; n < DataSize; n++) {
         mNvramVars[i].data[n] = src[n];
+    }
+    if ((Attributes & EFI_VARIABLE_NON_VOLATILE) != 0) {
+        nvram_commit();
     }
     return EFI_SUCCESS;
 }
@@ -24719,6 +25018,8 @@ static BOOLEAN __attribute__((noinline)) runtime_variable_selftest(void)
     UINT8 data1[2] = { 0x12, 0x34 };
     UINT8 data2[2] = { 0x56, 0x78 };
     UINT8 out[2] = { 0, 0 };
+    UINT8 large[512];
+    UINTN n;
     UINTN size;
     UINT32 attrs;
     UINT64 max_storage;
@@ -24733,6 +25034,10 @@ static BOOLEAN __attribute__((noinline)) runtime_variable_selftest(void)
                       EFI_VARIABLE_RUNTIME_ACCESS;
 
     fw_copy_mem(saved, mNvramVars, sizeof(saved));
+    mNvramSelftestActive = 1;
+    for (n = 0; n < sizeof(large); n++) {
+        large[n] = (UINT8)(n ^ 0xa5U);
+    }
 
     st = rs_query_variable_info(rw_attrs, &max_storage, &remaining_storage,
                                 &max_variable);
@@ -24861,6 +25166,28 @@ static BOOLEAN __attribute__((noinline)) runtime_variable_selftest(void)
         ok = 0;
     }
 
+    st = rs_set_variable(name, (void *)test_guid, rw_attrs,
+                         sizeof(large), large);
+    if (st != EFI_SUCCESS) {
+        ok = 0;
+    }
+    fw_set_mem(large, sizeof(large), 0);
+    size = sizeof(large);
+    st = rs_get_variable(name, (void *)test_guid, &attrs, &size, large);
+    if (st != EFI_SUCCESS || size != sizeof(large)) {
+        ok = 0;
+    }
+    for (n = 0; n < sizeof(large); n++) {
+        if (large[n] != (UINT8)(n ^ 0xa5U)) {
+            ok = 0;
+            break;
+        }
+    }
+    st = rs_set_variable(name, (void *)test_guid, 0, 0, NULL);
+    if (st != EFI_SUCCESS) {
+        ok = 0;
+    }
+
     st = rs_set_variable(boot_order, (void *)mEfiGlobalVariableGuid,
                          EFI_VARIABLE_BOOTSERVICE_ACCESS,
                          sizeof(data2), data2);
@@ -24897,6 +25224,7 @@ static BOOLEAN __attribute__((noinline)) runtime_variable_selftest(void)
 
     fw_copy_mem(mNvramVars, saved, sizeof(saved));
     mNvramVarCount = saved_count;
+    mNvramSelftestActive = 0;
     return ok;
 }
 
@@ -25095,7 +25423,8 @@ static EFI_STATUS boot_image_from_boot_option(UINT16 OptionNumber)
     return boot_image_from_load_option(OptionNumber, option, option_size);
 }
 
-static EFI_STATUS boot_image_from_boot_order(void)
+/* Keep address-taken buffers in a bounded IA-64 register-stack frame. */
+static EFI_STATUS __attribute__((noinline)) boot_image_from_boot_order(void)
 {
     static CHAR16 boot_order_name[] = {
         'B', 'o', 'o', 't', 'O', 'r', 'd', 'e', 'r', 0

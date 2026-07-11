@@ -12,6 +12,7 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qemu/cutils.h"
+#include "qemu/datadir.h"
 #include "qemu/error-report.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
@@ -44,6 +45,10 @@
 #define IA64_HIGH_RAM_BASE 0x0000000080200000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
+#define IA64_NVRAM_BASE 0x00000000fff00000ULL
+#define IA64_NVRAM_SIZE (64 * KiB)
+#define IA64_NVRAM_COMMIT_OFFSET (IA64_NVRAM_SIZE - 8)
+#define IA64_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE \
     (IA64_FIRMWARE_ADDRESS_SPACE_BASE + IA64_FIRMWARE_ADDRESS_SPACE_SIZE)
 #define IA64_FW_BOOTSTRAP_STACK_TOP (128 * MiB)
@@ -88,6 +93,11 @@ static MemoryRegion *ia64_vpc_vga_legacy_alias;
 static Object *ia64_vpc_pci_fixup_reset;
 static MemoryRegion *ia64_vpc_lsapic_mmio;
 static MemoryRegion ia64_vpc_firmware_space;
+static MemoryRegion ia64_vpc_nvram_mmio;
+static uint8_t ia64_vpc_nvram_data[IA64_NVRAM_SIZE];
+static char *ia64_vpc_nvram_path;
+static char *ia64_vpc_nvram_resolved_path;
+static bool ia64_vpc_nvram_write_warning;
 static MemoryRegion ia64_vpc_acpi_pm;
 static ACPIREGS ia64_vpc_acpi_regs;
 static qemu_irq ia64_vpc_acpi_sci_irq;
@@ -96,6 +106,139 @@ static qemu_irq ia64_vpc_isa_irqs[ISA_NUM_IRQS];
 static bool ia64_vpc_i8042_enabled = true;
 static bool ia64_vpc_firmware_ide_dma = true;
 static uint64_t ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
+
+static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
+{
+    (void)obj;
+    (void)errp;
+
+    return g_strdup(ia64_vpc_nvram_path ?: "auto");
+}
+
+static void ia64_vpc_set_nvram(Object *obj, const char *value, Error **errp)
+{
+    (void)obj;
+    (void)errp;
+
+    g_free(ia64_vpc_nvram_path);
+    ia64_vpc_nvram_path = g_strcmp0(value, "auto") == 0 ?
+                           NULL : g_strdup(value);
+}
+
+static uint64_t ia64_vpc_nvram_read(void *opaque, hwaddr addr,
+                                    unsigned size)
+{
+    uint64_t value = 0;
+    unsigned i;
+
+    (void)opaque;
+    for (i = 0; i < size; i++) {
+        value |= (uint64_t)ia64_vpc_nvram_data[addr + i] << (i * 8);
+    }
+    return value;
+}
+
+static void ia64_vpc_nvram_commit(void)
+{
+    g_autoptr(GError) err = NULL;
+
+    if (!ia64_vpc_nvram_resolved_path) {
+        return;
+    }
+    if (!g_file_set_contents(ia64_vpc_nvram_resolved_path,
+                             (const char *)ia64_vpc_nvram_data,
+                             sizeof(ia64_vpc_nvram_data), &err) &&
+        !ia64_vpc_nvram_write_warning) {
+        warn_report("failed to save IA-64 NVRAM '%s': %s",
+                    ia64_vpc_nvram_resolved_path,
+                    err ? err->message : "unknown error");
+        ia64_vpc_nvram_write_warning = true;
+    }
+}
+
+static void ia64_vpc_nvram_write(void *opaque, hwaddr addr,
+                                 uint64_t value, unsigned size)
+{
+    unsigned i;
+
+    (void)opaque;
+    if (addr == IA64_NVRAM_COMMIT_OFFSET && size == 8 &&
+        value == IA64_NVRAM_COMMIT_MAGIC) {
+        ia64_vpc_nvram_commit();
+        return;
+    }
+    for (i = 0; i < size; i++) {
+        ia64_vpc_nvram_data[addr + i] = value >> (i * 8);
+    }
+}
+
+static const MemoryRegionOps ia64_vpc_nvram_ops = {
+    .read = ia64_vpc_nvram_read,
+    .write = ia64_vpc_nvram_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
+    },
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
+    },
+};
+
+static void ia64_vpc_init_nvram(MachineState *machine)
+{
+    g_autofree char *firmware_path = NULL;
+    g_autofree char *directory = NULL;
+    g_autofree char *contents = NULL;
+    g_autoptr(GError) err = NULL;
+    gsize length = 0;
+
+    memset(ia64_vpc_nvram_data, 0, sizeof(ia64_vpc_nvram_data));
+    g_clear_pointer(&ia64_vpc_nvram_resolved_path, g_free);
+    ia64_vpc_nvram_write_warning = false;
+
+    if (g_strcmp0(ia64_vpc_nvram_path, "none") != 0) {
+        if (ia64_vpc_nvram_path) {
+            ia64_vpc_nvram_resolved_path =
+                g_strdup(ia64_vpc_nvram_path);
+        } else if (machine->firmware) {
+            firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS,
+                                           machine->firmware);
+            if (!firmware_path) {
+                firmware_path = g_strdup(machine->firmware);
+            }
+            directory = g_path_get_dirname(firmware_path);
+            ia64_vpc_nvram_resolved_path =
+                g_build_filename(directory, "nvram", NULL);
+        }
+    }
+
+    if (ia64_vpc_nvram_resolved_path &&
+        g_file_get_contents(ia64_vpc_nvram_resolved_path, &contents,
+                            &length, &err)) {
+        if (length == sizeof(ia64_vpc_nvram_data)) {
+            memcpy(ia64_vpc_nvram_data, contents, length);
+        } else {
+            warn_report("ignoring IA-64 NVRAM '%s': expected %zu bytes, "
+                        "found %zu",
+                        ia64_vpc_nvram_resolved_path,
+                        sizeof(ia64_vpc_nvram_data), (size_t)length);
+        }
+    } else if (err && !g_error_matches(err, G_FILE_ERROR,
+                                       G_FILE_ERROR_NOENT)) {
+        warn_report("failed to load IA-64 NVRAM '%s': %s",
+                    ia64_vpc_nvram_resolved_path, err->message);
+    }
+
+    memory_region_init_io(&ia64_vpc_nvram_mmio, OBJECT(machine),
+                          &ia64_vpc_nvram_ops, NULL, "ia64-vpc.nvram",
+                          IA64_NVRAM_SIZE);
+    memory_region_add_subregion_overlap(get_system_memory(), IA64_NVRAM_BASE,
+                                        &ia64_vpc_nvram_mmio, 2);
+}
 
 static GlobalProperty ia64_vpc_compat_defaults[] = {
     /*
@@ -813,6 +956,7 @@ static void ia64_vpc_init(MachineState *machine)
 
     ia64_vpc_map_ram(machine);
     ia64_vpc_map_firmware_address_space();
+    ia64_vpc_init_nvram(machine);
     ia64_vpc_write_firmware_handoff(machine);
 
     cpu_create(machine->cpu_type);
@@ -953,6 +1097,11 @@ static void ia64_vpc_machine_init(MachineClass *mc)
                                   ia64_vpc_set_firmware_console);
     object_class_property_set_description(oc, "firmware-console",
         "Set firmware HCDP primary console to 'serial' or 'vga'");
+    object_class_property_add_str(oc, "nvram",
+                                  ia64_vpc_get_nvram,
+                                  ia64_vpc_set_nvram);
+    object_class_property_set_description(oc, "nvram",
+        "Set the IA-64 EFI NVRAM file path, 'auto', or 'none'");
 }
 
 DEFINE_MACHINE("ia64-vpc", ia64_vpc_machine_init)

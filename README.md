@@ -43,6 +43,13 @@ The firmware build requires an IA-64 ELF cross toolchain named
 Use `-serial stdio` to see the serial output. `-debug-port ...` can publish a debug port that Microsoft Windows kernels may use, as standardized in ACPI standard as `DBGP`.
 To disable i8042, append `i8042=off` to the `-machine ia64-vpc` option, like `-machine ia64-vpc,i8042=off`. You can use `firmware-console=serial`, which might route the kernel's standard output to the serial.
 
+EFI variables are persistent. By default, `ia64-vpc` loads and saves a 64 KiB
+file named `nvram` in the directory containing the firmware selected by
+`-bios`. Use a separate file for each virtual machine by specifying
+`-machine ia64-vpc,nvram=<path>`. Specify `nvram=none` to use volatile EFI
+variables without a backing file. Relative paths are resolved from QEMU's
+current working directory.
+
 <img width="639" height="461" alt="Gentoo linux is booting on qemu-system-ia64" src="https://github.com/user-attachments/assets/d16ad66d-ffdb-4e27-8e3d-a056498e4ed7" />
 
 

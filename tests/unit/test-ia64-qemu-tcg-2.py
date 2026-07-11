@@ -14216,6 +14216,57 @@ test_tpa_uses_short_vhpt_walk = require_registers(
         "r30": 5,
     }, entry=0x10)
 
+test_short_vhpt_walker_rejects_pending_table_purge = require_registers(
+    "short_vhpt_walker_rejects_pending_table_purge", [
+        (0x200, *movl_mlx(16, 0x1ffc0000000000c9)),
+        (0x210, *movl_mlx(17, 0xa000000000000000)),
+        (0x220, *movl_mlx(18, 0x539)),
+        (0x230, *movl_mlx(19, 0xbffc000000000000)),
+        (0x240, *movl_mlx(20, 0x0010000004009661)),
+        (0x250, *movl_mlx(21, 0x0010000004000661)),
+        (0x260, *movl_mlx(22, 0x4008000)),
+        (0x270, 0x00, st8(22, 21), nop_i(),
+         nop_i()),
+        (0x280, *movl_mlx(23, 0x4000430)),
+        (0x290, *movl_mlx(24, 0x1122334455667788)),
+        (0x2a0, 0x00, st8(23, 24), nop_i(),
+         nop_i()),
+        (0x2b0, 0x00, mov_m_gr_cr(16, 8), adds(7, 0x38, 0),
+         nop_i()),
+        (0x2c0, 0x00, mov_rr_write(18, 17), nop_i(),
+         nop_i()),
+        (0x2d0, 0x00, mov_m_gr_cr(19, 20), nop_i(),
+         nop_i()),
+        (0x2e0, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x2f0, 0x00, itc_d(20), nop_i(),
+         nop_i()),
+        (0x300, *movl_mlx(2, 0xa000000000000430)),
+        (0x310, 0x00, ssm((1 << 13) | (1 << 17)), nop_i(),
+         nop_i()),
+        (0x320, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x330, 0x00, ptr_d(19, 7), nop_i(),
+         nop_i()),
+        (0x340, 0x00, ld8(29, 2), nop_i(),
+         nop_i()),
+        (0x350, 0x10, nop_m(), adds(28, 0x66, 0),
+         br_cond(0x350, 0x350)),
+        (0x000, 0x00, mov_m_cr_gr(30, 20), nop_i(),
+         nop_i()),
+        (0x010, 0x00, mov_m_cr_gr(31, 25),
+         nop_i(), nop_i()),
+        (0x020, 0x10, nop_m(), nop_i(),
+         br_cond(0x020, 0x020)),
+    ], {
+        "ip": 0x020,
+        "exception": IA64_EXCP_NONE,
+        "r28": 0,
+        "r29": 0,
+        "r30": 0xa000000000000430,
+        "r31": 0xbffc000000000000,
+    }, entry=0x200)
+
 test_short_vhpt_walk_uses_dcr_byte_order = require_registers(
     "short_vhpt_walk_uses_dcr_byte_order", [
         (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
@@ -15829,6 +15880,49 @@ test_ptr_d_purge_invalidates_advanced_load = require_registers(
         "ip": IA64_ALT_DTLB_VECTOR,
         "exception": IA64_EXCP_NONE,
         "r29": 0x73,
+    }, entry=0x10)
+
+test_interruption_serializes_pending_ptr_d = require_registers(
+    "interruption_serializes_pending_ptr_d", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(20, HIGH_TR_BASE)),
+        (0x30, 0x00, adds(7, 0x68, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(20, 20), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itr_d(5, 18), nop_i(),
+         nop_i()),
+        (0x70, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x80, *movl_mlx(2, HIGH_TR_BASE + 0x9000)),
+        (0x90, *movl_mlx(3, HIGH_TR_BASE)),
+        (0xa0, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0xb0, 0x00, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0xc0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xd0, 0x00, ld8(31, 2), nop_i(),
+         nop_i()),
+        (0xe0, 0x00, ptr_d(3, 7), nop_i(),
+         nop_i()),
+        (0xf0, 0x00, break_m(0x42), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR, 0x00, ld8(30, 2), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x10, 0x10, nop_m(), adds(29, 0x74, 0),
+         br_cond(IA64_BREAK_VECTOR + 0x10,
+                 IA64_BREAK_VECTOR + 0x10)),
+        (IA64_DATA_NESTED_TLB_VECTOR, 0x10, nop_m(), adds(29, 0x75, 0),
+         br_cond(IA64_DATA_NESTED_TLB_VECTOR,
+                 IA64_DATA_NESTED_TLB_VECTOR)),
+        ITC_DATA_BUNDLE,
+    ], {
+        "ip": IA64_DATA_NESTED_TLB_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x75,
+        "r31": ITC_DATA_LOW,
     }, entry=0x10)
 
 test_mov_pkr_indexed_decode = require_registers("mov_pkr_indexed_decode", [
@@ -19793,6 +19887,8 @@ TEST_NAMES = {
     "tpa_dt_disabled_miss_raises_alt_dtlb":
         test_tpa_dt_disabled_miss_raises_alt_dtlb,
     "tpa_uses_short_vhpt_walk": test_tpa_uses_short_vhpt_walk,
+    "short_vhpt_walker_rejects_pending_table_purge":
+        test_short_vhpt_walker_rejects_pending_table_purge,
     "short_vhpt_walk_uses_dcr_byte_order":
         test_short_vhpt_walk_uses_dcr_byte_order,
     "short_vhpt_reserved_pte_aborts_to_dtlb_miss":
@@ -19894,6 +19990,8 @@ TEST_NAMES = {
     "ptr_d_purge_completes_on_srlz_d": test_ptr_d_purge_completes_on_srlz_d,
     "ptr_d_purge_invalidates_advanced_load":
         test_ptr_d_purge_invalidates_advanced_load,
+    "interruption_serializes_pending_ptr_d":
+        test_interruption_serializes_pending_ptr_d,
     "region7_untranslated_data_faults": test_region7_untranslated_data_faults,
     "region7_untranslated_user_data_faults":
         test_region7_untranslated_user_data_faults,

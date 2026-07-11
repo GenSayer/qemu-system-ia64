@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
+import zlib
 
 
 SECTOR_SIZE = 512
@@ -21,6 +23,7 @@ ROOT_ENTRIES = 512
 ROOT_SECTORS = ROOT_ENTRIES * 32 // SECTOR_SIZE
 DATA_START = 1 + FAT_SECTORS + ROOT_SECTORS
 TEST_BLOCKS = 256
+GPT_ESP_START = 63
 SUCCESS_SIGNATURE = "IA64 STORAGE IO: read/write verified"
 FAILURE_SIGNATURE = "IA64 STORAGE IO: failed"
 
@@ -103,7 +106,7 @@ def directory_entry(name, attributes, cluster, size=0):
     return entry
 
 
-def make_storage_disk(path, efi_path):
+def make_storage_disk(path, efi_path, gpt=False):
     with open(efi_path, "rb") as f:
         efi_image = f.read()
 
@@ -160,10 +163,66 @@ def make_storage_disk(path, efi_path):
     file_start = (DATA_START + first_file_cluster - 2) * SECTOR_SIZE
     image[file_start:file_start + len(efi_image)] = efi_image
 
-    test_start = (DISK_SECTORS - TEST_BLOCKS) * SECTOR_SIZE
+    if gpt:
+        total_sectors = GPT_ESP_START + DISK_SECTORS + 33
+        raw = bytearray(total_sectors * SECTOR_SIZE)
+        raw[446 + 4] = 0xEE
+        struct.pack_into("<I", raw, 446 + 8, 1)
+        struct.pack_into("<I", raw, 446 + 12, total_sectors - 1)
+        raw[510:512] = b"\x55\xaa"
+
+        entries = bytearray(128 * 128)
+        entries[0:16] = uuid.UUID(
+            "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+        ).bytes_le
+        entries[16:32] = uuid.UUID(
+            "12345678-9abc-def0-1234-56789abcdef0"
+        ).bytes_le
+        struct.pack_into(
+            "<QQ", entries, 32,
+            GPT_ESP_START, GPT_ESP_START + DISK_SECTORS - 1,
+        )
+        name = "EFI system partition".encode("utf-16le")
+        entries[56:56 + len(name)] = name
+        entries_crc = zlib.crc32(entries) & 0xFFFFFFFF
+
+        def make_gpt_header(current, backup, entries_lba):
+            header = bytearray(SECTOR_SIZE)
+            header[0:8] = b"EFI PART"
+            struct.pack_into("<I", header, 8, 0x00010000)
+            struct.pack_into("<I", header, 12, 92)
+            struct.pack_into("<QQQQ", header, 24, current, backup,
+                             34, total_sectors - 34)
+            header[56:72] = uuid.UUID(
+                "0fedcba9-8765-4321-fedc-ba9876543210"
+            ).bytes_le
+            struct.pack_into("<QIII", header, 72, entries_lba,
+                             128, 128, entries_crc)
+            struct.pack_into(
+                "<I", header, 16,
+                zlib.crc32(header[:92]) & 0xFFFFFFFF,
+            )
+            return header
+
+        backup_entries_lba = total_sectors - 33
+        raw[2 * SECTOR_SIZE:34 * SECTOR_SIZE] = entries
+        raw[backup_entries_lba * SECTOR_SIZE:
+            (backup_entries_lba + 32) * SECTOR_SIZE] = entries
+        raw[SECTOR_SIZE:2 * SECTOR_SIZE] = make_gpt_header(
+            1, total_sectors - 1, 2
+        )
+        raw[(total_sectors - 1) * SECTOR_SIZE:] = make_gpt_header(
+            total_sectors - 1, 1, backup_entries_lba
+        )
+        raw[GPT_ESP_START * SECTOR_SIZE:
+            (GPT_ESP_START + DISK_SECTORS) * SECTOR_SIZE] = image
+        image = raw
+
+    test_start = len(image) - TEST_BLOCKS * SECTOR_SIZE
     test_size = TEST_BLOCKS * SECTOR_SIZE
-    for index in range(test_size):
-        image[test_start + index] = (index * 19 + 0x31) & 0xff
+    if not gpt:
+        for index in range(test_size):
+            image[test_start + index] = (index * 19 + 0x31) & 0xff
     original_test_region = bytes(image[test_start:test_start + test_size])
 
     with open(path, "wb") as f:
@@ -233,7 +292,7 @@ def run_qemu(qemu, firmware, disk, machine, interface, trace_ide_dma):
 
 def check_restored_region(disk, expected):
     with open(disk, "rb") as f:
-        f.seek((DISK_SECTORS - TEST_BLOCKS) * SECTOR_SIZE)
+        f.seek(-len(expected), os.SEEK_END)
         actual = f.read(len(expected))
     return actual == expected
 
@@ -248,7 +307,7 @@ def main():
 
     source_root, qemu, firmware = sys.argv[1:]
     print("TAP version 13")
-    print("1..3")
+    print("1..4")
 
     for path in [qemu, firmware]:
         if not os.path.exists(path):
@@ -266,6 +325,7 @@ def main():
                 "(ATA DMA-capable, primary IDE)",
             ],
             "dma",
+            False,
         ),
         (
             "IDE PIO read/write",
@@ -276,6 +336,7 @@ def main():
                 "Block I/O Protocol:   installed (ATA PIO, primary IDE)",
             ],
             "pio",
+            False,
         ),
         (
             "LSI SCSI read/write",
@@ -286,6 +347,18 @@ def main():
                 "Block I/O Protocol:   installed (SCSI disk, LSI53C895A)",
             ],
             None,
+            False,
+        ),
+        (
+            "GPT EFI system partition",
+            "ia64-vpc",
+            "scsi",
+            [
+                "SCSI device:          target 0000000000000000 disk media",
+                "Block I/O Protocol:   installed (SCSI disk, LSI53C895A)",
+            ],
+            None,
+            True,
         ),
     ]
 
@@ -300,9 +373,9 @@ def main():
 
         status = 0
         for index, scenario in enumerate(scenarios, 1):
-            name, machine, interface, signatures, ide_mode = scenario
+            name, machine, interface, signatures, ide_mode, gpt = scenario
             disk = os.path.join(tmpdir, f"storage-{index}.img")
-            expected_region = make_storage_disk(disk, efi_app)
+            expected_region = make_storage_disk(disk, efi_app, gpt=gpt)
             returncode, output = run_qemu(
                 qemu, firmware, disk, machine, interface,
                 trace_ide_dma=ide_mode is not None,

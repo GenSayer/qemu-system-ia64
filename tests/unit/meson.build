@@ -283,6 +283,17 @@ if 'ia64-softmmu' in target_dirs
        timeout: 20,
        suite: ['unit', 'ia64'])
 
+  test('test-ia64-nvram',
+       python,
+       depends: emulators['qemu-system-ia64'],
+       args: [
+         files('test-ia64-nvram.py'),
+         meson.project_build_root() / 'qemu-system-ia64',
+       ],
+       protocol: 'tap',
+       timeout: 20,
+       suite: ['unit', 'ia64'])
+
   test('test-ia64-fw-uefi-services',
        python,
        depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
