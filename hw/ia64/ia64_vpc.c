@@ -1077,7 +1077,7 @@ static void ia64_vpc_machine_init(MachineClass *mc)
     mc->no_serial = 0;
     mc->no_parallel = 1;
     mc->no_floppy = 1;
-    mc->no_cdrom = 0;
+    mc->no_cdrom = 1;
 
     compat_props_add(mc->compat_props, ia64_vpc_compat_defaults,
                      G_N_ELEMENTS(ia64_vpc_compat_defaults));

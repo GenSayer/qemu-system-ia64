@@ -103,6 +103,8 @@ def main():
     unexpected = []
     if re.search(r"IDE controller: PCI device", proc.stdout):
         unexpected.append("default IDE controller")
+    if re.search(r"dev: scsi-cd,", proc.stdout):
+        unexpected.append("default empty SCSI CD-ROM")
 
     explicit = run_inventory(
         qemu, ("-device", "cmd646-ide,secondary=1,addr=0")
