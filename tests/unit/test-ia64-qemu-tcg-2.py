@@ -37,6 +37,7 @@ IA64_ISR_X = 1 << 32
 IA64_ISR_W = 1 << 33
 IA64_ISR_R = 1 << 34
 IA64_ISR_NA = 1 << 35
+IA64_ISR_CODE_REG_NAT = 0x10
 IA64_ISR_SP = 1 << 36
 IA64_ISR_RS = 1 << 37
 IA64_ISR_IR = 1 << 38
@@ -790,6 +791,28 @@ def ldf8(f1, r3, hint=0, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def ldfs(f1, r3, hint=0, qp=0):
+    return (
+        op(6)
+        | bitfield(0x02, 30, 6)
+        | bitfield(hint, 28, 2)
+        | bitfield(r3, 20, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def ldfps(f1, f2, r3, hint=0, qp=0):
+    return (
+        op(6)
+        | bitfield(0x02, 30, 6)
+        | bitfield(hint, 28, 2)
+        | bitfield(1, 27, 1)
+        | bitfield(r3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
 def ldfe(f1, r3, hint=0, qp=0):
     return (
         op(6)
@@ -1440,10 +1463,37 @@ def stf8_postinc(r3, r2, imm, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def stf8(r3, f2, qp=0):
+    return (
+        op(6)
+        | bitfield(0x31, 30, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(qp, 0, 6)
+    )
+
 def stfe(r3, f2, qp=0):
     return (
         op(6)
         | bitfield(0x30, 30, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def stfs(r3, f2, qp=0):
+    return (
+        op(6)
+        | bitfield(0x32, 30, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def stfd(r3, f2, qp=0):
+    return (
+        op(6)
+        | bitfield(0x33, 30, 6)
         | bitfield(r3, 20, 7)
         | bitfield(f2, 13, 7)
         | bitfield(qp, 0, 6)
@@ -1548,6 +1598,26 @@ def probe_w_imm(r1, r3, imm2, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def probe_r_reg(r1, r3, r2, qp=0):
+    return (
+        op(1)
+        | bitfield(0x38, 27, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(r2, 13, 7)
+        | bitfield(r1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def probe_w_reg(r1, r3, r2, qp=0):
+    return (
+        op(1)
+        | bitfield(0x39, 27, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(r2, 13, 7)
+        | bitfield(r1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
 def fnorm(f1, f2, f3, qp=0):
     return (
         op(8)
@@ -1557,6 +1627,10 @@ def fnorm(f1, f2, f3, qp=0):
         | bitfield(f1, 6, 7)
         | bitfield(qp, 0, 6)
     )
+
+def fmov(f1, f2, qp=0):
+    # The assembler alias `mov f1=f2` is fmerge.s f1=f2,f2.
+    return fmerge_s(f1, f2, f2, qp)
 
 def fpabs(f1, f3, qp=0):
     return (
@@ -1909,6 +1983,9 @@ def fma_s1(f1, f3, f4, f2, qp=0):
 
 def fma_s0(f1, f3, f4, f2, qp=0):
     return fmpy_s0(f1, f3, f4, qp) | bitfield(f2, 13, 7)
+
+def fma_s_s0(f1, f3, f4, f2, qp=0):
+    return fma_s0(f1, f3, f4, f2, qp) | bitfield(1, 36, 1)
 
 def fma_d_s0(f1, f3, f4, f2, qp=0):
     return (
@@ -7809,7 +7886,8 @@ test_fetchadd4_nat_base_sets_read_write_isr = require_registers(
         "ip": 0x5620,
         "exception": IA64_EXCP_NONE,
         "r14": 0,
-        "r15": IA64_ISR_NA | IA64_ISR_R | IA64_ISR_W,
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_NA |
+               IA64_ISR_R | IA64_ISR_W,
     }, entry=0x10)
 
 NORMAL_LOAD_DATA = bundle_words(0x00, 0xdead, 0, 0)[0]
@@ -7958,7 +8036,8 @@ test_nat_consumption_sets_ifa_isr = require_registers(
         (0x200, 0x00, 0, 0,
          0),
     ], {"ip": 0x5620, "exception": IA64_EXCP_NONE, "r14": 0,
-        "r15": IA64_ISR_NA | IA64_ISR_R}, entry=0x10)
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_NA | IA64_ISR_R},
+    entry=0x10)
 
 test_nat_store_data_consumption_is_access = require_registers(
     "nat_store_data_consumption_is_access", [
@@ -7981,7 +8060,7 @@ test_nat_store_data_consumption_is_access = require_registers(
         (0x200, 0x00, 0, 0,
          0),
     ], {"ip": 0x5620, "exception": IA64_EXCP_NONE, "r14": 0,
-        "r15": IA64_ISR_W}, entry=0x10)
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_W}, entry=0x10)
 
 test_speculative_load_defers_nat_base = require_registers(
     "speculative_load_defers_nat_base", [
@@ -8758,6 +8837,154 @@ test_ldf8_loads_integer_register_format = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+test_ldfs_expands_single_memory_format = require_registers(
+    "ldfs_expands_single_memory_format", [
+        (0x10, *movl_mlx(2, 0x3f4ccccd)),
+        (0x20, 0x00, addl(3, 0x200, 0), nop_i(), nop_i()),
+        (0x30, 0x00, st4(3, 2), nop_i(), nop_i()),
+        (0x40, 0x00, ldfs(6, 3), nop_i(), nop_i()),
+        (0x50, 0x09, getf_s(4, 6), getf_d(5, 6), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "r4": 0x3f4ccccd,
+        "r5": 0x3fe99999a0000000,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_ldfs_preserves_single_nan_payload = require_registers(
+    "ldfs_preserves_single_nan_payload", [
+        (0x10, *movl_mlx(2, 0x7f812345)),
+        (0x20, 0x00, addl(3, 0x200, 0), nop_i(), nop_i()),
+        (0x30, 0x00, st4(3, 2), nop_i(), nop_i()),
+        (0x40, 0x00, ldfs(6, 3), nop_i(), nop_i()),
+        (0x50, 0x10, getf_s(4, 6), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "r4": 0x7f812345,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_ldfps_expands_both_single_values = require_registers(
+    "ldfps_expands_both_single_values", [
+        (0x10, *movl_mlx(2, 0xc02000003f800000)),
+        (0x20, 0x00, addl(3, 0x200, 0), nop_i(), nop_i()),
+        (0x30, 0x00, st8(3, 2), nop_i(), nop_i()),
+        (0x40, 0x00, ldfps(6, 7, 3), nop_i(), nop_i()),
+        (0x50, 0x09, getf_s(4, 6), getf_s(5, 7), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "r4": 0x3f800000,
+        "r5": 0xc0200000,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_stfs_stfd_convert_register_format = require_registers(
+    "stfs_stfd_convert_register_format", [
+        (0x10, *movl_mlx(2, 0x3ff8000000000000)),
+        (0x20, *movl_mlx(5, 0xffffffffffffffff)),
+        (0x30, 0x00, addl(3, 0x200, 0), addl(8, 0x208, 0), nop_i()),
+        (0x40, 0x09, setf_d(6, 2), setf_sig(7, 5), nop_i()),
+        (0x50, 0x00, stfs(3, 6), nop_i(), nop_i()),
+        (0x60, 0x00, stfd(8, 7), nop_i(), nop_i()),
+        (0x70, 0x09, ld4(4, 3), ld8(9, 8), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "r4": 0x3fc00000,
+        "r9": 0x43efffffffffffff,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_getf_exact_register_format_translation = require_registers(
+    "getf_exact_register_format_translation", [
+        (0x10, *movl_mlx(2, 0xffffffffffffffff)),
+        (0x20, 0x00, setf_sig(6, 2), nop_i(), nop_i()),
+        (0x30, 0x09, getf_s(4, 6), getf_d(5, 6), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "r4": 0x5f7fffff,
+        "r5": 0x43efffffffffffff,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_stf8_stfe_convert_register_format = require_registers(
+    "stf8_stfe_convert_register_format", [
+        (0x10, *movl_mlx(2, 0x3ff0000000000000)),
+        (0x20, *movl_mlx(5, 1)),
+        (0x30, 0x00, addl(3, 0x200, 0), addl(4, 0x210, 0),
+         addl(10, 0x218, 0)),
+        (0x40, 0x09, setf_d(6, 2), setf_sig(7, 5), nop_i()),
+        (0x50, 0x00, stf8(3, 6), nop_i(), nop_i()),
+        (0x60, 0x00, stfe(4, 7), nop_i(), nop_i()),
+        (0x70, 0x09, ld8(8, 3), ld8(9, 4), nop_i()),
+        (0x80, 0x00, ld2(11, 10), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "r8": 0x8000000000000000,
+        "r9": 1,
+        "r11": 0x403e,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+
+def fp_store_natval_consumption_test(name, store):
+    return require_registers(name, [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(3, 6, 0), addl(4, 0x300, 0),
+         nop_i()),
+        (0x30, 0x00, ldf8_s(7, 3), nop_i(), nop_i()),
+        (0x40, 0x00, ssm(1 << 13), nop_i(), nop_i()),
+        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x60, 0x00, store(4, 7), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x00,
+         mov_m_cr_gr(14, 19), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(15, 17), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+                 IA64_NAT_CONSUMPTION_VECTOR + 0x20)),
+        (0x200, 0x00, 0, 0, 0),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r14": 0x60,
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_W,
+    }, entry=0x10)
+
+
+test_stfs_natval_consumption = fp_store_natval_consumption_test(
+    "stfs_natval_consumption", stfs)
+test_stfd_natval_consumption = fp_store_natval_consumption_test(
+    "stfd_natval_consumption", stfd)
+test_stf8_natval_consumption = fp_store_natval_consumption_test(
+    "stf8_natval_consumption", stf8)
+test_stfe_natval_consumption = fp_store_natval_consumption_test(
+    "stfe_natval_consumption", stfe)
+
+test_stf_spill_preserves_natval = require_registers(
+    "stf_spill_preserves_natval", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(3, 6, 0), addl(4, 0x300, 0),
+         nop_i()),
+        (0x30, 0x00, ldf8_s(7, 3), addl(5, 0x308, 0), nop_i()),
+        (0x40, 0x00, stf_spill_postinc(4, 7, 0), nop_i(), nop_i()),
+        (0x50, 0x09, ld8(8, 4), ld8(9, 5), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        (0x200, 0x00, 0, 0, 0),
+    ], {
+        "ip": 0x60,
+        "r8": 0,
+        "r9": 0x1fffe,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_ldf8_f1_does_not_change_fixed_register = require_registers(
     "ldf8_f1_does_not_change_fixed_register", [
         (0x10, *movl_mlx(2, 0xdeadbeefcafebabe)),
@@ -9344,6 +9571,104 @@ test_probe_w_imm_decode = require_registers(
         (0x80, 0x10, nop_m(), nop_i(),
          br_cond(0x80, 0x80)),
     ], {"ip": 0x80, "r7": 1}, entry=0x10)
+
+test_probe_result_clears_destination_nat = require_registers(
+    "probe_result_clears_destination_nat", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | (3 << 7))),
+        (0x20, 0x00, adds(7, 0x68, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(),
+         nop_i()),
+        (0x50, 0x00, itr_d(5, 18), nop_i(),
+         nop_i()),
+        (0x60, *movl_mlx(9, 1 << 32)),
+        (0x70, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x100, 0),
+         nop_i()),
+        (0x80, 0x00, ld8_fill_postinc(17, 3, 0), nop_i(),
+         nop_i()),
+        (0x90, 0x08, probe_w_imm(17, 3, 0), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, nop_m(), tnat_z(1, 2, 17),
+         nop_i()),
+        (0xb0, 0x00, nop_m(), addl(7, 0x11, 0, qp=1),
+         addl(8, 0x22, 0, qp=2)),
+        (0xc0, 0x10, nop_m(), nop_i(),
+         br_cond(0xc0, 0xc0)),
+    ], {
+        "ip": 0xc0,
+        "exception": IA64_EXCP_NONE,
+        "r17": 1,
+        "r7": 0x11,
+        "r8": 0,
+    }, entry=0x10)
+
+test_probe_stacked_result_survives_call_return = require_registers(
+    "probe_stacked_result_survives_call_return", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | (3 << 7))),
+        (0x20, 0x00, adds(7, 0x68, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(),
+         nop_i()),
+        (0x50, 0x00, itr_d(5, 18), nop_i(),
+         nop_i()),
+        (0x60, 0x00, nop_m(), alloc(8, 2, 2, 0, 0),
+         addl(3, 0x100, 0)),
+        (0x70, 0x08, probe_w_imm(33, 3, 0), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x80, 0x100)),
+        (0x90, 0x00, nop_m(), adds(8, 0, 33),
+         nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(),
+         br_cond(0xa0, 0xa0)),
+        (0x100, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0xa0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1,
+        "r33": 1,
+        "cfm_sof": 2,
+        "cfm_sol": 2,
+    }, entry=0x10)
+
+
+def probe_register_level_nat_consumption_test(name, probe, isr_access):
+    return require_registers(name, [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(2, 6, 0), addl(3, 0x100, 0),
+         nop_i()),
+        (0x30, 0x00, ssm(1 << 13), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x08, probe(7, 3, 2), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x00,
+         mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(15, 17), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+                 IA64_NAT_CONSUMPTION_VECTOR + 0x20)),
+        (0x200, 0x00, 0, 0, 0),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r14": 0,
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_NA | isr_access | 2,
+    }, entry=0x10)
+
+
+test_probe_r_register_level_nat_consumption = \
+    probe_register_level_nat_consumption_test(
+        "probe_r_register_level_nat_consumption", probe_r_reg, IA64_ISR_R)
+test_probe_w_register_level_nat_consumption = \
+    probe_register_level_nat_consumption_test(
+        "probe_w_register_level_nat_consumption", probe_w_reg, IA64_ISR_W)
 
 test_probe_w_dt_disabled_miss_raises_alt_dtlb = require_registers(
     "probe_w_dt_disabled_miss_raises_alt_dtlb", [
@@ -10859,9 +11184,10 @@ test_setf_sig_direct_scalar_operand = require_registers(
          br_cond(0x60, 0x60)),
     ], {
         "ip": 0x60,
-        "r4": 0x4000000000000000,
+        # getf.d extracts register fields; it does not convert numerically.
+        "r4": 0,
         "r5": 0x401c000000000000,
-        "r6": 0xc000000000000000,
+        "r6": 0x8000000000000000,
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
@@ -10903,6 +11229,38 @@ test_w2k_frcpa_capacity_calc = require_registers("w2k_frcpa_capacity_calc", [
     (0xc0, 0x10, nop_m(), nop_i(),
      br_cond(0xc0, 0xc0)),
 ], {"ip": 0xc0, "r4": 1, "r5": 1}, entry=0x10)
+
+test_coreutils_hash_bucket_float_division = require_registers(
+    "coreutils_hash_bucket_float_division", [
+        (0x10, *movl_mlx(2, 103)),
+        (0x20, *movl_mlx(3, 0x5f8000003f4ccccd)),
+        (0x30, 0x00, addl(4, 0x200, 0), nop_i(), nop_i()),
+        (0x40, 0x09, st8(4, 3), setf_sig(8, 2), nop_i()),
+        (0x50, 0x0d, ldfs(7, 4), fnorm(6, 0, 8), nop_i()),
+        (0x60, 0x0d, nop_m(), fmov(9, 7), nop_i()),
+        (0x70, 0x0d, nop_m(), fmov(8, 6), nop_i()),
+        (0x80, 0x0d, nop_m(), frcpa(6, 6, 8, 9, sf=0), nop_i()),
+        (0x90, 0x1c, nop_m(), fnma_s1(10, 9, 6, 1, qp=6), nop_b()),
+        (0xa0, 0x1c, nop_m(), fma_s1(7, 6, 10, 6, qp=6), nop_b()),
+        (0xb0, 0x1c, nop_m(), fma_s1(7, 7, 10, 6, qp=6), nop_b()),
+        (0xc0, 0x0d, nop_m(), fmpy_s_s1(10, 8, 7, qp=6), nop_i()),
+        (0xd0, 0x1c, nop_m(), fnma_s1(8, 10, 9, 8, qp=6), nop_b()),
+        (0xe0, 0x1c, nop_m(), fma_s_s0(6, 8, 7, 10, qp=6), nop_b()),
+        (0xf0, 0x00, nop_m(), adds(3, 4, 4), nop_i()),
+        (0x100, 0x0d, nop_m(), fmov(7, 6), nop_i()),
+        (0x110, 0x00, ldfs(6, 3), nop_i(), nop_i()),
+        (0x120, 0x0d, nop_m(), fcmp(6, 7, 6, 7, rel=2), nop_i()),
+        (0x130, 0x00, nop_m(), adds(10, 1, 0, qp=7),
+         adds(11, 1, 0, qp=6)),
+        (0x140, 0x0d, nop_m(), fcvt_fxu(7, 7, sf=0), nop_i()),
+        (0x150, 0x10, getf_sig(5, 7), nop_i(), br_cond(0x150, 0x150)),
+    ], {
+        "ip": 0x150,
+        "r5": 128,
+        "r10": 1,
+        "r11": 0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
 
 test_ws2003_vga_frcpa_integer_division = require_registers(
     "ws2003_vga_frcpa_integer_division", [
@@ -15313,7 +15671,7 @@ test_tak_nat_source_consumes_non_access = require_registers(
         "ip": 0x5620,
         "exception": IA64_EXCP_NONE,
         "r14": 0,
-        "r15": IA64_ISR_NA | 3,
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_NA | 3,
     }, entry=0x10)
 
 test_tpa_nat_source_consumes_non_access = require_registers(
@@ -15340,7 +15698,7 @@ test_tpa_nat_source_consumes_non_access = require_registers(
         "ip": 0x5620,
         "exception": IA64_EXCP_NONE,
         "r14": 0,
-        "r15": IA64_ISR_NA,
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_NA,
     }, entry=0x10)
 
 def register_nat_consumption_test(name, fault_bundle, expected_isr=0,
@@ -15375,7 +15733,7 @@ def register_nat_consumption_test(name, fault_bundle, expected_isr=0,
         "ip": 0x5620,
         "exception": IA64_EXCP_NONE,
         "r14": 0,
-        "r15": expected_isr,
+        "r15": IA64_ISR_CODE_REG_NAT | expected_isr,
     }, entry=0x10)
 
 test_mov_ar_nat_source_consumes = register_nat_consumption_test(
@@ -19888,6 +20246,23 @@ TEST_NAMES = {
     "data_big_endian_stf_spill_ldf_fill":
         test_data_big_endian_stf_spill_ldf_fill,
     "data_big_endian_ldfe_stfe": test_data_big_endian_ldfe_stfe,
+    "ldfs_expands_single_memory_format":
+        test_ldfs_expands_single_memory_format,
+    "ldfs_preserves_single_nan_payload":
+        test_ldfs_preserves_single_nan_payload,
+    "ldfps_expands_both_single_values":
+        test_ldfps_expands_both_single_values,
+    "stfs_stfd_convert_register_format":
+        test_stfs_stfd_convert_register_format,
+    "getf_exact_register_format_translation":
+        test_getf_exact_register_format_translation,
+    "stf8_stfe_convert_register_format":
+        test_stf8_stfe_convert_register_format,
+    "stfs_natval_consumption": test_stfs_natval_consumption,
+    "stfd_natval_consumption": test_stfd_natval_consumption,
+    "stf8_natval_consumption": test_stf8_natval_consumption,
+    "stfe_natval_consumption": test_stfe_natval_consumption,
+    "stf_spill_preserves_natval": test_stf_spill_preserves_natval,
     "store_invalidates_advanced_load": test_store_invalidates_advanced_load,
     "rse_call_invalidates_stacked_alat": test_rse_call_invalidates_stacked_alat,
     "semaphore_ops_invalidate_advanced_loads": test_semaphore_ops_invalidate_advanced_loads,
@@ -20028,6 +20403,8 @@ TEST_NAMES = {
     "setf_sig_direct_scalar_operand": test_setf_sig_direct_scalar_operand,
     "fr1_is_read_only_one": test_fr1_is_read_only_one,
     "w2k_frcpa_capacity_calc": test_w2k_frcpa_capacity_calc,
+    "coreutils_hash_bucket_float_division":
+        test_coreutils_hash_bucket_float_division,
     "ws2003_vga_frcpa_integer_division":
         test_ws2003_vga_frcpa_integer_division,
     "frcpa_setf_sig_high_integer_remainder":
@@ -20103,6 +20480,14 @@ TEST_NAMES = {
     "probe_r_fault_ignored_fields_decode":
         test_probe_r_fault_ignored_fields_decode,
     "probe_w_imm_decode": test_probe_w_imm_decode,
+    "probe_result_clears_destination_nat":
+        test_probe_result_clears_destination_nat,
+    "probe_stacked_result_survives_call_return":
+        test_probe_stacked_result_survives_call_return,
+    "probe_r_register_level_nat_consumption":
+        test_probe_r_register_level_nat_consumption,
+    "probe_w_register_level_nat_consumption":
+        test_probe_w_register_level_nat_consumption,
     "probe_w_dt_disabled_miss_raises_alt_dtlb":
         test_probe_w_dt_disabled_miss_raises_alt_dtlb,
     "sxt1_decode": test_sxt1_decode,

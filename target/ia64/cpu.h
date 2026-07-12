@@ -255,6 +255,7 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_ISR_EI_MASK     (3ULL << 41)
 #define IA64_ISR_EI_SHIFT    41
 #define IA64_ISR_ED          (1ULL << 43)
+#define IA64_ISR_CODE_REG_NAT 0x10
 
 /* ---- ITIR fields ---- */
 #define IA64_ITIR_PS_MASK    0x3f

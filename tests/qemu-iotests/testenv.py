@@ -259,6 +259,7 @@ class TestEnv(contextlib.AbstractContextManager['TestEnv']):
             ('arm', 'virt'),
             ('aarch64', 'virt'),
             ('avr', 'mega2560'),
+            ('ia64', 'ia64-vpc'),
             ('m68k', 'virt'),
             ('or1k', 'virt'),
             ('riscv32', 'virt'),

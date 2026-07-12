@@ -37,6 +37,8 @@
 #define IA64_FP_WRE_BIAS        0x0ffff
 #define IA64_FP_WRE_EXP_MASK    0x1ffff
 #define IA64_FP_SINGLE_BIAS     127
+#define IA64_FP_SINGLE_EXP_BASE 0x0ff80
+#define IA64_FP_SINGLE_FRAC_MASK ((1ULL << 23) - 1)
 #define IA64_FP_SINGLE_MANT_WIDTH 24
 #define IA64_FP_DOUBLE_EXP_BASE 0x0fc00
 #define IA64_FP_DOUBLE_FRAC_MASK ((1ULL << 52) - 1)
@@ -357,6 +359,54 @@ static void ia64_float64_to_register_format(uint64_t value, uint64_t *sig,
         *exp = IA64_FP_DOUBLE_EXP_BASE + double_exp;
         *sig = IA64_FP_SIGNIFICAND_INTEGER_BIT | (frac << 11);
     }
+}
+
+static void ia64_float32_to_register_format(uint32_t value, uint64_t *sig,
+                                            uint32_t *exp, bool *sign)
+{
+    uint32_t frac = value & IA64_FP_SINGLE_FRAC_MASK;
+    uint32_t single_exp = (value >> 23) & 0xff;
+
+    *sign = value >> 31;
+    if (single_exp == 0) {
+        if (frac == 0) {
+            *exp = 0;
+            *sig = 0;
+        } else {
+            *exp = IA64_FP_SINGLE_EXP_BASE + 1;
+            *sig = (uint64_t)frac << 40;
+        }
+    } else if (single_exp == 0xff) {
+        *exp = IA64_FP_REG_SPECIAL_EXP;
+        *sig = IA64_FP_SIGNIFICAND_INTEGER_BIT | ((uint64_t)frac << 40);
+    } else {
+        *exp = IA64_FP_SINGLE_EXP_BASE + single_exp;
+        *sig = IA64_FP_SIGNIFICAND_INTEGER_BIT | ((uint64_t)frac << 40);
+    }
+}
+
+static uint32_t ia64_register_format_to_float32(uint64_t sig, uint32_t exp,
+                                                bool sign)
+{
+    uint32_t value = (uint32_t)sign << 31;
+
+    if (sig & IA64_FP_SIGNIFICAND_INTEGER_BIT) {
+        value |= (((exp >> 9) & 0x80) | (exp & 0x7f)) << 23;
+    }
+    value |= (sig >> 40) & IA64_FP_SINGLE_FRAC_MASK;
+    return value;
+}
+
+static uint64_t ia64_register_format_to_float64(uint64_t sig, uint32_t exp,
+                                                bool sign)
+{
+    uint64_t value = (uint64_t)sign << 63;
+
+    if (sig & IA64_FP_SIGNIFICAND_INTEGER_BIT) {
+        value |= (uint64_t)(((exp >> 6) & 0x400) | (exp & 0x3ff)) << 52;
+    }
+    value |= (sig >> 11) & IA64_FP_DOUBLE_FRAC_MASK;
+    return value;
 }
 
 static void ia64_fr_spill_words(const CPUIA64State *env, uint32_t reg,
@@ -1562,7 +1612,7 @@ void helper_raise_nat_consumption(CPUIA64State *env, uint64_t isr_access,
                                   uint64_t fault_info)
 {
     env->cr_ifa = 0;
-    env->cr_isr = isr_access;
+    env->cr_isr = IA64_ISR_CODE_REG_NAT | isr_access;
     helper_raise_exception(env, IA64_EXCP_NAT_CONSUMPTION,
                            fault_info & ~3ULL, 0, fault_info & 3);
 }
@@ -5933,19 +5983,17 @@ uint64_t helper_getf(CPUIA64State *env, uint32_t reg, uint32_t kind)
 {
     uint64_t low;
     uint64_t high;
+    uint32_t exp;
+    bool sign;
 
     ia64_fr_spill_words(env, reg, &low, &high);
+    exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
+    sign = (high >> 17) & 1;
     if (kind == 0) {
-        float_status status = env->fp_status;
-
-        return float64_val(floatx80_to_float64(
-            ia64_fr_to_floatx80(env, reg), &status));
+        return ia64_register_format_to_float64(low, exp, sign);
     }
     if (kind == 1) {
-        float_status status = env->fp_status;
-
-        return float32_val(floatx80_to_float32(
-            ia64_fr_to_floatx80(env, reg), &status));
+        return ia64_register_format_to_float32(low, exp, sign);
     }
     return kind == 2 ? low : high;
 }
@@ -5959,11 +6007,12 @@ void helper_setf_exp(CPUIA64State *env, uint32_t reg, uint64_t value)
 
 void helper_setf_s(CPUIA64State *env, uint32_t reg, uint64_t value)
 {
-    float_status status = env->fp_status;
-    floatx80 fp_value = float32_to_floatx80(make_float32(value), &status);
+    uint64_t sig;
+    uint32_t exp;
+    bool sign;
 
-    /* setf.s expands the single-precision encoding into register format. */
-    ia64_fr_write_floatx80(env, reg, fp_value);
+    ia64_float32_to_register_format(value, &sig, &exp, &sign);
+    ia64_fr_write_ext(env, reg, sign, exp, sig);
 }
 
 void helper_fmov(CPUIA64State *env, uint32_t dst, uint32_t src)
@@ -7073,34 +7122,24 @@ void helper_ldf_fill(CPUIA64State *env, uint32_t r1, uint64_t addr)
 void helper_stfe(CPUIA64State *env, uint64_t addr, uint32_t r2)
 {
     uintptr_t ra = GETPC();
-    floatx80 value;
+    uint64_t high;
     uint64_t mant;
     uint32_t exp;
     bool sign;
+    uint16_t ext_exp;
 
-    if (ia64_fr_ext_get(env, r2, &sign, &exp, &mant)) {
-        uint16_t ext_exp;
-
-        if (exp == IA64_FP_REG_SPECIAL_EXP) {
-            ext_exp = 0x7fff;
-        } else if (exp == 0) {
-            ext_exp = 0;
-        } else if (exp > 0xc000 && exp - 0xc000 < 0x7fff) {
-            ext_exp = exp - 0xc000;
-        } else {
-            ext_exp = exp < 0xc000 ? 0 : 0x7fff;
-        }
-        value = make_floatx80(((uint16_t)sign << 15) | ext_exp, mant);
-    } else {
-        value = float64_to_floatx80(env->fr[r2], &env->fp_status);
-    }
+    ia64_fr_spill_words(env, r2, &mant, &high);
+    exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
+    sign = (high >> 17) & 1;
+    ext_exp = ((exp >> 2) & 0x4000) | (exp & 0x3fff);
 
     if (ia64_data_big_endian(env)) {
-        cpu_stw_be_data_ra(env, addr, value.high, ra);
-        cpu_stq_be_data_ra(env, addr + 2, value.low, ra);
+        cpu_stw_be_data_ra(env, addr, ((uint16_t)sign << 15) | ext_exp, ra);
+        cpu_stq_be_data_ra(env, addr + 2, mant, ra);
     } else {
-        cpu_stq_le_data_ra(env, addr, value.low, ra);
-        cpu_stw_le_data_ra(env, addr + 8, value.high, ra);
+        cpu_stq_le_data_ra(env, addr, mant, ra);
+        cpu_stw_le_data_ra(env, addr + 8,
+                           ((uint16_t)sign << 15) | ext_exp, ra);
     }
 }
 
