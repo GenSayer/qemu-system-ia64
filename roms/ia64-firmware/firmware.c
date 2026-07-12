@@ -83,7 +83,6 @@ typedef __SIZE_TYPE__    size_t;
 #define ACPI_FADT_FLAG_WBINVD        (1U << 0)
 #define ACPI_FADT_FLAG_PWR_BUTTON    (1U << 4)
 #define ACPI_FADT_FLAG_SLP_BUTTON    (1U << 5)
-#define ACPI_FADT_FLAG_TMR_VAL_EXT   (1U << 8)
 #define ACPI_FADT_FLAG_SW_CPU_SLP    (1U << 13)
 #define VGA_MODE_TEXT_WIDTH  640U
 #define VGA_MODE_TEXT_HEIGHT 400U
@@ -121,8 +120,11 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_FIRMWARE_ADDRESS_SPACE_SIZE 0x0000000001000000ULL
 #define FW_FIRMWARE_ADDRESS_SPACE_END \
     (FW_FIRMWARE_ADDRESS_SPACE_BASE + FW_FIRMWARE_ADDRESS_SPACE_SIZE)
+#define FW_RTC_BASE 0x00000000ffef0000ULL
+#define FW_RTC_SIZE 0x0000000000002000ULL
 #define FW_NVRAM_BASE 0x00000000fff00000ULL
 #define FW_NVRAM_SIZE 0x0000000000010000ULL
+#define FW_NVRAM_RTC_OFFSET 0x000000000000f000ULL
 #define FW_NVRAM_COMMIT_OFFSET (FW_NVRAM_SIZE - sizeof(UINT64))
 #define FW_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define FW_HIGH_RAM_RANGE_MAX 3U
@@ -131,7 +133,7 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
 #define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
 #define FW_HANDOFF_MAGIC  0x4d41523436414951ULL /* "QIA64RAM" */
-#define FW_HANDOFF_VERSION 5ULL
+#define FW_HANDOFF_VERSION 6ULL
 #define FW_HANDOFF_DEBUG_PORT_PRESENT 1ULL
 #define FW_CONSOLE_POLICY_SERIAL 0ULL
 #define FW_CONSOLE_POLICY_VGA    1ULL
@@ -145,6 +147,7 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_ITC_TICKS_PER_MICROSECOND (FW_ITC_TICKS_PER_100NS * 10ULL)
 #define FW_ITC_TICKS_PER_SECOND (FW_ITC_TICKS_PER_100NS * 10000000ULL)
 #define FW_NANOSECONDS_PER_SECOND 1000000000ULL
+#define FW_RTC_RESOLUTION_HZ 1U
 #define FW_TIME_ACCURACY_1E6_PPM 50000000U
 
 #define EFI_VARIABLE_NON_VOLATILE       0x00000001U
@@ -2000,6 +2003,10 @@ typedef struct {
     UINT64 Magic;
     UINT64 Version;
     UINT64 RamSize;
+} FW_HANDOFF_HEADER;
+
+typedef struct {
+    FW_HANDOFF_HEADER Header;
     UINT64 TimeValid;
     UINT64 Year;
     UINT64 Month;
@@ -2011,9 +2018,17 @@ typedef struct {
     UINT64 IdeDmaEnabled;
     UINT64 DebugPortFlags;
     UINT64 DebugPortBase;
+} FW_HANDOFF_LEGACY;
+
+typedef struct {
+    FW_HANDOFF_HEADER Header;
+    UINT64 ConsolePolicy;
+    UINT64 IdeDmaEnabled;
+    UINT64 DebugPortFlags;
+    UINT64 DebugPortBase;
 } FW_HANDOFF;
 
-static BOOLEAN fw_handoff_valid(volatile FW_HANDOFF *Handoff)
+static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
 {
     return Handoff->Magic == FW_HANDOFF_MAGIC &&
            Handoff->Version >= 1 &&
@@ -2022,7 +2037,8 @@ static BOOLEAN fw_handoff_valid(volatile FW_HANDOFF *Handoff)
 
 static BOOLEAN fw_handoff_ram_size(UINT64 *RamSize)
 {
-    volatile FW_HANDOFF *handoff = (volatile FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    FW_HANDOFF_HEADER *handoff =
+        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
     UINT64 ram_size;
 
     if (!fw_handoff_valid(handoff)) {
@@ -2138,33 +2154,67 @@ UINT64 fw_boot_stack_top(void)
 
 static BOOLEAN fw_handoff_vga_console_primary(void)
 {
-    volatile FW_HANDOFF *handoff = (volatile FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
 
-    return fw_handoff_valid(handoff) &&
-           handoff->Version >= 3 &&
-           handoff->ConsolePolicy == FW_CONSOLE_POLICY_VGA;
+    if (!fw_handoff_valid(header) || header->Version < 3) {
+        return 0;
+    }
+    if (header->Version >= 6) {
+        FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+
+        return handoff->ConsolePolicy == FW_CONSOLE_POLICY_VGA;
+    } else {
+        FW_HANDOFF_LEGACY *handoff =
+            (FW_HANDOFF_LEGACY *)(UINTN)FW_HANDOFF_ADDR;
+
+        return handoff->ConsolePolicy == FW_CONSOLE_POLICY_VGA;
+    }
 }
 
 static BOOLEAN fw_handoff_ide_dma_enabled(void)
 {
-    FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
 
-    return !fw_handoff_valid(handoff) || handoff->Version < 4 ||
-           handoff->IdeDmaEnabled != 0;
+    if (!fw_handoff_valid(header) || header->Version < 4) {
+        return 1;
+    }
+    if (header->Version >= 6) {
+        FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+
+        return handoff->IdeDmaEnabled != 0;
+    } else {
+        FW_HANDOFF_LEGACY *handoff =
+            (FW_HANDOFF_LEGACY *)(UINTN)FW_HANDOFF_ADDR;
+
+        return handoff->IdeDmaEnabled != 0;
+    }
 }
 
 static UINT64 fw_handoff_debug_port_base(void)
 {
-    FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
+    UINT64 flags;
+    UINT64 base;
 
-    if (!fw_handoff_valid(handoff) ||
-        handoff->Version < 5 ||
-        (handoff->DebugPortFlags & FW_HANDOFF_DEBUG_PORT_PRESENT) == 0 ||
-        handoff->DebugPortBase == 0) {
+    if (!fw_handoff_valid(header) || header->Version < 5) {
         return 0;
     }
+    if (header->Version >= 6) {
+        FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
 
-    return handoff->DebugPortBase;
+        flags = handoff->DebugPortFlags;
+        base = handoff->DebugPortBase;
+    } else {
+        FW_HANDOFF_LEGACY *handoff =
+            (FW_HANDOFF_LEGACY *)(UINTN)FW_HANDOFF_ADDR;
+
+        flags = handoff->DebugPortFlags;
+        base = handoff->DebugPortBase;
+    }
+    return (flags & FW_HANDOFF_DEBUG_PORT_PRESENT) != 0 ? base : 0;
 }
 
 static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
@@ -2249,6 +2299,9 @@ static UINTN                  mRuntimeAcpiPm1Cnt =
 static UINTN                  mRuntimePs2Command = PS2_STATUS_PORT;
 static UINTN                  mRuntimePciConfigEcam =
     PCI_CONFIG_ECAM_BASE;
+static UINTN                  mRuntimeRtc = FW_RTC_BASE;
+static UINTN                  mRuntimeRtcState =
+    FW_NVRAM_BASE + FW_NVRAM_RTC_OFFSET;
 
 static void fw_copy_mem(VOID *Destination, const VOID *Source, UINTN Length);
 static void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value);
@@ -2259,6 +2312,7 @@ static BOOLEAN ranges_overlap(UINT64 a_base, UINT64 a_size,
                               UINT64 b_base, UINT64 b_size);
 static void fw_poll_timers(void);
 static UINT64 fw_read_itc(void);
+static void nvram_commit(void);
 
 typedef struct {
     BOOLEAN in_use;
@@ -9775,19 +9829,25 @@ typedef struct {
     BOOLEAN SetsToZero;
 } EFI_TIME_CAPABILITIES;
 
-/* Deterministic boot timestamp, advanced from the IA-64 interval time counter. */
-static EFI_TIME mRuntimeTimeBase = {
-    .Year       = 2024,
-    .Month      = 1,
-    .Day        = 1,
-    .Hour       = 0,
-    .Minute     = 0,
-    .Second     = 0,
-    .Nanosecond = 0,
-    .TimeZone   = 0,
-    .Daylight   = 0,
-};
-static UINT64 mRuntimeTimeBaseItc;
+#define FW_RTC_STATE_MAGIC 0x54464f3436545249ULL /* "IRT64OFT" */
+#define FW_RTC_STATE_VERSION 1U
+
+typedef struct {
+    UINT64 Magic;
+    UINT32 Version;
+    UINT32 Reserved;
+    INT64 OffsetSeconds;
+    UINT32 Nanosecond;
+    INT16 TimeZone;
+    UINT8 Daylight;
+    UINT8 Pad;
+} FW_RTC_STATE;
+
+FW_STATIC_ASSERT(sizeof(FW_RTC_STATE) == 32U, rtc_state_format_size);
+FW_STATIC_ASSERT(FW_NVRAM_RTC_OFFSET + sizeof(FW_RTC_STATE) <=
+                 FW_NVRAM_COMMIT_OFFSET, rtc_state_fits_nvram);
+
+static BOOLEAN mRtcSelftestActive;
 static EFI_TIME mWakeupTime;
 static BOOLEAN mWakeupTimeEnabled;
 static BOOLEAN mWakeupTimePending;
@@ -9833,107 +9893,196 @@ static BOOLEAN efi_time_valid(const EFI_TIME *Time)
            (Time->TimeZone >= -1440 && Time->TimeZone <= 1440);
 }
 
-static BOOLEAN fw_handoff_time(EFI_TIME *Time)
+static BOOLEAN efi_time_to_epoch(const EFI_TIME *Time, INT64 *Seconds)
 {
-    volatile FW_HANDOFF *handoff = (volatile FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
-    EFI_TIME candidate;
+    INT64 days = 0;
+    INT64 total;
+    INTN year;
+    UINT8 month;
 
-    if (Time == NULL || !fw_handoff_valid(handoff) ||
-        handoff->Version < 2 || handoff->TimeValid == 0) {
+    if (!efi_time_valid(Time) || Seconds == NULL) {
         return 0;
     }
-
-    candidate.Year = (UINT16)handoff->Year;
-    candidate.Month = (UINT8)handoff->Month;
-    candidate.Day = (UINT8)handoff->Day;
-    candidate.Hour = (UINT8)handoff->Hour;
-    candidate.Minute = (UINT8)handoff->Minute;
-    candidate.Second = (UINT8)handoff->Second;
-    candidate.Pad1 = 0;
-    candidate.Nanosecond = 0;
-    candidate.TimeZone = 0;
-    candidate.Daylight = 0;
-    candidate.Pad2 = 0;
-
-    if (!efi_time_valid(&candidate)) {
-        return 0;
+    if (Time->Year >= 1970) {
+        for (year = 1970; year < Time->Year; year++) {
+            days += efi_time_is_leap_year((UINT16)year) ? 366 : 365;
+        }
+    } else {
+        for (year = 1969; year >= Time->Year; year--) {
+            days -= efi_time_is_leap_year((UINT16)year) ? 366 : 365;
+        }
     }
-
-    *Time = candidate;
+    for (month = 1; month < Time->Month; month++) {
+        days += efi_time_days_in_month(Time->Year, month);
+    }
+    days += Time->Day - 1U;
+    total = days * 24 + Time->Hour;
+    total = total * 60 + Time->Minute;
+    total = total * 60 + Time->Second;
+    *Seconds = total;
     return 1;
 }
 
-static void efi_time_add_seconds(EFI_TIME *Time, UINT64 Seconds)
+static BOOLEAN efi_time_from_epoch(INT64 Seconds, UINT32 Nanosecond,
+                                   EFI_TIME *Time)
 {
-    UINT64 total;
+    INT64 days = Seconds / 86400;
+    INT64 remainder = Seconds % 86400;
+    INTN year = 1970;
+    UINT8 month = 1;
+    UINT16 days_in_year;
+    UINT8 days_in_month;
 
-    total = (UINT64)Time->Second + Seconds;
-    Time->Second = total % 60U;
-    total /= 60U;
-
-    total += Time->Minute;
-    Time->Minute = total % 60U;
-    total /= 60U;
-
-    total += Time->Hour;
-    Time->Hour = total % 24U;
-    total /= 24U;
-
-    while (total != 0) {
-        UINT8 days_in_month = efi_time_days_in_month(Time->Year, Time->Month);
-        UINT64 days_left = days_in_month - Time->Day;
-
-        if (total <= days_left) {
-            Time->Day += total;
+    if (Time == NULL || Nanosecond >= FW_NANOSECONDS_PER_SECOND) {
+        return 0;
+    }
+    if (remainder < 0) {
+        remainder += 86400;
+        days--;
+    }
+    while (days < 0) {
+        if (--year < 1900) {
+            return 0;
+        }
+        days += efi_time_is_leap_year((UINT16)year) ? 366 : 365;
+    }
+    for (;;) {
+        days_in_year = efi_time_is_leap_year((UINT16)year) ? 366 : 365;
+        if (days < days_in_year) {
             break;
         }
-
-        total -= days_left + 1U;
-        Time->Day = 1;
-        if (Time->Month == 12) {
-            Time->Month = 1;
-            if (Time->Year < 9999) {
-                Time->Year++;
-            }
-        } else {
-            Time->Month++;
+        days -= days_in_year;
+        if (++year > 9999) {
+            return 0;
         }
     }
+    for (;;) {
+        days_in_month = efi_time_days_in_month((UINT16)year, month);
+        if (days < days_in_month) {
+            break;
+        }
+        days -= days_in_month;
+        month++;
+    }
+
+    Time->Year = year;
+    Time->Month = month;
+    Time->Day = days + 1;
+    Time->Hour = remainder / 3600;
+    remainder %= 3600;
+    Time->Minute = remainder / 60;
+    Time->Second = remainder % 60;
+    Time->Pad1 = 0;
+    Time->Nanosecond = Nanosecond;
+    Time->TimeZone = 0;
+    Time->Daylight = 0;
+    Time->Pad2 = 0;
+    return 1;
+}
+
+static FW_RTC_STATE *fw_rtc_state(void)
+{
+    return (FW_RTC_STATE *)mRuntimeRtcState;
+}
+
+static BOOLEAN fw_rtc_state_valid(const FW_RTC_STATE *State)
+{
+    return State->Magic == FW_RTC_STATE_MAGIC &&
+           State->Version == FW_RTC_STATE_VERSION &&
+           State->Reserved == 0 && State->Pad == 0 &&
+           State->Nanosecond < FW_NANOSECONDS_PER_SECOND &&
+           (State->TimeZone == 2047 ||
+            (State->TimeZone >= -1440 && State->TimeZone <= 1440));
+}
+
+static BOOLEAN fw_rtc_read_seconds(INT64 *Seconds)
+{
+    UINT64 value;
+
+    if (Seconds == NULL) {
+        return 0;
+    }
+    /* This volatile load targets the host-backed RTC MMIO register. */
+    value = *(volatile UINT64 *)mRuntimeRtc;
+    if (value > 0x7fffffffffffffffULL) {
+        return 0;
+    }
+    *Seconds = (INT64)value;
+    return 1;
 }
 
 EFI_STATUS rs_get_time(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities)
 {
-    UINT64 elapsed_ticks;
-    UINT64 elapsed_seconds;
-    UINT64 nanoseconds;
+    FW_RTC_STATE *state = fw_rtc_state();
+    INT64 host_seconds;
+    INT64 offset_seconds = 0;
+    INT64 guest_seconds;
+    UINT32 nanosecond = 0;
+    INT16 timezone = 0;
+    UINT8 daylight = 0;
 
     if (Time == NULL) {
         return EFI_INVALID_PARAMETER;
     }
     if (Capabilities != NULL) {
-        Capabilities->Resolution = FW_ITC_TICKS_PER_SECOND;
+        Capabilities->Resolution = FW_RTC_RESOLUTION_HZ;
         Capabilities->Accuracy = FW_TIME_ACCURACY_1E6_PPM;
         Capabilities->SetsToZero = 0;
     }
-    *Time = mRuntimeTimeBase;
-    elapsed_ticks = fw_read_itc() - mRuntimeTimeBaseItc;
-    elapsed_seconds = elapsed_ticks / FW_ITC_TICKS_PER_SECOND;
-    nanoseconds = (elapsed_ticks % FW_ITC_TICKS_PER_SECOND) *
-                  (FW_NANOSECONDS_PER_SECOND / FW_ITC_TICKS_PER_SECOND) +
-                  Time->Nanosecond;
-    elapsed_seconds += nanoseconds / FW_NANOSECONDS_PER_SECOND;
-    Time->Nanosecond = nanoseconds % FW_NANOSECONDS_PER_SECOND;
-    efi_time_add_seconds(Time, elapsed_seconds);
+    if (!fw_rtc_read_seconds(&host_seconds)) {
+        return EFI_DEVICE_ERROR;
+    }
+    if (fw_rtc_state_valid(state)) {
+        offset_seconds = state->OffsetSeconds;
+        nanosecond = state->Nanosecond;
+        timezone = state->TimeZone;
+        daylight = state->Daylight;
+    }
+    if ((offset_seconds > 0 &&
+         host_seconds > (INT64)0x7fffffffffffffffULL - offset_seconds) ||
+        (offset_seconds < 0 &&
+         host_seconds < (-0x7fffffffffffffffLL - 1) - offset_seconds)) {
+        return EFI_DEVICE_ERROR;
+    }
+    guest_seconds = host_seconds + offset_seconds;
+    if (!efi_time_from_epoch(guest_seconds, nanosecond, Time)) {
+        return EFI_DEVICE_ERROR;
+    }
+    Time->TimeZone = timezone;
+    Time->Daylight = daylight;
     return EFI_SUCCESS;
 }
 
 EFI_STATUS rs_set_time(EFI_TIME *Time)
 {
+    FW_RTC_STATE *state = fw_rtc_state();
+    FW_RTC_STATE next;
+    INT64 host_seconds;
+    INT64 guest_seconds;
+
     if (Time == NULL || !efi_time_valid(Time)) {
         return EFI_INVALID_PARAMETER;
     }
-    mRuntimeTimeBase = *Time;
-    mRuntimeTimeBaseItc = fw_read_itc();
+    if (!efi_time_to_epoch(Time, &guest_seconds) ||
+        !fw_rtc_read_seconds(&host_seconds)) {
+        return EFI_DEVICE_ERROR;
+    }
+    if (guest_seconds < (-0x7fffffffffffffffLL - 1) + host_seconds) {
+        return EFI_DEVICE_ERROR;
+    }
+
+    next.Magic = FW_RTC_STATE_MAGIC;
+    next.Version = FW_RTC_STATE_VERSION;
+    next.Reserved = 0;
+    next.OffsetSeconds = guest_seconds - host_seconds;
+    next.Nanosecond = Time->Nanosecond;
+    next.TimeZone = Time->TimeZone;
+    next.Daylight = Time->Daylight;
+    next.Pad = 0;
+    *state = next;
+    if (!mRtcSelftestActive) {
+        nvram_commit();
+    }
     return EFI_SUCCESS;
 }
 
@@ -10014,8 +10163,8 @@ EFI_STATUS rs_set_wakeup_time(BOOLEAN Enable, EFI_TIME *Time)
 static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
 {
     EFI_TIME now;
-    EFI_TIME saved;
     EFI_TIME_CAPABILITIES caps;
+    FW_RTC_STATE saved_state;
     EFI_TIME custom = {
         .Year = 2031,
         .Month = 12,
@@ -10038,12 +10187,13 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
     }
     fw_set_mem(&caps, sizeof(caps), 0xff);
     if (rs_get_time(&now, &caps) != EFI_SUCCESS ||
-        caps.Resolution != FW_ITC_TICKS_PER_SECOND ||
+        caps.Resolution != FW_RTC_RESOLUTION_HZ ||
         caps.Accuracy != FW_TIME_ACCURACY_1E6_PPM ||
         caps.SetsToZero != 0) {
         return 0;
     }
-    saved = now;
+    saved_state = *fw_rtc_state();
+    mRtcSelftestActive = 1;
     invalid.Month = 13;
     if (rs_set_time(NULL) != EFI_INVALID_PARAMETER ||
         rs_set_time(&invalid) != EFI_INVALID_PARAMETER ||
@@ -10055,9 +10205,13 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
         now.Hour != custom.Hour ||
         now.Minute != custom.Minute ||
         now.Second < custom.Second ||
-        rs_set_time(&saved) != EFI_SUCCESS) {
+        now.Nanosecond != custom.Nanosecond) {
+        *fw_rtc_state() = saved_state;
+        mRtcSelftestActive = 0;
         return 0;
     }
+    *fw_rtc_state() = saved_state;
+    mRtcSelftestActive = 0;
     if (rs_get_wakeup_time(&enabled, &pending, &alarm) != EFI_SUCCESS ||
         enabled || pending || !efi_time_valid(&alarm)) {
         return 0;
@@ -10877,6 +11031,12 @@ static void efi_init_memory_map(void)
 
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_FIRMWARE_ADDRESS_SPACE_BASE,
+                         FW_RTC_BASE, EFI_MEMORY_UC);
+    efi_add_memory_range(&index, EfiMemoryMappedIO,
+                         FW_RTC_BASE, FW_RTC_BASE + FW_RTC_SIZE,
+                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
+    efi_add_memory_range(&index, EfiMemoryMappedIO,
+                         FW_RTC_BASE + FW_RTC_SIZE,
                          FW_NVRAM_BASE, EFI_MEMORY_UC);
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_NVRAM_BASE, FW_NVRAM_BASE + FW_NVRAM_SIZE,
@@ -10945,13 +11105,13 @@ static void efi_init_boot_services(void)
 
 static void efi_init_runtime_services(void)
 {
-    EFI_TIME handoff_time;
-
-    mRuntimeTimeBaseItc = fw_read_itc();
-    if (fw_handoff_time(&handoff_time)) {
-        mRuntimeTimeBase = handoff_time;
+    if (rs_get_time(&mWakeupTime, NULL) != EFI_SUCCESS) {
+        fw_set_mem(&mWakeupTime, sizeof(mWakeupTime), 0);
+        mWakeupTime.Year = 1970;
+        mWakeupTime.Month = 1;
+        mWakeupTime.Day = 1;
+        mWakeupTime.TimeZone = 0;
     }
-    mWakeupTime = mRuntimeTimeBase;
     rs_disable_wakeup_time();
 
     mRuntimeServices.Hdr.Signature = EFI_RUNTIME_SERVICES_SIGNATURE;
@@ -11748,7 +11908,6 @@ static void efi_init_platform_tables(void)
     mFadt.Reserved0 = 0;
     mFadt.Flags = ACPI_FADT_FLAG_WBINVD |
                   ACPI_FADT_FLAG_SLP_BUTTON |
-                  ACPI_FADT_FLAG_TMR_VAL_EXT |
                   ACPI_FADT_FLAG_SW_CPU_SLP;
     mFadt.ResetRegister.SpaceId = 0;
     mFadt.ResetRegister.BitWidth = 0;
@@ -21087,7 +21246,7 @@ FW_STATIC_ASSERT(__builtin_offsetof(NVRAM_STORE, vars) == 16U,
                  nvram_store_header_size);
 FW_STATIC_ASSERT(sizeof(NVRAM_STORE) == 38160U,
                  nvram_store_format_size);
-FW_STATIC_ASSERT(sizeof(NVRAM_STORE) <= FW_NVRAM_COMMIT_OFFSET,
+FW_STATIC_ASSERT(sizeof(NVRAM_STORE) <= FW_NVRAM_RTC_OFFSET,
                  nvram_store_fits_mmio_window);
 
 static NVRAM_STORE *mNvramStore = (NVRAM_STORE *)(UINTN)FW_NVRAM_BASE;
@@ -24291,6 +24450,8 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     UINTN runtime_acpi_pm1_cnt = mRuntimeAcpiPm1Cnt;
     UINTN runtime_ps2_command = mRuntimePs2Command;
     UINTN runtime_pci_config_ecam = mRuntimePciConfigEcam;
+    UINTN runtime_rtc = mRuntimeRtc;
+    UINTN runtime_rtc_state = mRuntimeRtcState;
     UINTN nvram_store = (UINTN)mNvramStore;
 
     st = rs_convert_required_uintn(&get_time);
@@ -24357,6 +24518,14 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     if (st != EFI_SUCCESS) {
         return st;
     }
+    st = rs_convert_required_uintn(&runtime_rtc);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
+    st = rs_convert_required_uintn(&runtime_rtc_state);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
     st = rs_convert_required_uintn(&nvram_store);
     if (st != EFI_SUCCESS) {
         return st;
@@ -24379,6 +24548,8 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     mRuntimeAcpiPm1Cnt = runtime_acpi_pm1_cnt;
     mRuntimePs2Command = runtime_ps2_command;
     mRuntimePciConfigEcam = runtime_pci_config_ecam;
+    mRuntimeRtc = runtime_rtc;
+    mRuntimeRtcState = runtime_rtc_state;
     mNvramStore = (NVRAM_STORE *)nvram_store;
     return EFI_SUCCESS;
 }

@@ -45,6 +45,8 @@
 #define IA64_HIGH_RAM_BASE 0x0000000080200000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
+#define IA64_RTC_BASE 0x00000000ffef0000ULL
+#define IA64_RTC_SIZE (8 * KiB)
 #define IA64_NVRAM_BASE 0x00000000fff00000ULL
 #define IA64_NVRAM_SIZE (64 * KiB)
 #define IA64_NVRAM_COMMIT_OFFSET (IA64_NVRAM_SIZE - 8)
@@ -74,7 +76,7 @@
 #define IA64_ACPI_SCI_IRQ       9
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION      5ULL
+#define IA64_FW_HANDOFF_VERSION      6ULL
 #define IA64_FW_CONSOLE_SERIAL       0ULL
 #define IA64_FW_CONSOLE_VGA          1ULL
 #define IA64_FW_DEBUG_PORT_PRESENT   1ULL
@@ -93,6 +95,7 @@ static MemoryRegion *ia64_vpc_vga_legacy_alias;
 static Object *ia64_vpc_pci_fixup_reset;
 static MemoryRegion *ia64_vpc_lsapic_mmio;
 static MemoryRegion ia64_vpc_firmware_space;
+static MemoryRegion ia64_vpc_rtc_mmio;
 static MemoryRegion ia64_vpc_nvram_mmio;
 static uint8_t ia64_vpc_nvram_data[IA64_NVRAM_SIZE];
 static char *ia64_vpc_nvram_path;
@@ -107,6 +110,48 @@ static bool ia64_vpc_i8042_enabled = true;
 static bool ia64_vpc_firmware_ide_dma = true;
 static uint64_t ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
 static bool ia64_vpc_alat_full;
+
+static uint64_t ia64_vpc_rtc_read(void *opaque, hwaddr addr, unsigned size)
+{
+    struct tm tm;
+
+    (void)opaque;
+    if (addr != 0 || size != sizeof(uint64_t)) {
+        return 0;
+    }
+
+    /*
+     * Expose the QEMU-configured RTC as seconds since the Unix epoch.  A
+     * single aligned 64-bit read is intrinsically coherent, unlike a bank of
+     * calendar registers whose fields could straddle a second boundary.
+     */
+    qemu_get_timedate(&tm, 0);
+    return mktimegm(&tm);
+}
+
+static const MemoryRegionOps ia64_vpc_rtc_ops = {
+    .read = ia64_vpc_rtc_read,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 8,
+        .max_access_size = 8,
+        .unaligned = false,
+    },
+    .impl = {
+        .min_access_size = 8,
+        .max_access_size = 8,
+        .unaligned = false,
+    },
+};
+
+static void ia64_vpc_init_rtc(MachineState *machine)
+{
+    memory_region_init_io(&ia64_vpc_rtc_mmio, OBJECT(machine),
+                          &ia64_vpc_rtc_ops, NULL, "ia64-vpc.rtc",
+                          IA64_RTC_SIZE);
+    memory_region_add_subregion_overlap(get_system_memory(), IA64_RTC_BASE,
+                                        &ia64_vpc_rtc_mmio, 2);
+}
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
 {
@@ -546,26 +591,17 @@ static void ia64_vpc_map_ram(MachineState *machine)
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
 {
-    uint8_t handoff[112] = { 0 };
-    struct tm tm;
+    uint8_t handoff[56] = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
     stq_le_p(handoff, IA64_FW_HANDOFF_MAGIC);
     stq_le_p(handoff + 8, IA64_FW_HANDOFF_VERSION);
     stq_le_p(handoff + 16, machine->ram_size);
-    qemu_get_timedate(&tm, 0);
-    stq_le_p(handoff + 24, 1);
-    stq_le_p(handoff + 32, tm.tm_year + 1900);
-    stq_le_p(handoff + 40, tm.tm_mon + 1);
-    stq_le_p(handoff + 48, tm.tm_mday);
-    stq_le_p(handoff + 56, tm.tm_hour);
-    stq_le_p(handoff + 64, tm.tm_min);
-    stq_le_p(handoff + 72, tm.tm_sec);
-    stq_le_p(handoff + 80, ia64_vpc_firmware_console);
-    stq_le_p(handoff + 88, ia64_vpc_firmware_ide_dma);
-    stq_le_p(handoff + 96,
+    stq_le_p(handoff + 24, ia64_vpc_firmware_console);
+    stq_le_p(handoff + 32, ia64_vpc_firmware_ide_dma);
+    stq_le_p(handoff + 40,
              debug_port_present ? IA64_FW_DEBUG_PORT_PRESENT : 0);
-    stq_le_p(handoff + 104, debug_port_present ? IA64_DEBUG_UART_BASE : 0);
+    stq_le_p(handoff + 48, debug_port_present ? IA64_DEBUG_UART_BASE : 0);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
 }
 
@@ -982,6 +1018,7 @@ static void ia64_vpc_init(MachineState *machine)
 
     ia64_vpc_map_ram(machine);
     ia64_vpc_map_firmware_address_space();
+    ia64_vpc_init_rtc(machine);
     ia64_vpc_init_nvram(machine);
     ia64_vpc_write_firmware_handoff(machine);
 

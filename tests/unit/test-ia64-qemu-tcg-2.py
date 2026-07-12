@@ -13731,8 +13731,8 @@ test_past_rearmed_itm_does_not_interrupt = require_registers(
         "r31": 1,
     }, entry=0x10)
 
-test_future_itm_rearm_clears_stale_timer_irr = require_registers(
-    "future_itm_rearm_clears_stale_timer_irr", [
+test_future_itm_rearm_preserves_pended_timer_irr = require_registers(
+    "future_itm_rearm_preserves_pended_timer_irr", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
@@ -13754,10 +13754,35 @@ test_future_itm_rearm_clears_stale_timer_irr = require_registers(
         (0x3000, 0x10, nop_m(), adds(31, 0x66, 0),
          br_cond(0x3000, 0x3000)),
     ], {
-        "ip": 0xa0,
+        "ip": 0x3000,
         "exception": IA64_EXCP_NONE,
-        "r8": 0x2a,
-        "r31": 0,
+        "r31": 0x66,
+    }, entry=0x10)
+
+test_masking_itv_preserves_pended_timer_irr = require_registers(
+    "masking_itv_preserves_pended_timer_irr", [
+        (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
+         nop_i()),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
+         nop_i()),
+        (0x30, 0x00, mov_m_gr_ar(4, 44), nop_i(),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x50, *movl_mlx(3, IA64_VECTOR_MASKED | 0xef)),
+        (0x60, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(19, (1 << 13) | (1 << 14))),
+        (0x80, 0x00, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0x90, 0x10, nop_m(), adds(8, 0x2a, 0),
+         br_cond(0x90, 0x90)),
+        (0x3000, 0x10, nop_m(), adds(31, 0x67, 0),
+         br_cond(0x3000, 0x3000)),
+    ], {
+        "ip": 0x3000,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x67,
     }, entry=0x10)
 
 test_ptr_i_preserves_non_overlapping_itr = require_registers(
@@ -20745,8 +20770,10 @@ TEST_NAMES = {
         test_br_wtop_false_predicate_drains_epilog,
     "br_wexit_false_predicate_drains_epilog":
         test_br_wexit_false_predicate_drains_epilog,
-    "future_itm_rearm_clears_stale_timer_irr":
-        test_future_itm_rearm_clears_stale_timer_irr,
+    "future_itm_rearm_preserves_pended_timer_irr":
+        test_future_itm_rearm_preserves_pended_timer_irr,
+    "masking_itv_preserves_pended_timer_irr":
+        test_masking_itv_preserves_pended_timer_irr,
     "exception_break": test_exception_break,
     "exception_break_f": test_exception_break_f,
     "exception_break_x": test_exception_break_x,

@@ -7,6 +7,7 @@
 # specification.  This file executes those contracts against QEMU and the IA-64
 # firmware image.
 
+import calendar
 import csv
 import importlib.util
 import os
@@ -42,12 +43,10 @@ ACPI_SCI_IRQ = 9
 ACPI_FADT_FLAG_WBINVD = 1 << 0
 ACPI_FADT_FLAG_PWR_BUTTON = 1 << 4
 ACPI_FADT_FLAG_SLP_BUTTON = 1 << 5
-ACPI_FADT_FLAG_TMR_VAL_EXT = 1 << 8
 ACPI_FADT_FLAG_SW_CPU_SLP = 1 << 13
 ACPI_FADT_EXPECTED_FLAGS = (
     ACPI_FADT_FLAG_WBINVD |
     ACPI_FADT_FLAG_SLP_BUTTON |
-    ACPI_FADT_FLAG_TMR_VAL_EXT |
     ACPI_FADT_FLAG_SW_CPU_SLP
 )
 PCI_CONFIG_ECAM_BASE = 0x7FF0000000
@@ -57,8 +56,12 @@ FW_HIGH_RAM_BASE = 0x80200000
 FW_HIGH_RAM_AFTER_PCI_BASE = PCI_MMIO_BASE + PCI_MMIO_SIZE
 FW_FIRMWARE_ADDRESS_SPACE_BASE = 0xFF000000
 FW_FIRMWARE_ADDRESS_SPACE_SIZE = 0x01000000
+FW_RTC_BASE = 0xFFEF0000
+FW_RTC_SIZE = 0x00002000
 FW_NVRAM_BASE = 0xFFF00000
 FW_NVRAM_SIZE = 0x00010000
+FW_NVRAM_RTC_OFFSET = 0x0000F000
+FW_RTC_STATE_MAGIC = 0x54464F3436545249
 PCI_IO_SIZE = 0x1000000
 PCI_IO_SPARSE_SIZE = 0x4000000
 LEGACY_IO_BASE = 0x800010000000
@@ -843,7 +846,7 @@ def test_csv_rows_are_bound_to_execution(root, qemu1, qemu2):
         "system_or_translation": {"pal_version", "itc_d_preserves_24bit_key",
                                   "ptc_l_m_unit_decode",
                                   "ptr_d_purge_completes_on_srlz_d",
-                                  "future_itm_rearm_clears_stale_timer_irr",
+                                  "future_itm_rearm_preserves_pended_timer_irr",
                                   "rfi_restores_interrupted_bsp_after_cover",
                                   "pmc_pmd_registers_are_independent"},
     }
@@ -999,6 +1002,50 @@ def test_sal_efi_firmware_boot_contract(qemu, firmware):
 def test_acpi_efi_sal_binary_tables(qemu, firmware):
     elf_path = os.path.splitext(firmware)[0] + ".elf"
     symbols = objdump_symbols(elf_path)
+    rtc_before = int(time.time())
+    rtc_output = qemu_monitor_output(
+        qemu, firmware, f"xp /1gx 0x{FW_RTC_BASE:x}", delay=1.0
+    )
+    rtc_after = int(time.time())
+    rtc_match = re.search(
+        rf"\b{FW_RTC_BASE:x}:\s+0x([0-9a-fA-F]{{16}})", rtc_output
+    )
+    if rtc_match is None:
+        raise RuntimeError(
+            "could not read IA-64 host-backed RTC\n" + rtc_output
+        )
+    rtc_seconds = int(rtc_match.group(1), 16)
+    if not rtc_before - 2 <= rtc_seconds <= rtc_after + 2:
+        raise RuntimeError(
+            f"IA-64 RTC is not tracking host time: rtc={rtc_seconds} "
+            f"host={rtc_before}..{rtc_after}"
+        )
+
+    nvram_image = bytearray(FW_NVRAM_SIZE)
+    struct.pack_into(
+        "<QIIqIhBB", nvram_image, FW_NVRAM_RTC_OFFSET,
+        FW_RTC_STATE_MAGIC, 1, 0, 86400, 0, 0, 0, 0,
+    )
+    with tempfile.NamedTemporaryFile() as nvram:
+        nvram.write(nvram_image)
+        nvram.flush()
+        offset_before = int(time.time())
+        persisted = qemu_physical_bytes(
+            qemu, firmware,
+            {"mWakeupTime": symbols["mWakeupTime"]},
+            machine=f"ia64-vpc,nvram={nvram.name}",
+        )["mWakeupTime"]
+        offset_after = int(time.time())
+    persisted_epoch = calendar.timegm((
+        u16(persisted, 0), persisted[2], persisted[3], persisted[4],
+        persisted[5], persisted[6], 0, 0, 0,
+    ))
+    if not offset_before + 86400 - 2 <= persisted_epoch <= \
+            offset_after + 86400 + 2:
+        raise RuntimeError(
+            "EFI GetTime did not apply the persistent RTC offset: "
+            f"guest={persisted_epoch} host={offset_before}..{offset_after}"
+        )
     runtime_names = [
         "mSystemTable", "mConfigTables", "mSalSystemTable",
         "mSalHandoffProbe",
@@ -1008,7 +1055,7 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         "mMemoryMapEntries", "mMemoryMap",
         "mBootStackBase", "mBootStackTop", "mGuestRamSize",
         "mGuestLowRamEnd", "mGuestHighRam", "mGuestHighRamCount",
-        "mAcpiSrat",
+        "mAcpiSrat", "mRuntimeRtc", "mRuntimeRtcState",
     ]
     runtime = qemu_runtime_symbol_bytes(qemu, firmware, symbols, runtime_names)
     memory_map = parse_efi_memory_map(
@@ -1021,6 +1068,11 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     )
     boot_stack_base = u64(runtime["mBootStackBase"], 0)
     boot_stack_top = u64(runtime["mBootStackTop"], 0)
+    if u64(runtime["mRuntimeRtc"], 0) != FW_RTC_BASE:
+        raise RuntimeError("EFI runtime RTC pointer mismatch")
+    if not (FW_NVRAM_BASE <= u64(runtime["mRuntimeRtcState"], 0) <
+            FW_NVRAM_BASE + FW_NVRAM_SIZE):
+        raise RuntimeError("EFI persistent RTC state pointer mismatch")
     if (guest_ram_size != 0x80000000 or guest_high_ranges or
             boot_stack_top != guest_low_ram_end or
             boot_stack_top - boot_stack_base != FW_BOOT_STACK_SIZE):
@@ -1100,10 +1152,20 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         PCI_MMIO_BASE, PCI_MMIO_SIZE, EFI_MEMORY_UC,
     )
     find_efi_descriptor(
-        "PAL/SAL firmware address space below NVRAM", EFI_MEMORY_MAPPED_IO,
+        "PAL/SAL firmware address space below RTC", EFI_MEMORY_MAPPED_IO,
         FW_FIRMWARE_ADDRESS_SPACE_BASE,
-        FW_NVRAM_BASE - FW_FIRMWARE_ADDRESS_SPACE_BASE,
+        FW_RTC_BASE - FW_FIRMWARE_ADDRESS_SPACE_BASE,
         EFI_MEMORY_UC,
+    )
+    find_efi_descriptor(
+        "runtime RTC", EFI_MEMORY_MAPPED_IO,
+        FW_RTC_BASE, FW_RTC_SIZE,
+        EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
+    )
+    find_efi_descriptor(
+        "PAL/SAL firmware address space between RTC and NVRAM",
+        EFI_MEMORY_MAPPED_IO, FW_RTC_BASE + FW_RTC_SIZE,
+        FW_NVRAM_BASE - (FW_RTC_BASE + FW_RTC_SIZE), EFI_MEMORY_UC,
     )
     find_efi_descriptor(
         "runtime NVRAM", EFI_MEMORY_MAPPED_IO,
@@ -1574,11 +1636,20 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         EFI_MEMORY_UC,
     )
     find_efi_descriptor_in(
-        high_memory_map, "4 GiB PAL/SAL firmware space below NVRAM",
+        high_memory_map, "4 GiB PAL/SAL firmware space below RTC",
         EFI_MEMORY_MAPPED_IO,
         FW_FIRMWARE_ADDRESS_SPACE_BASE,
-        FW_NVRAM_BASE - FW_FIRMWARE_ADDRESS_SPACE_BASE,
+        FW_RTC_BASE - FW_FIRMWARE_ADDRESS_SPACE_BASE,
         EFI_MEMORY_UC,
+    )
+    find_efi_descriptor_in(
+        high_memory_map, "4 GiB runtime RTC", EFI_MEMORY_MAPPED_IO,
+        FW_RTC_BASE, FW_RTC_SIZE, EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
+    )
+    find_efi_descriptor_in(
+        high_memory_map, "4 GiB firmware space between RTC and NVRAM",
+        EFI_MEMORY_MAPPED_IO, FW_RTC_BASE + FW_RTC_SIZE,
+        FW_NVRAM_BASE - (FW_RTC_BASE + FW_RTC_SIZE), EFI_MEMORY_UC,
     )
     find_efi_descriptor_in(
         high_memory_map, "4 GiB runtime NVRAM", EFI_MEMORY_MAPPED_IO,

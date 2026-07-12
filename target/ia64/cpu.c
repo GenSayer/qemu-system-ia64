@@ -10971,18 +10971,11 @@ void ia64_itc_advance_pending_itm(CPUIA64State *env)
         env->itm_last_match_valid &&
         ia64_itm_interrupt_active(env) &&
         (int64_t)(env->ar_itc - (env->itm_last_match + 1)) < 0) {
-        env->ar_itc = env->itm_last_match + 1;
+        uint64_t ticks = env->itm_last_match + 1 - env->ar_itc;
+
+        env->ar_itc += ticks;
+        env->itc_delta += (int64_t)ticks * IA64_ITC_NS_PER_TICK;
     }
-}
-
-static void ia64_sapic_clear_irr(CPUIA64State *env, int vector)
-{
-    int idx = vector / 64;
-    int bit = vector % 64;
-
-    g_assert(vector >= 0 && vector < 256);
-    env->sapic_irr[idx] &= ~(1ULL << bit);
-    ia64_sapic_update_interrupt(env);
 }
 
 int ia64_sapic_accept(CPUIA64State *env)
@@ -11054,18 +11047,10 @@ static bool ia64_itm_update_pending(CPUIA64State *env, uint64_t itc,
     }
 
     if (ia64_itv_masked(env)) {
-        ia64_sapic_clear_irr(env, vector);
         return true;
     }
 
     if (delta_ticks > 0) {
-        /*
-         * Reprogramming ITM to a future value cancels any not-yet-accepted
-         * local timer request for the previous match.  Keep the SAPIC IRR
-         * consistent so enabling PSR.i does not deliver a stale tick before
-         * the new deadline.
-         */
-        ia64_sapic_clear_irr(env, vector);
         return false;
     }
 
