@@ -3119,7 +3119,7 @@ def parse_registers(output):
 
 
 def run_loaded_bundles(qemu, bundles, monitor_commands, entry=0x10,
-                       delay=0.25, timeout=4):
+                       delay=0.25, timeout=4, alat="full"):
     bundles = list(bundles)
     for index, bundle in enumerate(bundles):
         address, template, slot0, slot1, slot2 = bundle
@@ -3138,7 +3138,9 @@ def run_loaded_bundles(qemu, bundles, monitor_commands, entry=0x10,
             )
 
     args = [
-        qemu, "-machine", "ia64-vpc", "-smp", "1",
+        qemu, "-machine",
+        "ia64-vpc" if alat is None else f"ia64-vpc,alat={alat}",
+        "-smp", "1",
         "-display", "none", "-serial", "none", "-monitor", "stdio",
     ]
     for address, template, slot0, slot1, slot2 in bundles:
@@ -3162,10 +3164,11 @@ def run_loaded_bundles(qemu, bundles, monitor_commands, entry=0x10,
     return output
 
 
-def run_program(qemu, bundles, entry=0x10, delay=0.25):
+def run_program(qemu, bundles, entry=0x10, delay=0.25, alat="full"):
     # Stop first so direct TB chaining cannot leave live CPU state cached.
     output = run_loaded_bundles(
-        qemu, bundles, ["stop", "info registers", "quit"], entry, delay)
+        qemu, bundles, ["stop", "info registers", "quit"], entry, delay,
+        alat=alat)
     return parse_registers(output), output
 
 
@@ -3284,9 +3287,9 @@ def run_firmware_serial(qemu, memory_mb=128, timeout=15.0):
     return output
 
 
-def require_registers(name, bundles, expected, entry=0x10):
+def require_registers(name, bundles, expected, entry=0x10, alat="full"):
     def tc(qemu):
-        regs, output = run_program(qemu, bundles, entry=entry)
+        regs, output = run_program(qemu, bundles, entry=entry, alat=alat)
         missing = []
         for reg, value in expected.items():
             actual = regs.get(reg)
@@ -7113,6 +7116,37 @@ test_ld8_c_clr_hit_clears_entry = require_registers(
         (0x100, 0x00, 0x123456789abcdef0, 0,
          0),
     ], {"ip": 0x70, "r4": CHECK_LOAD_DATA}, entry=0x10)
+
+test_zero_alat_check_load_always_reloads = require_registers(
+    "zero_alat_check_load_always_reloads", [
+        (0x10, 0x00, addl(3, 0x100, 0), nop_i(),
+         nop_i()),
+        (0x20, 0x00, ld8_a(4, 3), nop_i(),
+         nop_i()),
+        (0x30, *movl_mlx(4, 0x55)),
+        (0x40, 0x00, ld8_c_nc(4, 3), nop_i(),
+         nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_cond(0x50, 0x50)),
+        (0x100, 0x00, 0x123456789abcdef0, 0,
+         0),
+    ], {"ip": 0x50, "r4": CHECK_LOAD_DATA}, entry=0x10, alat=None)
+
+test_zero_alat_chk_a_always_branches = require_registers(
+    "zero_alat_chk_a_always_branches", [
+        (0x10, 0x00, addl(3, 0x100, 0), nop_i(),
+         nop_i()),
+        (0x20, 0x00, ld8_a(22, 3), nop_i(),
+         nop_i()),
+        (0x30, 0x00, chk_a_nc_m(22, 0x30, 0x50), adds(4, 1, 0),
+         nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(),
+         br_cond(0x40, 0x40)),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_cond(0x50, 0x50)),
+        (0x100, 0x00, 0x123456789abcdef0, 0,
+         0),
+    ], {"ip": 0x50, "r4": 0}, entry=0x10, alat=None)
 
 test_ld8_sa_failure_invalidates_old_entry = require_registers(
     "ld8_sa_failure_invalidates_old_entry", [
@@ -12216,6 +12250,43 @@ test_itc_d_pl0_user_read_faults = require_registers(
         "r31": 0x71,
     }, entry=0x10)
 
+test_br_ret_cpl_change_does_not_reuse_kernel_tlb = require_registers(
+    "br_ret_cpl_change_does_not_reuse_kernel_tlb", [
+        (0x10, *movl_mlx(18, 0x4009661)),
+        (0x20, *movl_mlx(19, 0x9000)),
+        (0x30, 0x00, adds(7, 0x38, 0), nop_i(),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(19, 20), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(2, 0x9000)),
+        (0x80, 0x00, ssm(1 << 17), nop_i(),
+         nop_i()),
+        (0x90, 0x00, ld8(28, 2), nop_i(),
+         nop_i()),
+        (0xa0, *movl_mlx(3, 3 << 62)),
+        (0xb0, *movl_mlx(4, 0xe0)),
+        (0xc0, 0x00, nop_m(), mov_m_gr_ar(3, 64),
+         mov_br_gr(0, 4)),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+        (0xe0, 0x00, ld8(31, 2), nop_i(),
+         nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(),
+         br_cond(0xf0, 0xf0)),
+        (IA64_DATA_ACCESS_VECTOR, 0x10, nop_m(), adds(31, 0x72, 0),
+         br_cond(IA64_DATA_ACCESS_VECTOR, IA64_DATA_ACCESS_VECTOR)),
+        ITC_DATA_BUNDLE,
+    ], {
+        "ip": IA64_DATA_ACCESS_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r28": ITC_DATA_LOW,
+        "r31": 0x72,
+    }, entry=0x10)
+
 def test_itc_d_replaces_full_tc(qemu):
     tc_fill_count = IA64_TLB_MAX
     fill_base = 0x100000
@@ -12743,6 +12814,41 @@ test_itc_d_matching_pkr_allows_keyed_load = require_registers(
         "ip": 0xf0,
         "exception": IA64_EXCP_NONE,
         "r31": ITC_DATA_LOW,
+    }, entry=0x10)
+
+test_ssm_pk_invalidates_cached_keyless_access = require_registers(
+    "ssm_pk_invalidates_cached_keyless_access", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, 0x00, mov_rr_write(16, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0x80, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0x90, 0x00, ssm(IA64_PSR_IC | IA64_PSR_DT), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, ld8(28, 2), nop_i(),
+         nop_i()),
+        (0xb0, 0x00, ssm(IA64_PSR_PK), nop_i(),
+         nop_i()),
+        (0xc0, 0x00, ld8(31, 2), nop_i(),
+         nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+        (IA64_DATA_KEY_MISS_VECTOR, 0x10, nop_m(), adds(31, 0x74, 0),
+         br_cond(IA64_DATA_KEY_MISS_VECTOR,
+                 IA64_DATA_KEY_MISS_VECTOR)),
+        KEY_TEST_DATA_BUNDLE,
+    ], {
+        "ip": IA64_DATA_KEY_MISS_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r28": ITC_DATA_LOW,
+        "r31": 0x74,
     }, entry=0x10)
 
 test_tpa_key_miss_raises_data_key_miss = require_registers(
@@ -16724,7 +16830,7 @@ test_sum_um_rum_decode = require_registers("sum_um_rum_decode", [
 ], {"ip": 0x60, "r29": 0x8, "r30": 0}, entry=0x10)
 
 test_psr_high_mask_and_um_decode = require_registers("psr_high_mask_and_um_decode", [
-    (0x10, 0x00, addl(18, 0x5a, 0), nop_i(),
+    (0x10, 0x00, addl(18, 0x1a, 0), nop_i(),
      nop_i()),
     (0x20, 0x00, mov_m_gr_psr_um(18), nop_i(),
      nop_i()),
@@ -16738,20 +16844,30 @@ test_psr_high_mask_and_um_decode = require_registers("psr_high_mask_and_um_decod
      nop_i()),
     (0x70, 0x00, mov_m_psr_gr(31), nop_i(),
      nop_i()),
-    (0x80, 0x00, ssm(0x200000), nop_i(),
+    (0x80, 0x00, ssm(IA64_PSR_SP), nop_i(),
      nop_i()),
-    (0x90, 0x00, mov_m_psr_gr(28), nop_i(),
+    (0x90, 0x00, sum_um(0x4), nop_i(),
      nop_i()),
-    (0xa0, 0x10, nop_m(), nop_i(),
-     br_cond(0xa0, 0xa0)),
+    (0xa0, 0x00, mov_m_psr_gr(28), nop_i(),
+     nop_i()),
+    (0xb0, 0x10, nop_m(), nop_i(),
+     br_cond(0xb0, 0xb0)),
 ], {
-    "ip": 0xa0,
+    "ip": 0xb0,
     "exception": IA64_EXCP_NONE,
-    "r28": 0x200052,
-    "r29": 0x5a,
-    "r30": 0x68205a,
-    "r31": 0x52,
+    "r28": IA64_PSR_SP | 0x12,
+    "r29": 0x1a,
+    "r30": 0x68201a,
+    "r31": 0x12,
 }, entry=0x10)
+
+test_mov_psr_um_reserved_bit_fault = require_exception(
+    "mov_psr_um_reserved_bit_fault", [
+        (0x10, 0x00, addl(18, 0x40, 0), nop_i(),
+         nop_i()),
+        (0x20, 0x00, mov_m_gr_psr_um(18), nop_i(),
+         nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x20)
 
 test_ptc_e_alt_decode = require_registers("ptc_e_alt_decode", [
     (0x10, 0x00, ptc_e(0), nop_i(),
@@ -19730,6 +19846,9 @@ TEST_NAMES = {
     "ld8_c_nc_hit_preserves_target": test_ld8_c_nc_hit_preserves_target,
     "ld8_c_nc_hit_consumes_nat_base": test_ld8_c_nc_hit_consumes_nat_base,
     "ld8_c_clr_hit_clears_entry": test_ld8_c_clr_hit_clears_entry,
+    "zero_alat_check_load_always_reloads":
+        test_zero_alat_check_load_always_reloads,
+    "zero_alat_chk_a_always_branches": test_zero_alat_chk_a_always_branches,
     "ld8_sa_failure_invalidates_old_entry": test_ld8_sa_failure_invalidates_old_entry,
     "ld8_a_uc_zeroes_target_and_skips_alat":
         test_ld8_a_uc_zeroes_target_and_skips_alat,
@@ -19979,6 +20098,8 @@ TEST_NAMES = {
     "itr_i_uses_region_rid": test_itr_i_uses_region_rid,
     "itc_d_uses_source_pte_and_cr_ifa": test_itc_d_uses_source_pte_and_cr_ifa,
     "itc_d_pl0_user_read_faults": test_itc_d_pl0_user_read_faults,
+    "br_ret_cpl_change_does_not_reuse_kernel_tlb":
+        test_br_ret_cpl_change_does_not_reuse_kernel_tlb,
     "itc_d_replaces_full_tc": test_itc_d_replaces_full_tc,
     "itc_d_full_tc_replacement_rotates": test_itc_d_full_tc_replacement_rotates,
     "itc_d_preserves_24bit_key": test_itc_d_preserves_24bit_key,
@@ -20002,6 +20123,8 @@ TEST_NAMES = {
         test_itc_d_key_permission_store_raises_permission_vector,
     "itc_d_matching_pkr_allows_keyed_load":
         test_itc_d_matching_pkr_allows_keyed_load,
+    "ssm_pk_invalidates_cached_keyless_access":
+        test_ssm_pk_invalidates_cached_keyless_access,
     "tpa_key_miss_raises_data_key_miss":
         test_tpa_key_miss_raises_data_key_miss,
     "probe_key_miss_returns_zero": test_probe_key_miss_returns_zero,
@@ -20245,6 +20368,7 @@ TEST_NAMES = {
     "ssm_rsm_decode": test_ssm_rsm_decode,
     "sum_um_rum_decode": test_sum_um_rum_decode,
     "psr_high_mask_and_um_decode": test_psr_high_mask_and_um_decode,
+    "mov_psr_um_reserved_bit_fault": test_mov_psr_um_reserved_bit_fault,
     "ptc_e_alt_decode": test_ptc_e_alt_decode,
     "ptc_e_purges_data_tc_on_srlz_i":
         test_ptc_e_purges_data_tc_on_srlz_i,

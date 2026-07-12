@@ -26,6 +26,20 @@ Configure and build the IA-64 target with GTK:
 ninja -C build qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
 
+For guest-performance measurements, use an IA-64-only build without the
+compiler hardening passes that add substantial overhead to TCG helper calls:
+
+```sh
+./configure --target-list=ia64-softmmu \
+  --disable-qom-cast-debug \
+  --disable-stack-protector \
+  --extra-cflags='-O2 -fno-stack-protector -fzero-call-used-regs=skip -ftrivial-auto-var-init=uninitialized'\
+  --enable-gtk
+ninja -C build qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
+```
+
+This configuration is intended for performance testing.
+
 The firmware build requires an IA-64 ELF cross toolchain named
 `ia64-linux-gnu-*` in `PATH`.
 

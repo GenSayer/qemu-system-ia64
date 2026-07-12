@@ -1282,7 +1282,7 @@ def run_program(qemu, bundles, entry=0x10, delay=0.5, data=()):
     args = [
         qemu,
         "-machine",
-        "ia64-vpc",
+        "ia64-vpc,alat=full",
         "-smp",
         "1",
         "-display",

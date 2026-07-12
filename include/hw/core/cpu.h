@@ -267,6 +267,9 @@ struct CPUTLBEntryFull {
             uint8_t shareability;
             bool guarded;
         } arm;
+        struct {
+            uint8_t speculation;
+        } ia64;
     } extra;
 };
 

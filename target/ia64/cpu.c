@@ -44,8 +44,9 @@ typedef struct DisasContext {
     bool track_iipa;
     bool track_psr_suppression;
     bool be_data;
+    bool full_alat;
+    uint64_t nat_known_clear[2];
     bool instruction_group_start;
-    bool initial_instruction_group_start;
     bool next_instruction_group_start;
     TCGLabel *counted_self_label;
     TCGv_i64 counted_self_budget;
@@ -67,6 +68,7 @@ static TCGv_i64 cpu_fr_sig[2];
 static TCGv_i64 cpu_fr_ext_valid[2];
 static TCGv_i64 cpu_fr_int_origin[2];
 static TCGv_i64 cpu_nat[2];
+static TCGv_i64 cpu_rse_gr_dirty[2];
 
 #define DISAS_EXIT DISAS_TARGET_0
 
@@ -79,6 +81,8 @@ static TCGv_i64 cpu_nat[2];
 #define IA64_TB_FLAG_BE           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
 #define IA64_TB_FLAG_PSR_IS       (1u << 8)
+#define IA64_TB_FLAG_CPL_SHIFT    9
+#define IA64_TB_FLAG_CPL_MASK     (3u << IA64_TB_FLAG_CPL_SHIFT)
 
 #define IA64_COUNTED_SELF_BUDGET 4096
 #define IA64_CLOOP_ZERO_ST1_MAX IA64_COUNTED_SELF_BUDGET
@@ -570,6 +574,7 @@ typedef enum Ia64Opcode {
 } Ia64Opcode;
 
 typedef struct Ia64Instruction {
+    DisasContext *ctx;
     Ia64Opcode opcode;
     Ia64SlotUnit unit;
     uint64_t raw;
@@ -4817,6 +4822,157 @@ static bool ia64_insn_writes_gr_r1(const Ia64Instruction *insn)
     }
 }
 
+static bool ia64_nat_is_known_clear(const DisasContext *ctx, uint8_t reg)
+{
+    return reg == 0 ||
+           (ctx->nat_known_clear[reg / 64] & (1ULL << (reg % 64)));
+}
+
+static void ia64_nat_set_known_clear(DisasContext *ctx, uint8_t reg,
+                                     bool known_clear)
+{
+    uint64_t bit;
+
+    if (reg == 0) {
+        return;
+    }
+    bit = 1ULL << (reg % 64);
+    if (known_clear) {
+        ctx->nat_known_clear[reg / 64] |= bit;
+    } else {
+        ctx->nat_known_clear[reg / 64] &= ~bit;
+    }
+}
+
+static bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
+                                           const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_LD1:
+    case IA64_OP_LD2:
+    case IA64_OP_LD4:
+    case IA64_OP_LD8:
+    case IA64_OP_LD1A:
+    case IA64_OP_LD2A:
+    case IA64_OP_LD4A:
+    case IA64_OP_LD8A:
+    case IA64_OP_LD16:
+    case IA64_OP_MOVL:
+    case IA64_OP_MOV_BRGR:
+    case IA64_OP_MOV_PRGR:
+    case IA64_OP_MOV_ARGR:
+    case IA64_OP_MOV_CRGR:
+    case IA64_OP_MOV_PSRGR:
+    case IA64_OP_MOV_RRGR:
+    case IA64_OP_MOV_PKRGR:
+    case IA64_OP_MOV_PKRGR_INDEXED:
+    case IA64_OP_MOV_UMGR:
+    case IA64_OP_MOV_IBRGR:
+    case IA64_OP_MOV_IBRGR_INDEXED:
+    case IA64_OP_MOV_DBRGR:
+    case IA64_OP_MOV_DBRGR_INDEXED:
+    case IA64_OP_MOV_PMCGR:
+    case IA64_OP_MOV_PMCGR_INDEXED:
+    case IA64_OP_MOV_PMDGR:
+    case IA64_OP_MOV_PMDGR_INDEXED:
+    case IA64_OP_MOV_CPUID:
+    case IA64_OP_MOV_CPUID_INDEXED:
+    case IA64_OP_MOV_DAHRGR_INDEXED:
+    case IA64_OP_MOV_MSRGR:
+    case IA64_OP_MOV_IP:
+    case IA64_OP_MOV_CURRENT_IP:
+        return true;
+    case IA64_OP_LD1C_CLR:
+    case IA64_OP_LD2C_CLR:
+    case IA64_OP_LD4C_CLR:
+    case IA64_OP_LD8C_CLR:
+    case IA64_OP_LD1C_NC:
+    case IA64_OP_LD2C_NC:
+    case IA64_OP_LD4C_NC:
+    case IA64_OP_LD8C_NC:
+        /* A full-ALAT hit preserves the old destination and its NaT. */
+        return !ctx->full_alat;
+    case IA64_OP_ADDS:
+    case IA64_OP_ADDL:
+    case IA64_OP_SHL_IMM:
+    case IA64_OP_SHRU_IMM:
+    case IA64_OP_SHR_IMM:
+    case IA64_OP_EXTRU:
+    case IA64_OP_SXT1:
+    case IA64_OP_SXT2:
+    case IA64_OP_SXT4:
+    case IA64_OP_ZXT1:
+    case IA64_OP_ZXT2:
+    case IA64_OP_ZXT4:
+    case IA64_OP_DEP_IMM:
+    case IA64_OP_EXTR:
+    case IA64_OP_SUB_IMM:
+    case IA64_OP_AND_IMM:
+    case IA64_OP_ANDCM_IMM:
+    case IA64_OP_OR_IMM:
+    case IA64_OP_XOR_IMM:
+    case IA64_OP_POPCNT:
+    case IA64_OP_CLZ:
+        return ia64_nat_is_known_clear(ctx, insn->r3);
+    case IA64_OP_DEPZ:
+        return ia64_nat_is_known_clear(ctx, insn->r2);
+    case IA64_OP_DEPZ_IMM:
+        return true;
+    case IA64_OP_SHLADD:
+    case IA64_OP_ADD:
+    case IA64_OP_ADD_ONE:
+    case IA64_OP_SUB:
+    case IA64_OP_SUB_ONE:
+    case IA64_OP_AND:
+    case IA64_OP_ANDCM:
+    case IA64_OP_OR:
+    case IA64_OP_XOR:
+    case IA64_OP_SHL:
+    case IA64_OP_SHRU:
+    case IA64_OP_SHR:
+    case IA64_OP_SHRP_IMM:
+    case IA64_OP_DEP:
+    case IA64_OP_SHLADDP4:
+    case IA64_OP_MPY4:
+    case IA64_OP_MPYSHL4:
+    case IA64_OP_MPYSH:
+    case IA64_OP_MPYUH:
+    case IA64_OP_ADDP4:
+        return ia64_nat_is_known_clear(ctx, insn->r2) &&
+               ia64_nat_is_known_clear(ctx, insn->r3);
+    case IA64_OP_ADDP4_IMM:
+        return ia64_nat_is_known_clear(ctx, insn->r3);
+    case IA64_OP_MUX:
+        return ia64_nat_is_known_clear(ctx, insn->r1) &&
+               ia64_nat_is_known_clear(ctx, insn->r2) &&
+               ia64_nat_is_known_clear(ctx, insn->r3);
+    default:
+        return false;
+    }
+}
+
+static void ia64_update_nat_known(DisasContext *ctx,
+                                  const Ia64Instruction *insn)
+{
+    bool old_r1 = ia64_nat_is_known_clear(ctx, insn->r1);
+    bool old_r2 = ia64_nat_is_known_clear(ctx, insn->r2);
+    bool old_r3 = ia64_nat_is_known_clear(ctx, insn->r3);
+
+    if (ia64_insn_writes_gr_r1(insn)) {
+        bool result = ia64_nat_result_is_known_clear(ctx, insn);
+
+        /* A predicated-off instruction preserves the old destination. */
+        ia64_nat_set_known_clear(ctx, insn->r1,
+                                 result && (insn->qp == 0 || old_r1));
+    }
+
+    if (insn->reg_base_update) {
+        /* The executed update assigns base.NaT | increment.NaT. */
+        ia64_nat_set_known_clear(ctx, insn->r3, old_r3 && old_r2);
+    }
+    /* An immediate base update preserves the base register's NaT bit. */
+}
+
 static bool ia64_insn_is_privileged(const Ia64Instruction *insn)
 {
     switch (insn->opcode) {
@@ -4947,15 +5103,9 @@ static bool ia64_fr_is_writable(uint8_t reg)
     return reg > 1;
 }
 
-static void ia64_gen_fp_status_begin(const Ia64Instruction *insn)
+static TCGv_i32 ia64_fp_context(const Ia64Instruction *insn)
 {
-    gen_helper_fp_begin(tcg_env, tcg_constant_i32(insn->sf),
-                        tcg_constant_i32(insn->fp_precision));
-}
-
-static void ia64_gen_fp_status_end(const Ia64Instruction *insn)
-{
-    gen_helper_fp_end(tcg_env, tcg_constant_i32(insn->sf));
+    return tcg_constant_i32(IA64_FP_CONTEXT(insn->sf, insn->fp_precision));
 }
 
 static void ia64_gen_fr_nat_clear(uint8_t reg)
@@ -4996,6 +5146,30 @@ static void ia64_gen_fr_sig_set(uint8_t reg)
                    offsetof(CPUIA64State, fr_int_value[reg]));
 }
 
+static TCGv_i64 ia64_gen_fr_sig_read(uint8_t reg)
+{
+    TCGv_i64 bit = tcg_temp_new_i64();
+
+    if (reg <= 1) {
+        tcg_gen_movi_i64(bit, 1);
+        return bit;
+    }
+    tcg_gen_shri_i64(bit, cpu_fr_sig[reg / 64], reg % 64);
+    tcg_gen_andi_i64(bit, bit, 1);
+    return bit;
+}
+
+static TCGv_i64 ia64_fr_significand_src(uint8_t reg)
+{
+    if (reg == 0) {
+        return tcg_constant_i64(0);
+    }
+    if (reg == 1) {
+        return tcg_constant_i64(1ULL << 63);
+    }
+    return cpu_fr[reg];
+}
+
 static void ia64_gen_fr_ext_clear(uint8_t reg)
 {
     if (reg <= 1) {
@@ -5012,6 +5186,10 @@ static void ia64_gen_fr_mark_written(uint8_t reg)
     if (reg > 1) {
         tcg_gen_ori_i64(cpu_psr, cpu_psr,
                         reg >= 32 ? IA64_PSR_MFH : IA64_PSR_MFL);
+        if (reg >= 32) {
+            tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
+                            offsetof(CPUIA64State, rotating_fr_live));
+        }
     }
 }
 
@@ -5073,6 +5251,53 @@ static TCGv_i64 ia64_fr_src(uint8_t reg)
         return tcg_constant_i64(IA64_FR_ONE);
     }
     return cpu_fr[reg];
+}
+
+static void ia64_gen_fr_mov_sig(uint8_t reg, TCGv_i64 value);
+
+static void ia64_gen_xma(const Ia64Instruction *insn, uint32_t mode)
+{
+    TCGv_i64 all_sig = tcg_temp_new_i64();
+    TCGv_i64 test = tcg_temp_new_i64();
+    TCGv_i64 low = tcg_temp_new_i64();
+    TCGv_i64 high = tcg_temp_new_i64();
+    TCGLabel *slow = gen_new_label();
+    TCGLabel *done = gen_new_label();
+
+    tcg_gen_and_i64(all_sig, ia64_gen_fr_sig_read(insn->r3),
+                    ia64_gen_fr_sig_read(insn->p1));
+    tcg_gen_or_i64(test, ia64_gen_fr_nat_read(insn->r3),
+                   ia64_gen_fr_nat_read(insn->p1));
+    if (mode != 3) {
+        tcg_gen_and_i64(all_sig, all_sig,
+                        ia64_gen_fr_sig_read(insn->r2));
+        tcg_gen_or_i64(test, test, ia64_gen_fr_nat_read(insn->r2));
+    }
+    tcg_gen_xori_i64(all_sig, all_sig, 1);
+    tcg_gen_or_i64(test, test, all_sig);
+    tcg_gen_brcondi_i64(TCG_COND_NE, test, 0, slow);
+
+    if (mode == 1) {
+        tcg_gen_muls2_i64(low, high, ia64_fr_significand_src(insn->r3),
+                          ia64_fr_significand_src(insn->p1));
+    } else {
+        tcg_gen_mulu2_i64(low, high, ia64_fr_significand_src(insn->r3),
+                          ia64_fr_significand_src(insn->p1));
+    }
+    if (mode != 3) {
+        tcg_gen_add2_i64(low, high, low, high,
+                         ia64_fr_significand_src(insn->r2),
+                         tcg_constant_i64(0));
+    }
+    ia64_gen_fr_mov_sig(insn->r1, mode == 0 ? low : high);
+    tcg_gen_br(done);
+
+    gen_set_label(slow);
+    gen_helper_xma(tcg_env, tcg_constant_i32(insn->r1),
+                   tcg_constant_i32(mode == 3 ? 0 : insn->r2),
+                   tcg_constant_i32(insn->r3),
+                   tcg_constant_i32(insn->p1), tcg_constant_i32(mode));
+    gen_set_label(done);
 }
 
 static void ia64_gen_fr_mov(uint8_t reg, TCGv_i64 value)
@@ -5178,8 +5403,7 @@ static void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
     gen_set_label(fault);
     tcg_gen_movi_i64(cpu_ip, insn->address);
     gen_helper_raise_unaligned(tcg_env, addr, tcg_constant_i64(isr_access),
-                               tcg_constant_i64(insn->address),
-                               tcg_constant_i32(insn->slot));
+                               tcg_constant_i64(insn->address | insn->slot));
     gen_set_label(ok);
 }
 
@@ -5191,10 +5415,18 @@ static void ia64_gen_check_alignment(const Ia64Instruction *insn,
                                     is_write ? IA64_ISR_W : IA64_ISR_R);
 }
 
-static void ia64_gen_invalidate_alat_store(TCGv_i64 addr, uint32_t size)
+static void ia64_gen_invalidate_alat_store(DisasContext *ctx, TCGv_i64 addr,
+                                           uint32_t size)
 {
-    TCGLabel *done = gen_new_label();
-    TCGv_i32 active = tcg_temp_new_i32();
+    TCGLabel *done;
+    TCGv_i32 active;
+
+    if (!ctx->full_alat) {
+        return;
+    }
+
+    done = gen_new_label();
+    active = tcg_temp_new_i32();
 
     tcg_gen_ld_i32(active, tcg_env,
                    offsetof(CPUIA64State, alat_active_count));
@@ -5240,7 +5472,6 @@ static void ia64_gen_clear_unc_compare_targets(const Ia64Instruction *insn)
         if (insn->p2 != 0) {
             tcg_gen_movi_i64(cpu_pr[insn->p2], 0);
         }
-        tcg_gen_movi_i64(cpu_pr[0], 1);
     }
 }
 
@@ -5539,8 +5770,7 @@ static void ia64_gen_exit_to_completed(DisasContext *ctx, uint64_t ip,
 {
     ia64_gen_note_successful_bundle(completed_ip, record_iipa,
                                     track_psr_suppression);
-    ia64_gen_store_instruction_group_start(
-        ctx->next_instruction_group_start);
+    ia64_gen_store_instruction_group_start(ctx->next_instruction_group_start);
     ia64_gen_exit_to(ctx, ip);
 }
 
@@ -5592,8 +5822,7 @@ static void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
 {
     ia64_gen_note_successful_bundle(completed_ip, record_iipa,
                                     track_psr_suppression);
-    ia64_gen_store_instruction_group_start(
-        ctx->next_instruction_group_start);
+    ia64_gen_store_instruction_group_start(ctx->next_instruction_group_start);
     ia64_gen_exit_to_slot(ctx, ip, slot);
 }
 
@@ -5799,12 +6028,14 @@ static bool ia64_clock_access_needs_io(const DisasContext *ctx)
 
 static void ia64_gen_note_stacked_gr_write(uint8_t reg)
 {
-    /*
-     * The backing-store-authoritative RSE no longer tracks stacked GR
-     * writes at translation time; the virtual frame view is synced with
-     * the physical file at every frame-moving operation instead.
-     */
-    (void)reg;
+    uint32_t bit;
+
+    if (reg < IA64_STACKED_GR_BASE) {
+        return;
+    }
+    bit = reg - IA64_STACKED_GR_BASE;
+    tcg_gen_ori_i64(cpu_rse_gr_dirty[bit / 64],
+                    cpu_rse_gr_dirty[bit / 64], 1ULL << (bit % 64));
 }
 
 static void ia64_gen_gr_nat_clear(uint8_t reg)
@@ -6073,7 +6304,10 @@ static void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
     TCGv_i64 nat;
     TCGLabel *ok;
 
-    if (reg == 0) {
+    if (reg == 0 ||
+        (insn->ctx &&
+         (insn->ctx->nat_known_clear[reg / 64] &
+          (1ULL << (reg % 64))))) {
         return;
     }
 
@@ -6081,11 +6315,12 @@ static void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
     ok = gen_new_label();
     tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, ok);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    gen_helper_raise_nat_consumption(tcg_env, tcg_constant_i64(isr_access),
-                                     tcg_constant_i32(kind ==
-                                                      IA64_NAT_NON_ACCESS),
-                                     tcg_constant_i64(insn->address),
-                                     tcg_constant_i32(insn->slot));
+    if (kind == IA64_NAT_NON_ACCESS) {
+        isr_access |= IA64_ISR_NA;
+    }
+    gen_helper_raise_nat_consumption(
+        tcg_env, tcg_constant_i64(isr_access),
+        tcg_constant_i64(insn->address | insn->slot));
     gen_set_label(ok);
 }
 
@@ -6162,6 +6397,29 @@ static void ia64_gen_check_reserved_bits(const Ia64Instruction *insn,
     gen_set_label(valid);
 }
 
+static void ia64_gen_write_user_mask(TCGv_i64 value)
+{
+    TCGv_i64 new_psr = tcg_temp_new_i64();
+    TCGv_i64 new_um = tcg_temp_new_i64();
+    TCGv_i64 secure = tcg_temp_new_i64();
+    TCGv_i64 old_up = tcg_temp_new_i64();
+    TCGLabel *done = gen_new_label();
+
+    tcg_gen_andi_i64(new_psr, cpu_psr, ~IA64_PSR_UM_WRITABLE_MASK);
+    tcg_gen_andi_i64(new_um, value, IA64_PSR_UM_WRITABLE_MASK);
+    tcg_gen_or_i64(new_psr, new_psr, new_um);
+
+    /* PSR.sp makes the user performance-monitor bit read-only. */
+    tcg_gen_andi_i64(secure, cpu_psr, IA64_PSR_SP);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, secure, 0, done);
+    tcg_gen_andi_i64(new_psr, new_psr, ~IA64_PSR_UP);
+    tcg_gen_andi_i64(old_up, cpu_psr, IA64_PSR_UP);
+    tcg_gen_or_i64(new_psr, new_psr, old_up);
+    gen_set_label(done);
+
+    tcg_gen_mov_i64(cpu_psr, new_psr);
+}
+
 static void ia64_gen_validate_ar_access(const Ia64Instruction *insn,
                                         TCGv_i64 value, bool write)
 {
@@ -6171,6 +6429,39 @@ static void ia64_gen_validate_ar_access(const Ia64Instruction *insn,
                                   tcg_constant_i64(insn->address),
                                   tcg_constant_i64(insn->raw),
                                   tcg_constant_i32(insn->slot));
+}
+
+static bool ia64_ar_is_simple(uint32_t ar)
+{
+    switch (ar) {
+    case 32: /* CCV */
+    case 36: /* UNAT */
+    case 40: /* FPSR */
+    case 64: /* PFS */
+    case 65: /* LC */
+    case 66: /* EC */
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void ia64_gen_read_simple_ar(TCGv_i64 value, uint32_t ar)
+{
+    tcg_gen_ld_i64(value, tcg_env,
+                   offsetof(CPUIA64State, ar) + ar * sizeof(uint64_t));
+}
+
+static void ia64_gen_write_simple_ar(uint32_t ar, TCGv_i64 value)
+{
+    if (ar == 66) {
+        TCGv_i64 masked = tcg_temp_new_i64();
+
+        tcg_gen_andi_i64(masked, value, 0x3f);
+        value = masked;
+    }
+    tcg_gen_st_i64(value, tcg_env,
+                   offsetof(CPUIA64State, ar) + ar * sizeof(uint64_t));
 }
 
 static void ia64_gen_validate_cr_access(TCGv_i64 result,
@@ -6251,6 +6542,7 @@ static bool ia64_gen_zero_st1_cloop(DisasContext *ctx,
                               tcg_constant_i32(ctx->cloop_zero_st1_base),
                               tcg_constant_i32(ctx->mmu_idx),
                               tcg_constant_i32(IA64_CLOOP_ZERO_ST1_MAX));
+    ia64_gen_note_stacked_gr_write(ctx->cloop_zero_st1_base);
     ia64_gen_force_ri_tracked(ctx, insn->slot);
 
     tcg_gen_brcondi_i64(TCG_COND_EQ, taken, 0, l_nobr);
@@ -6349,7 +6641,7 @@ static void ia64_gen_ld_fill_nat(uint8_t reg, TCGv_i64 addr)
     TCGv_i64 bitpos = tcg_temp_new_i64();
     TCGv_i64 natbit = tcg_temp_new_i64();
 
-    gen_helper_read_ar(unat, tcg_env, tcg_constant_i32(36));
+    ia64_gen_read_simple_ar(unat, 36);
     tcg_gen_shri_i64(bitpos, addr, 3);
     tcg_gen_andi_i64(bitpos, bitpos, 0x3f);
     tcg_gen_shr_i64(natbit, unat, bitpos);
@@ -6419,14 +6711,14 @@ static void ia64_gen_speculative_load(DisasContext *ctx,
 
     tcg_gen_qemu_ld_i64(cpu_gr[insn->r1], addr, ctx->mmu_idx, mop);
     ia64_gen_gr_nat_clear(insn->r1);
-    if (advanced) {
+    if (advanced && ctx->full_alat) {
         gen_helper_set_alat(tcg_env, tcg_constant_i32(insn->r1), addr,
                             tcg_constant_i32(ia64_memop_size(mop)));
     }
     tcg_gen_br(l_done);
 
     gen_set_label(l_fail);
-    if (advanced) {
+    if (advanced && ctx->full_alat) {
         gen_helper_invalidate_alat_reg(tcg_env, tcg_constant_i32(insn->r1));
     }
     tcg_gen_movi_i64(cpu_gr[insn->r1], 0);
@@ -6522,7 +6814,7 @@ static void ia64_gen_fp_load(DisasContext *ctx, const Ia64Instruction *insn)
     ia64_gen_load_reg_base_update_inputs(insn, &increment, &base_nat,
                                          &increment_nat);
 
-    if (insn->fp_load_check) {
+    if (insn->fp_load_check && ctx->full_alat) {
         TCGv_i64 hit = tcg_temp_new_i64();
         TCGLabel *l_done = gen_new_label();
 
@@ -6564,14 +6856,14 @@ static void ia64_gen_fp_load(DisasContext *ctx, const Ia64Instruction *insn)
         tcg_gen_brcondi_i64(TCG_COND_EQ, ok, 0, l_fail);
 
         ia64_gen_fp_load_value(ctx, insn, addr);
-        if (insn->fp_load_advanced) {
+        if (insn->fp_load_advanced && ctx->full_alat) {
             gen_helper_set_alat_fp(tcg_env, tcg_constant_i32(insn->r1),
                                    addr, tcg_constant_i32(size));
         }
         tcg_gen_br(l_done);
 
         gen_set_label(l_fail);
-        if (insn->fp_load_advanced) {
+        if (insn->fp_load_advanced && ctx->full_alat) {
             gen_helper_invalidate_alat_fp_reg(tcg_env,
                                               tcg_constant_i32(insn->r1));
         }
@@ -6596,13 +6888,17 @@ static void ia64_gen_fp_load(DisasContext *ctx, const Ia64Instruction *insn)
         gen_helper_advanced_load_allowed(allowed, tcg_env, addr);
         tcg_gen_brcondi_i64(TCG_COND_EQ, allowed, 0, l_fail);
         ia64_gen_fp_load_value(ctx, insn, addr);
-        gen_helper_set_alat_fp(tcg_env, tcg_constant_i32(insn->r1),
-                               addr, tcg_constant_i32(size));
+        if (ctx->full_alat) {
+            gen_helper_set_alat_fp(tcg_env, tcg_constant_i32(insn->r1),
+                                   addr, tcg_constant_i32(size));
+        }
         tcg_gen_br(l_done);
 
         gen_set_label(l_fail);
-        gen_helper_invalidate_alat_fp_reg(tcg_env,
-                                          tcg_constant_i32(insn->r1));
+        if (ctx->full_alat) {
+            gen_helper_invalidate_alat_fp_reg(
+                tcg_env, tcg_constant_i32(insn->r1));
+        }
         ia64_gen_fp_load_advanced_fail_value(insn);
 
         gen_set_label(l_done);
@@ -6702,7 +6998,7 @@ static void ia64_gen_fp_load_pair(DisasContext *ctx,
 
     tcg_gen_mov_i64(addr, ia64_gr_src(insn->r3));
 
-    if (insn->fp_load_check) {
+    if (insn->fp_load_check && ctx->full_alat) {
         TCGv_i64 hit = tcg_temp_new_i64();
         TCGLabel *l_done = gen_new_label();
 
@@ -6743,14 +7039,14 @@ static void ia64_gen_fp_load_pair(DisasContext *ctx,
         tcg_gen_brcondi_i64(TCG_COND_EQ, ok, 0, l_fail);
 
         ia64_gen_fp_load_pair_value(ctx, insn, addr);
-        if (insn->fp_load_advanced) {
+        if (insn->fp_load_advanced && ctx->full_alat) {
             gen_helper_set_alat_fp(tcg_env, tcg_constant_i32(insn->r1),
                                    addr, tcg_constant_i32(size));
         }
         tcg_gen_br(l_done);
 
         gen_set_label(l_fail);
-        if (insn->fp_load_advanced) {
+        if (insn->fp_load_advanced && ctx->full_alat) {
             gen_helper_invalidate_alat_fp_reg(tcg_env,
                                               tcg_constant_i32(insn->r1));
         }
@@ -6771,13 +7067,17 @@ static void ia64_gen_fp_load_pair(DisasContext *ctx,
         gen_helper_advanced_load_allowed(allowed, tcg_env, addr);
         tcg_gen_brcondi_i64(TCG_COND_EQ, allowed, 0, l_fail);
         ia64_gen_fp_load_pair_value(ctx, insn, addr);
-        gen_helper_set_alat_fp(tcg_env, tcg_constant_i32(insn->r1),
-                               addr, tcg_constant_i32(size));
+        if (ctx->full_alat) {
+            gen_helper_set_alat_fp(tcg_env, tcg_constant_i32(insn->r1),
+                                   addr, tcg_constant_i32(size));
+        }
         tcg_gen_br(l_done);
 
         gen_set_label(l_fail);
-        gen_helper_invalidate_alat_fp_reg(tcg_env,
-                                          tcg_constant_i32(insn->r1));
+        if (ctx->full_alat) {
+            gen_helper_invalidate_alat_fp_reg(
+                tcg_env, tcg_constant_i32(insn->r1));
+        }
         ia64_gen_fp_load_pair_advanced_fail_value(insn);
 
         gen_set_label(l_done);
@@ -7633,7 +7933,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         return true;
     }
 
-    qp_value = cpu_pr[insn->qp];
+    qp_value = insn->qp == 0 ? tcg_constant_i64(1) : cpu_pr[insn->qp];
     if ((insn->compare_unc ||
          (insn->clear_p2_before_predicate && insn->qp == insn->p2)) &&
         insn->qp != 0) {
@@ -7655,7 +7955,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     ia64_gen_clear_unc_compare_targets(insn);
     if (insn->clear_p2_before_predicate && insn->p2 != 0) {
         tcg_gen_movi_i64(cpu_pr[insn->p2], 0);
-        tcg_gen_movi_i64(cpu_pr[0], 1);
     }
     skip = ia64_gen_predicate_skip(insn, qp_value);
     if (insn->placement_illegal) {
@@ -7769,13 +8068,25 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         }
         break;
     case IA64_OP_RUM:
-        gen_helper_rum(tcg_env, tcg_constant_i64(insn->imm));
+    {
+        TCGv_i64 value = tcg_temp_new_i64();
+
+        tcg_gen_andi_i64(value, cpu_psr,
+                         ~(insn->imm & IA64_PSR_UM_WRITABLE_MASK));
+        ia64_gen_write_user_mask(value);
         ctx->exit_after_bundle = true;
         break;
+    }
     case IA64_OP_SUM_UM:
-        gen_helper_sum_um(tcg_env, tcg_constant_i64(insn->imm));
+    {
+        TCGv_i64 value = tcg_temp_new_i64();
+
+        tcg_gen_ori_i64(value, cpu_psr,
+                        insn->imm & IA64_PSR_UM_WRITABLE_MASK);
+        ia64_gen_write_user_mask(value);
         ctx->exit_after_bundle = true;
         break;
+    }
     case IA64_OP_BRP:
         break;
     case IA64_OP_FSETC:
@@ -8309,7 +8620,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             if (insn->p2 != 0) {
                 tcg_gen_movi_i64(cpu_pr[insn->p2], 0);
             }
-            tcg_gen_movi_i64(cpu_pr[0], 1);
             tcg_gen_br(cmp_done);
             gen_set_label(no_nat);
         }
@@ -8363,7 +8673,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                 tcg_gen_xori_i64(cpu_pr[insn->p2], tmp, 1);
             }
         }
-        tcg_gen_movi_i64(cpu_pr[0], 1);
         gen_set_label(cmp_done);
         break;
     }
@@ -8399,7 +8708,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             if (insn->p2 != 0) {
                 tcg_gen_movi_i64(cpu_pr[insn->p2], 0);
             }
-            tcg_gen_movi_i64(cpu_pr[0], 1);
             tcg_gen_br(tbit_done);
             gen_set_label(no_nat);
         }
@@ -8414,7 +8722,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         }
         tcg_gen_xori_i64(not_cond, cond, 1);
         ia64_gen_predicate_test_write(&pred_insn, cond, not_cond);
-        tcg_gen_movi_i64(cpu_pr[0], 1);
         gen_set_label(tbit_done);
         break;
     }
@@ -8439,7 +8746,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             pred_insn.pred_update = IA64_PRED_UPDATE_AND;
         }
         ia64_gen_predicate_test_write(&pred_insn, cond, not_cond);
-        tcg_gen_movi_i64(cpu_pr[0], 1);
         break;
     }
     case IA64_OP_TF_Z:
@@ -8459,7 +8765,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         }
         tcg_gen_xori_i64(not_cond, cond, 1);
         ia64_gen_predicate_test_write(insn, cond, not_cond);
-        tcg_gen_movi_i64(cpu_pr[0], 1);
         break;
     }
     case IA64_OP_LD1:
@@ -8532,14 +8837,18 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                     tcg_gen_qemu_ld_i64(cpu_gr[insn->r1], addr,
                                         ctx->mmu_idx, mop);
                     ia64_gen_gr_nat_clear(insn->r1);
-                    gen_helper_set_alat(
-                        tcg_env, tcg_constant_i32(insn->r1), addr,
-                        tcg_constant_i32(ia64_memop_size(mop)));
+                    if (ctx->full_alat) {
+                        gen_helper_set_alat(
+                            tcg_env, tcg_constant_i32(insn->r1), addr,
+                            tcg_constant_i32(ia64_memop_size(mop)));
+                    }
                     tcg_gen_br(l_done);
 
                     gen_set_label(l_fail);
-                    gen_helper_invalidate_alat_reg(
-                        tcg_env, tcg_constant_i32(insn->r1));
+                    if (ctx->full_alat) {
+                        gen_helper_invalidate_alat_reg(
+                            tcg_env, tcg_constant_i32(insn->r1));
+                    }
                     tcg_gen_movi_i64(cpu_gr[insn->r1], 0);
                     ia64_gen_gr_nat_clear(insn->r1);
 
@@ -8616,30 +8925,34 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                 ctx, ia64_memop_for_opcode(insn->opcode));
             const bool clear = insn->opcode >= IA64_OP_LD1C_CLR &&
                                insn->opcode <= IA64_OP_LD8C_CLR;
-            TCGv_i64 hit = tcg_temp_new_i64();
-            TCGLabel *l_done = gen_new_label();
-
             ia64_gen_check_nat_non_access(insn, insn->r3, false);
-            gen_helper_check_load_alat_addr(hit, tcg_env,
-                                            tcg_constant_i32(insn->r1),
-                                            addr,
-                                            tcg_constant_i32(
-                                                ia64_memop_size(mop)),
-                                            tcg_constant_i32(clear));
-            tcg_gen_brcondi_i64(TCG_COND_NE, hit, 0, l_done);
+            TCGLabel *l_done = NULL;
+
+            if (ctx->full_alat) {
+                TCGv_i64 hit = tcg_temp_new_i64();
+
+                l_done = gen_new_label();
+                gen_helper_check_load_alat_addr(
+                    hit, tcg_env, tcg_constant_i32(insn->r1), addr,
+                    tcg_constant_i32(ia64_memop_size(mop)),
+                    tcg_constant_i32(clear));
+                tcg_gen_brcondi_i64(TCG_COND_NE, hit, 0, l_done);
+            }
 
             ia64_gen_check_alignment(insn, addr, ia64_memop_size(mop),
                                      false, false);
             tcg_gen_qemu_ld_i64(cpu_gr[insn->r1], addr, ctx->mmu_idx, mop);
             ia64_gen_gr_nat_clear(insn->r1);
             ia64_gen_memory_acquire(insn);
-            if (!clear) {
+            if (!clear && ctx->full_alat) {
                 gen_helper_set_alat(tcg_env, tcg_constant_i32(insn->r1),
                                     addr,
                                     tcg_constant_i32(ia64_memop_size(mop)));
             }
 
-            gen_set_label(l_done);
+            if (l_done) {
+                gen_set_label(l_done);
+            }
         }
         if (insn->reg_base_update && insn->r3 != 0) {
             ia64_gen_load_reg_base_update(insn, addr, increment, base_nat,
@@ -8690,7 +9003,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             gen_helper_read_ar(high, tcg_env, tcg_constant_i32(25));
             tcg_gen_qemu_st_i64(high, high_addr, ctx->mmu_idx,
                                 ia64_data_memop(ctx, MO_LEUQ));
-            ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 16);
+            ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(insn->r3), 16);
         }
         break;
     case IA64_OP_ST1:
@@ -8722,7 +9035,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                  false, true);
         ia64_gen_memory_release(insn);
         tcg_gen_qemu_st_i64(value, addr, ctx->mmu_idx, mop);
-        ia64_gen_invalidate_alat_store(addr, ia64_memop_size(mop));
+        ia64_gen_invalidate_alat_store(ctx, addr, ia64_memop_size(mop));
         if (insn->opcode == IA64_OP_ST8SPILL) {
             gen_helper_st_spill_unat(tcg_env, tcg_constant_i32(insn->r2),
                                      addr);
@@ -8783,33 +9096,57 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         if (insn->r1 != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
 
-            ia64_gen_validate_ar_access(insn, tcg_constant_i64(0), false);
-            if (ia64_ar_access_reads_clock(insn->r2) &&
-                ia64_clock_access_needs_io(ctx)) {
-                translator_io_start(&ctx->base);
+            if (ia64_ar_is_simple(insn->r2)) {
+                ia64_gen_read_simple_ar(val, insn->r2);
+            } else {
+                ia64_gen_validate_ar_access(insn, tcg_constant_i64(0),
+                                            false);
+                if (ia64_ar_access_reads_clock(insn->r2) &&
+                    ia64_clock_access_needs_io(ctx)) {
+                    translator_io_start(&ctx->base);
+                }
+                gen_helper_read_ar(val, tcg_env,
+                                   tcg_constant_i32(insn->r2));
             }
-            gen_helper_read_ar(val, tcg_env, tcg_constant_i32(insn->r2));
             ia64_gen_gr_write_nat_clear(insn->r1, val);
         }
         break;
     case IA64_OP_MOV_GRAR:
         ia64_gen_check_nat_register(insn, insn->r1);
-        ia64_gen_validate_ar_access(insn, ia64_gr_src(insn->r1), true);
-        if (ia64_ar_access_reads_clock(insn->r2)) {
-            translator_io_start(&ctx->base);
-            ctx->exit_after_bundle = true;
+        if (ia64_ar_is_simple(insn->r2)) {
+            if (insn->r2 == 40 || insn->r2 == 64) {
+                ia64_gen_validate_ar_access(insn, ia64_gr_src(insn->r1),
+                                            true);
+            }
+            ia64_gen_write_simple_ar(insn->r2, ia64_gr_src(insn->r1));
+        } else {
+            ia64_gen_validate_ar_access(insn, ia64_gr_src(insn->r1), true);
+            if (ia64_ar_access_reads_clock(insn->r2)) {
+                translator_io_start(&ctx->base);
+                ctx->exit_after_bundle = true;
+            }
+            gen_helper_write_ar(tcg_env, tcg_constant_i32(insn->r2),
+                                ia64_gr_src(insn->r1));
         }
-        gen_helper_write_ar(tcg_env, tcg_constant_i32(insn->r2),
-                            ia64_gr_src(insn->r1));
         break;
     case IA64_OP_MOV_IMMAR:
-        ia64_gen_validate_ar_access(insn, tcg_constant_i64(insn->imm), true);
-        if (ia64_ar_access_reads_clock(insn->r2)) {
-            translator_io_start(&ctx->base);
-            ctx->exit_after_bundle = true;
+        if (ia64_ar_is_simple(insn->r2)) {
+            if (insn->r2 == 40 || insn->r2 == 64) {
+                ia64_gen_validate_ar_access(
+                    insn, tcg_constant_i64(insn->imm), true);
+            }
+            ia64_gen_write_simple_ar(insn->r2,
+                                     tcg_constant_i64(insn->imm));
+        } else {
+            ia64_gen_validate_ar_access(
+                insn, tcg_constant_i64(insn->imm), true);
+            if (ia64_ar_access_reads_clock(insn->r2)) {
+                translator_io_start(&ctx->base);
+                ctx->exit_after_bundle = true;
+            }
+            gen_helper_write_ar(tcg_env, tcg_constant_i32(insn->r2),
+                                tcg_constant_i64(insn->imm));
         }
-        gen_helper_write_ar(tcg_env, tcg_constant_i32(insn->r2),
-                            tcg_constant_i64(insn->imm));
         break;
     case IA64_OP_MOV_CRGR:
         if (insn->r1 != 0) {
@@ -8904,19 +9241,15 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     case IA64_OP_MOV_UMGR: {
         TCGv_i64 val = tcg_temp_new_i64();
-        tcg_gen_andi_i64(val, cpu_psr, IA64_PSR_UM_MASK);
+        tcg_gen_andi_i64(val, cpu_psr, IA64_PSR_UM_WRITABLE_MASK);
         ia64_gen_gr_write_nat_clear(insn->r1, val);
         break;
     }
     case IA64_OP_MOV_GRUM: {
-        TCGv_i64 new_psr = tcg_temp_new_i64();
-        TCGv_i64 um = tcg_temp_new_i64();
-
         ia64_gen_check_nat_register(insn, insn->r1);
-        tcg_gen_andi_i64(new_psr, cpu_psr, ~IA64_PSR_UM_MASK);
-        tcg_gen_andi_i64(um, ia64_gr_src(insn->r1), IA64_PSR_UM_MASK);
-        tcg_gen_or_i64(new_psr, new_psr, um);
-        gen_helper_mov_psr_write(tcg_env, new_psr, tcg_constant_i32(0));
+        ia64_gen_check_reserved_bits(insn, ia64_gr_src(insn->r1),
+                                     IA64_PSR_UM_WRITABLE_MASK);
+        ia64_gen_write_user_mask(ia64_gr_src(insn->r1));
         ctx->exit_after_bundle = true;
         break;
     }
@@ -9273,7 +9606,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                  true);
         tcg_gen_qemu_st_i64(ia64_fr_src(insn->r2), ia64_gr_src(insn->r3),
                              ctx->mmu_idx, ia64_data_memop(ctx, MO_LEUQ));
-        ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 8);
+        ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(insn->r3), 8);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
             ia64_gen_note_stacked_gr_write(insn->r3);
@@ -9285,7 +9618,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                  true);
         tcg_gen_qemu_st_i64(ia64_fr_src(insn->r2), ia64_gr_src(insn->r3),
                              ctx->mmu_idx, ia64_data_memop(ctx, MO_LEUL));
-        ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 4);
+        ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(insn->r3), 4);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
             ia64_gen_note_stacked_gr_write(insn->r3);
@@ -9297,7 +9630,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                  true);
         gen_helper_stf_spill(tcg_env, ia64_gr_src(insn->r3),
                              tcg_constant_i32(insn->r2));
-        ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 16);
+        ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(insn->r3), 16);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
             ia64_gen_note_stacked_gr_write(insn->r3);
@@ -9310,7 +9643,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                  true);
         tcg_gen_qemu_st_i64(ia64_fr_src(insn->r2), ia64_gr_src(insn->r3),
                              ctx->mmu_idx, ia64_data_memop(ctx, MO_LEUQ));
-        ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 8);
+        ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(insn->r3), 8);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
             ia64_gen_note_stacked_gr_write(insn->r3);
@@ -9322,139 +9655,97 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                  true);
         gen_helper_stfe(tcg_env, ia64_gr_src(insn->r3),
                         tcg_constant_i32(insn->r2));
-        ia64_gen_invalidate_alat_store(ia64_gr_src(insn->r3), 10);
+        ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(insn->r3), 10);
         if (insn->imm_base_update && insn->r3 != 0) {
             tcg_gen_addi_i64(cpu_gr[insn->r3], cpu_gr[insn->r3], insn->imm);
             ia64_gen_note_stacked_gr_write(insn->r3);
         }
         break;
     case IA64_OP_FADD:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fadd(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
-                        tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                        tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FSUB:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fsub(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
-                        tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                        tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FMPY:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fmpy(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
-                        tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                        tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FMA:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fma4(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
                         tcg_constant_i32(insn->r3),
-                        tcg_constant_i32(insn->p1));
-        ia64_gen_fp_status_end(insn);
+                        tcg_constant_i32(insn->p1), ia64_fp_context(insn));
         break;
     case IA64_OP_XMA_L:
-        gen_helper_xma(tcg_env, tcg_constant_i32(insn->r1),
-                       tcg_constant_i32(insn->r2),
-                       tcg_constant_i32(insn->r3),
-                       tcg_constant_i32(insn->p1),
-                       tcg_constant_i32(0));
+        ia64_gen_xma(insn, 0);
         break;
     case IA64_OP_XMA_H:
-        gen_helper_xma(tcg_env, tcg_constant_i32(insn->r1),
-                       tcg_constant_i32(insn->r2),
-                       tcg_constant_i32(insn->r3),
-                       tcg_constant_i32(insn->p1),
-                       tcg_constant_i32(1));
+        ia64_gen_xma(insn, 1);
         break;
     case IA64_OP_XMA_HU:
-        gen_helper_xma(tcg_env, tcg_constant_i32(insn->r1),
-                       tcg_constant_i32(insn->r2),
-                       tcg_constant_i32(insn->r3),
-                       tcg_constant_i32(insn->p1),
-                       tcg_constant_i32(2));
+        ia64_gen_xma(insn, 2);
         break;
     case IA64_OP_XMPY_HU:
-        gen_helper_xma(tcg_env, tcg_constant_i32(insn->r1),
-                       tcg_constant_i32(0),
-                       tcg_constant_i32(insn->r3),
-                       tcg_constant_i32(insn->p1),
-                       tcg_constant_i32(3));
+        ia64_gen_xma(insn, 3);
         break;
     case IA64_OP_FMIN:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fmin(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
-                        tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                        tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FMAX:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fmax(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
-                        tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                        tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FAMIN:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_famin(tcg_env, tcg_constant_i32(insn->r1),
-                        tcg_constant_i32(insn->r2),
-                        tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                         tcg_constant_i32(insn->r2),
+                         tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FAMAX:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_famax(tcg_env, tcg_constant_i32(insn->r1),
-                        tcg_constant_i32(insn->r2),
-                        tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                         tcg_constant_i32(insn->r2),
+                         tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FRCPA:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_frcpa(tcg_env, tcg_constant_i32(insn->r1),
                          tcg_constant_i32(insn->p1),
                          tcg_constant_i32(insn->r2),
-                         tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                         tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FPRCPA:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fprcpa(tcg_env, tcg_constant_i32(insn->r1),
                           tcg_constant_i32(insn->p2),
                           tcg_constant_i32(insn->r2),
                           tcg_constant_i32(insn->r3),
-                          tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                          ia64_fp_context(insn));
         break;
     case IA64_OP_FCMP:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fcmp(tcg_env,
                         tcg_constant_i32(insn->p1),
                         tcg_constant_i32(insn->p2),
                         tcg_constant_i32(insn->r2),
                         tcg_constant_i32(insn->r3),
-                        tcg_constant_i32(insn->imm));
-        ia64_gen_fp_status_end(insn);
+                        tcg_constant_i32(insn->imm), ia64_fp_context(insn));
         break;
     case IA64_OP_FMS:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fms(tcg_env, tcg_constant_i32(insn->r1),
                        tcg_constant_i32(insn->r2),
                        tcg_constant_i32(insn->r3),
-                       tcg_constant_i32(insn->p1));
-        ia64_gen_fp_status_end(insn);
+                       tcg_constant_i32(insn->p1), ia64_fp_context(insn));
         break;
     case IA64_OP_FNMA:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fnma4(tcg_env, tcg_constant_i32(insn->r1),
                          tcg_constant_i32(insn->r2),
                          tcg_constant_i32(insn->r3),
-                         tcg_constant_i32(insn->p1));
-        ia64_gen_fp_status_end(insn);
+                         tcg_constant_i32(insn->p1), ia64_fp_context(insn));
         break;
     case IA64_OP_FSELECT:
         gen_helper_fselect(tcg_env, tcg_constant_i32(insn->r1),
@@ -9463,11 +9754,9 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                            tcg_constant_i32(insn->p1));
         break;
     case IA64_OP_FNORM:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fnorm(tcg_env, tcg_constant_i32(insn->r1),
                          tcg_constant_i32(insn->r2),
-                         tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                         tcg_constant_i32(insn->r3), ia64_fp_context(insn));
         break;
     case IA64_OP_FPABS:
         gen_helper_fpabs(tcg_env, tcg_constant_i32(insn->r1),
@@ -9482,19 +9771,16 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                             tcg_constant_i32(insn->r2));
         break;
     case IA64_OP_FPRSQRTA:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fprsqrta(tcg_env, tcg_constant_i32(insn->r1),
                             tcg_constant_i32(insn->p2),
                             tcg_constant_i32(insn->r3),
-                            tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                            ia64_fp_context(insn));
         break;
     case IA64_OP_FRSQRTA:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_frsqrta(tcg_env, tcg_constant_i32(insn->r1),
                            tcg_constant_i32(insn->p2),
-                           tcg_constant_i32(insn->r3));
-        ia64_gen_fp_status_end(insn);
+                           tcg_constant_i32(insn->r3),
+                           ia64_fp_context(insn));
         break;
     case IA64_OP_FPACK:
         gen_helper_fpack(tcg_env, tcg_constant_i32(insn->r1),
@@ -9588,92 +9874,74 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                            tcg_constant_i32(2));
         break;
     case IA64_OP_FPMIN:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpminmax(tcg_env, tcg_constant_i32(insn->r1),
                             tcg_constant_i32(insn->r2),
                             tcg_constant_i32(insn->r3),
                             tcg_constant_i32(0),
                             tcg_constant_i32(0),
-                            tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                            ia64_fp_context(insn));
         break;
     case IA64_OP_FPMAX:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpminmax(tcg_env, tcg_constant_i32(insn->r1),
                             tcg_constant_i32(insn->r2),
                             tcg_constant_i32(insn->r3),
                             tcg_constant_i32(1),
                             tcg_constant_i32(0),
-                            tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                            ia64_fp_context(insn));
         break;
     case IA64_OP_FPAMIN:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpminmax(tcg_env, tcg_constant_i32(insn->r1),
                             tcg_constant_i32(insn->r2),
                             tcg_constant_i32(insn->r3),
                             tcg_constant_i32(0),
                             tcg_constant_i32(1),
-                            tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                            ia64_fp_context(insn));
         break;
     case IA64_OP_FPAMAX:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpminmax(tcg_env, tcg_constant_i32(insn->r1),
                             tcg_constant_i32(insn->r2),
                             tcg_constant_i32(insn->r3),
                             tcg_constant_i32(1),
                             tcg_constant_i32(1),
-                            tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                            ia64_fp_context(insn));
         break;
     case IA64_OP_FPCMP:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpcmp(tcg_env, tcg_constant_i32(insn->r1),
                          tcg_constant_i32(insn->r2),
                          tcg_constant_i32(insn->r3),
                          tcg_constant_i32(insn->imm),
-                         tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                         ia64_fp_context(insn));
         break;
     case IA64_OP_FPCVT:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpcvt(tcg_env, tcg_constant_i32(insn->r1),
                          tcg_constant_i32(insn->r2),
                          tcg_constant_i32(insn->imm & 1),
                          tcg_constant_i32((insn->imm >> 1) & 1),
-                         tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                         ia64_fp_context(insn));
         break;
     case IA64_OP_FPMA:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpma(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
                         tcg_constant_i32(insn->r3),
                         tcg_constant_i32(insn->p1),
                         tcg_constant_i32(0),
-                        tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                        ia64_fp_context(insn));
         break;
     case IA64_OP_FPMS:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpma(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
                         tcg_constant_i32(insn->r3),
                         tcg_constant_i32(insn->p1),
                         tcg_constant_i32(1),
-                        tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                        ia64_fp_context(insn));
         break;
     case IA64_OP_FPNMA:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fpma(tcg_env, tcg_constant_i32(insn->r1),
                         tcg_constant_i32(insn->r2),
                         tcg_constant_i32(insn->r3),
                         tcg_constant_i32(insn->p1),
                         tcg_constant_i32(2),
-                        tcg_constant_i32(insn->sf));
-        ia64_gen_fp_status_end(insn);
+                        ia64_fp_context(insn));
         break;
     case IA64_OP_FMOV:
         gen_helper_fmov(tcg_env, tcg_constant_i32(insn->r1),
@@ -9685,12 +9953,11 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     case IA64_OP_FCVT_FX:
     case IA64_OP_FCVT_FXU:
-        ia64_gen_fp_status_begin(insn);
         gen_helper_fcvt_fx(tcg_env, tcg_constant_i32(insn->r1),
                            tcg_constant_i32(insn->r2),
                            tcg_constant_i32(insn->opcode == IA64_OP_FCVT_FXU),
-                           tcg_constant_i32((insn->imm >> 1) & 1));
-        ia64_gen_fp_status_end(insn);
+                           tcg_constant_i32((insn->imm >> 1) & 1),
+                           ia64_fp_context(insn));
         break;
     case IA64_OP_GETF_D:
         if (insn->r1 != 0) {
@@ -9710,9 +9977,19 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     case IA64_OP_GETF_SIG:
         if (insn->r1 != 0) {
+            TCGLabel *slow = gen_new_label();
+            TCGLabel *done = gen_new_label();
+
+            tcg_gen_brcondi_i64(TCG_COND_EQ,
+                                ia64_gen_fr_sig_read(insn->r2), 0, slow);
+            tcg_gen_mov_i64(cpu_gr[insn->r1],
+                            ia64_fr_significand_src(insn->r2));
+            tcg_gen_br(done);
+            gen_set_label(slow);
             gen_helper_getf(cpu_gr[insn->r1], tcg_env,
                             tcg_constant_i32(insn->r2),
                             tcg_constant_i32(2));
+            gen_set_label(done);
             ia64_gen_gr_nat_assign(insn->r1, ia64_gen_fr_nat_read(insn->r2));
         }
         break;
@@ -9775,7 +10052,14 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     case IA64_OP_CHK_A:
     case IA64_OP_CHK_A_CLR:
-        if (!insn->check_fp && insn->unit == IA64_UNIT_M) {
+        if (!ctx->full_alat && insn->unit == IA64_UNIT_M) {
+            ia64_gen_goto_completed(ctx, insn->address + insn->imm,
+                                    insn->address, record_iipa,
+                                    track_psr_suppression);
+            if (skip == NULL) {
+                return true;
+            }
+        } else if (!insn->check_fp && insn->unit == IA64_UNIT_M) {
             const bool clear = insn->opcode == IA64_OP_CHK_A_CLR;
             TCGv_i64 hit = tcg_temp_new_i64();
             TCGv_i64 failed = tcg_temp_new_i64();
@@ -9871,10 +10155,14 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         gen_helper_fc(tcg_env, ia64_gr_src(insn->r3));
         break;
     case IA64_OP_INVALA:
-        gen_helper_invala(tcg_env);
+        if (ctx->full_alat) {
+            gen_helper_invala(tcg_env);
+        }
         break;
     case IA64_OP_INVALAT:
-        if (insn->check_fp) {
+        if (!ctx->full_alat) {
+            break;
+        } else if (insn->check_fp) {
             gen_helper_invalidate_alat_fp_reg(tcg_env,
                                               tcg_constant_i32(insn->r1));
         } else {
@@ -10138,7 +10426,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                 ctx->mmu_idx, memop);
         ia64_gen_memory_acquire(insn);
         ia64_gen_gr_nat_clear(insn->r1);
-        ia64_gen_invalidate_alat_store(addr, size);
+        ia64_gen_invalidate_alat_store(ctx, addr, size);
         break;
     }
     case IA64_OP_CMPXCHG1:
@@ -10160,7 +10448,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                         IA64_ISR_R | IA64_ISR_W);
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_check_semaphore_access(tcg_env, addr);
-        gen_helper_read_ar(ccv, tcg_env, tcg_constant_i32(32));
+        ia64_gen_read_simple_ar(ccv, 32);
         ia64_gen_memory_release(insn);
         gen_helper_cmpxchg(cpu_gr[insn->r1], tcg_env, addr, ccv, value,
                             tcg_constant_i32(size));
@@ -10178,7 +10466,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                         IA64_ISR_R | IA64_ISR_W);
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_check_semaphore_access(tcg_env, ia64_gr_src(insn->r3));
-        gen_helper_read_ar(ccv, tcg_env, tcg_constant_i32(32));
+        ia64_gen_read_simple_ar(ccv, 32);
         gen_helper_read_ar(csd, tcg_env, tcg_constant_i32(25));
         ia64_gen_memory_release(insn);
         gen_helper_cmp8xchg16(cpu_gr[insn->r1], tcg_env,
@@ -10214,7 +10502,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                                      ctx->mmu_idx, memop);
         ia64_gen_memory_acquire(insn);
         ia64_gen_gr_nat_clear(insn->r1);
-        ia64_gen_invalidate_alat_store(addr, size);
+        ia64_gen_invalidate_alat_store(ctx, addr, size);
         break;
     }
     case IA64_OP_BR_COND:
@@ -10330,7 +10618,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     case IA64_OP_RFI:
         gen_helper_rfi(tcg_env);
-        tcg_gen_exit_tb(NULL, 0);
+        tcg_gen_lookup_and_goto_ptr();
         if (skip == NULL) {
             return true;
         }
@@ -10531,14 +10819,14 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
 
 static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
     cpu->env.ip = value;
 }
 
 static vaddr ia64_cpu_get_pc(CPUState *cs)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
     return cpu->env.ip;
 }
@@ -10728,7 +11016,7 @@ int ia64_sapic_get_ivr(CPUIA64State *env)
 
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     int idx = vector / 64;
     int bit = vector % 64;
 
@@ -10885,19 +11173,26 @@ void ia64_itc_enter_halt(CPUIA64State *env)
 
 static bool ia64_cpu_has_work(CPUState *cs)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     CPUIA64State *env = &cpu->env;
-    bool pending_extint;
+    bool nmi_pending = (env->sapic_irr[0] & (1ULL << 2)) != 0;
+    bool interrupts_enabled = (env->psr & IA64_PSR_I) ||
+                              (cs->halted && env->pal_halt_wake);
 
-    ia64_itc_check_timer(env);
-    pending_extint = ia64_sapic_has_pending(env);
-
-    return pending_extint && (cs->halted || (env->psr & IA64_PSR_I));
+    /*
+     * ia64_sapic_update_interrupt() maintains CPU_INTERRUPT_HARD whenever
+     * IRR, ISR or TPR changes, and the ITM callback does the same when its
+     * deadline expires.  Do not rescan IRR or reschedule the timer from this
+     * exec-loop hot path.  PAL_HALT_LIGHT wakes only for an interrupt that
+     * is actually deliverable; PSR.i does not mask NMI vector 2.
+     */
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) &&
+           (interrupts_enabled || nmi_pending);
 }
 
 static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint32_t flags = 0;
 
     if (cpu->env.psr & IA64_PSR_DT) {
@@ -10923,6 +11218,8 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     }
     flags |= ((cpu->env.psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT)
              << IA64_TB_FLAG_RI_SHIFT;
+    flags |= (uint32_t)ia64_psr_cpl(cpu->env.psr) <<
+             IA64_TB_FLAG_CPL_SHIFT;
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
@@ -10961,6 +11258,26 @@ const IA64TlbEntry *ia64_tlb_find(const IA64TlbEntry *tlb, uint16_t tlb_count,
     return NULL;
 }
 
+static const IA64TlbEntry *
+ia64_tlb_find_mru(const IA64TlbEntry *tlb, uint16_t tlb_count,
+                  uint16_t *mru, uint64_t va, uint32_t rid, bool is_ifetch)
+{
+    uint16_t i;
+
+    if (*mru < tlb_count &&
+        ia64_tlb_match(&tlb[*mru], va, rid, is_ifetch)) {
+        return &tlb[*mru];
+    }
+
+    for (i = 0; i < tlb_count; i++) {
+        if (i != *mru && ia64_tlb_match(&tlb[i], va, rid, is_ifetch)) {
+            *mru = i;
+            return &tlb[i];
+        }
+    }
+    return NULL;
+}
+
 bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint16_t tlb_count,
                            uint64_t va, uint32_t rid, uint8_t access_level,
                            bool is_ifetch, uint64_t *pa, uint8_t *perm)
@@ -10978,7 +11295,7 @@ bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint16_t tlb_count,
 static void ia64_cpu_synchronize_from_tb(CPUState *cs,
                                          const TranslationBlock *tb)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint64_t ri =
         (tb->flags & IA64_TB_FLAG_RI_MASK) >> IA64_TB_FLAG_RI_SHIFT;
 
@@ -10998,17 +11315,17 @@ static void ia64_restore_state_to_opc(CPUState *cs,
                                        const TranslationBlock *tb,
                                        const uint64_t *data)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
     cpu->env.ip = data[0];
 }
 
 static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
     if (cpu->env.psr & (ifetch ? IA64_PSR_IT : IA64_PSR_DT)) {
-        return MMU_IDX_VIRT;
+        return MMU_IDX_VIRT_CPL(ia64_psr_cpl(cpu->env.psr));
     }
     return MMU_PHYS_IDX;
 }
@@ -11019,7 +11336,7 @@ static G_NORETURN void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
                                                     int mmu_idx,
                                                     uintptr_t retaddr)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     CPUIA64State *env = &cpu->env;
 
     (void)mmu_idx;
@@ -11053,8 +11370,8 @@ static int ia64_tlb_perm_to_prot(uint8_t perm)
     return prot;
 }
 
-static int ia64_tlb_prot_for_pte(CPUIA64State *env, uint64_t pte,
-                                 uint8_t perm, bool is_ifetch)
+static int ia64_tlb_prot_for_pte_psr(uint64_t pte, uint8_t perm,
+                                     bool is_ifetch, uint64_t psr)
 {
     int prot = ia64_tlb_perm_to_prot(perm);
 
@@ -11064,14 +11381,14 @@ static int ia64_tlb_prot_for_pte(CPUIA64State *env, uint64_t pte,
      * later store must take Data Dirty so the OS can update the PTE or break
      * copy-on-write sharing.
      */
-    if (!is_ifetch && !(env->psr & IA64_PSR_DA)) {
+    if (!is_ifetch && !(psr & IA64_PSR_DA)) {
         if (!(pte & IA64_PTE_ACCESSED)) {
             prot &= ~(PAGE_READ | PAGE_WRITE);
         }
         if (!(pte & IA64_PTE_DIRTY)) {
             prot &= ~PAGE_WRITE;
         }
-    } else if (is_ifetch && !(env->psr & IA64_PSR_IA) &&
+    } else if (is_ifetch && !(psr & IA64_PSR_IA) &&
                !(pte & IA64_PTE_ACCESSED)) {
         prot &= ~PAGE_EXEC;
     }
@@ -11079,20 +11396,91 @@ static int ia64_tlb_prot_for_pte(CPUIA64State *env, uint64_t pte,
     return prot;
 }
 
-static void ia64_tlb_set_entry_page(CPUState *cs, vaddr addr, hwaddr pa,
-                                    uint64_t page_size, int prot,
-                                    int mmu_idx)
+static int ia64_tlb_prot_for_pte(CPUIA64State *env, uint64_t pte,
+                                 uint8_t perm, bool is_ifetch)
 {
-    vaddr page = addr & TARGET_PAGE_MASK;
+    return ia64_tlb_prot_for_pte_psr(pte, perm, is_ifetch, env->psr);
+}
+
+static void ia64_record_suppressed_tlb_fill(CPUIA64State *env, vaddr addr,
+                                             int mmu_idx)
+{
+    uint64_t page = addr & TARGET_PAGE_MASK;
+    uint16_t idxmap = 1u << mmu_idx;
+    uint8_t i;
+
+    for (i = 0; i < env->suppressed_tlb_count; i++) {
+        if (env->suppressed_tlb_pages[i] == page) {
+            env->suppressed_tlb_idxmaps[i] |= idxmap;
+            return;
+        }
+    }
+
+    if (env->suppressed_tlb_count == IA64_SUPPRESSED_TLB_MAX) {
+        env->suppressed_tlb_overflow = true;
+        return;
+    }
+
+    i = env->suppressed_tlb_count++;
+    env->suppressed_tlb_pages[i] = page;
+    env->suppressed_tlb_idxmaps[i] = idxmap;
+}
+
+static void ia64_record_suppressed_tlb_fill_if_needed(
+    CPUIA64State *env, vaddr addr, int mmu_idx, uint64_t pte, uint8_t perm,
+    bool is_ifetch, int prot)
+{
+    uint64_t unsuppressed_psr = env->psr & ~(IA64_PSR_DA | IA64_PSR_IA);
+    int unsuppressed_prot;
+
+    if (!(env->psr & (IA64_PSR_DA | IA64_PSR_IA))) {
+        return;
+    }
+
+    unsuppressed_prot = ia64_tlb_prot_for_pte_psr(
+        pte, perm, is_ifetch, unsuppressed_psr);
+    if (prot != unsuppressed_prot) {
+        ia64_record_suppressed_tlb_fill(env, addr, mmu_idx);
+    }
+}
+
+void ia64_flush_suppressed_tlb(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+    uint8_t i;
+
+    if (env->suppressed_tlb_overflow) {
+        tlb_flush(cs);
+    } else {
+        for (i = 0; i < env->suppressed_tlb_count; i++) {
+            tlb_flush_page_by_mmuidx(cs, env->suppressed_tlb_pages[i],
+                                     env->suppressed_tlb_idxmaps[i]);
+        }
+    }
+
+    env->suppressed_tlb_count = 0;
+    env->suppressed_tlb_overflow = false;
+}
+
+static void ia64_tlb_set_entry_page(CPUState *cs, vaddr addr, hwaddr pa,
+                                    uint64_t page_size, int prot, int mmu_idx,
+                                    IA64MemorySpeculation speculation)
+{
+    CPUTLBEntryFull full = {
+        .phys_addr = pa & TARGET_PAGE_MASK,
+        .attrs = MEMTXATTRS_UNSPECIFIED,
+        .prot = prot,
+        .lg_page_size = TARGET_PAGE_BITS,
+    };
 
     (void)page_size;
-    tlb_set_page(cs, page, pa & TARGET_PAGE_MASK, prot, mmu_idx,
-                 TARGET_PAGE_SIZE);
+    full.extra.ia64.speculation = speculation;
+    tlb_set_page_full(cs, mmu_idx, addr & TARGET_PAGE_MASK, &full);
 }
 
 static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint64_t pa;
     uint8_t perm;
     uint32_t rid;
@@ -11125,7 +11513,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                               MMUAccessType access_type, int mmu_idx,
                               bool probe, uintptr_t retaddr)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     const IA64TlbEntry *tlb;
     uint16_t tlb_count;
     bool is_ifetch = (access_type == MMU_INST_FETCH);
@@ -11137,24 +11525,31 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     uint32_t rid;
     IA64Exception excp;
     bool is_rse = !is_ifetch && mmu_idx == MMU_IDX_RSE;
-    uint8_t access_level = is_rse ? ia64_rsc_pl(cpu->env.ar_rsc) :
-                                   ia64_psr_cpl(cpu->env.psr);
+    uint8_t access_level;
+    uint16_t *tlb_mru;
     bool virt_translation_enabled;
 
     if (mmu_idx == MMU_PHYS_IDX) {
-        vaddr page = addr & TARGET_PAGE_MASK;
-
         pa = ia64_physical_address(addr);
-        tlb_set_page(cs, page, pa & TARGET_PAGE_MASK,
-                     PAGE_READ | PAGE_WRITE | PAGE_EXEC,
-                     mmu_idx, TARGET_PAGE_SIZE);
+        ia64_tlb_set_entry_page(
+            cs, addr, pa, TARGET_PAGE_SIZE,
+            PAGE_READ | PAGE_WRITE | PAGE_EXEC, mmu_idx,
+            (addr & IA64_PHYS_UC_BIT) ? IA64_MEM_NON_SPECULATIVE :
+                                       IA64_MEM_LIMITED_SPECULATION);
         return true;
     }
 
+    if (is_rse) {
+        access_level = ia64_rsc_pl(cpu->env.ar_rsc);
+    } else {
+        g_assert(mmu_idx >= MMU_IDX_VIRT_CPL0 &&
+                 mmu_idx <= MMU_IDX_VIRT_CPL3);
+        access_level = mmu_idx - MMU_IDX_VIRT_CPL0;
+    }
+
     rid = ia64_region_rid(&cpu->env, addr);
-    virt_translation_enabled = is_ifetch ? (cpu->env.psr & IA64_PSR_IT) :
-                               is_rse ? (cpu->env.psr & IA64_PSR_RT) :
-                               (cpu->env.psr & IA64_PSR_DT);
+    /* A translated MMU index is itself the serialized translation state. */
+    virt_translation_enabled = true;
     if (virt_translation_enabled && !ia64_va_is_implemented(addr)) {
         if (probe) {
             return false;
@@ -11170,16 +11565,14 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     if (ia64_firmware_identity_pa(cpu->env.cr_iva,
                                   is_ifetch ? addr : cpu->env.ip,
                                   addr, &pa)) {
-        vaddr page = addr & TARGET_PAGE_MASK;
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
-        tlb_set_page(cs, page, pa & TARGET_PAGE_MASK, prot, mmu_idx,
-                     TARGET_PAGE_SIZE);
+        ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
+                                mmu_idx, IA64_MEM_SPECULATIVE);
         return true;
     }
 
     if (ia64_sal_boot_virtual_pa(&cpu->env, addr, &pa)) {
-        vaddr page = addr & TARGET_PAGE_MASK;
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
         qemu_log_mask(CPU_LOG_MMU,
@@ -11188,22 +11581,24 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                       is_ifetch ? 'i' :
                       (access_type == MMU_DATA_STORE ? 'w' : 'd'),
                       (uint64_t)addr, pa, cpu->env.psr);
-        tlb_set_page(cs, page, pa & TARGET_PAGE_MASK, prot, mmu_idx,
-                     TARGET_PAGE_SIZE);
+        ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
+                                mmu_idx, IA64_MEM_SPECULATIVE);
         return true;
     }
 
     if (is_ifetch) {
         tlb = cpu->env.tlb_inst;
         tlb_count = cpu->env.tlb_inst_count;
+        tlb_mru = &cpu->env.tlb_inst_mru;
     } else {
         tlb = cpu->env.tlb_data;
         tlb_count = cpu->env.tlb_data_count;
+        tlb_mru = &cpu->env.tlb_data_mru;
     }
 
     {
-        const IA64TlbEntry *entry = ia64_tlb_find(tlb, tlb_count, addr, rid,
-                                                  is_ifetch);
+        const IA64TlbEntry *entry = ia64_tlb_find_mru(
+            tlb, tlb_count, tlb_mru, addr, rid, is_ifetch);
 
         if (entry) {
             int prot;
@@ -11222,13 +11617,17 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             }
             prot = ia64_tlb_prot_for_pte(&cpu->env, entry->pte, perm,
                                          is_ifetch);
+            ia64_record_suppressed_tlb_fill_if_needed(
+                &cpu->env, addr, mmu_idx, entry->pte, perm, is_ifetch, prot);
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 tlb hit %c va=0x%016" PRIx64
                           " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
                           " perm=0x%x\n",
                           is_ifetch ? 'i' : 'd', (uint64_t)addr, rid, pa,
                           perm);
-            ia64_tlb_set_entry_page(cs, addr, pa, entry->ps, prot, mmu_idx);
+            ia64_tlb_set_entry_page(
+                cs, addr, pa, entry->ps, prot, mmu_idx,
+                ia64_pte_memory_speculation(entry->pte));
             return true;
         }
     }
@@ -11242,8 +11641,10 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             int prot;
             IA64Exception pte_excp;
             const IA64TlbEntry *new_entry =
-                ia64_tlb_find(cpu->env.tlb_data, cpu->env.tlb_data_count,
-                              addr, rid, false);
+                ia64_tlb_find_mru(cpu->env.tlb_data,
+                                  cpu->env.tlb_data_count,
+                                  &cpu->env.tlb_data_mru,
+                                  addr, rid, false);
             uint64_t page_size = new_entry ? new_entry->ps : TARGET_PAGE_SIZE;
 
             pte_excp = new_entry ?
@@ -11263,13 +11664,19 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             prot = ia64_tlb_prot_for_pte(&cpu->env,
                                          new_entry ? new_entry->pte : pte,
                                          perm, false);
+            ia64_record_suppressed_tlb_fill_if_needed(
+                &cpu->env, addr, mmu_idx,
+                new_entry ? new_entry->pte : pte, perm, false, prot);
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt hit d va=0x%016" PRIx64
                           " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
                           " perm=0x%x iha=0x%016" PRIx64 "\n",
                           (uint64_t)addr, rid, pa, perm,
                           ia64_vhpt_hash_address(&cpu->env, addr));
-            ia64_tlb_set_entry_page(cs, addr, pa, page_size, prot, mmu_idx);
+            ia64_tlb_set_entry_page(
+                cs, addr, pa, page_size, prot, mmu_idx,
+                ia64_pte_memory_speculation(new_entry ? new_entry->pte :
+                                                        pte));
             return true;
         }
     }
@@ -11283,8 +11690,10 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             int prot;
             IA64Exception pte_excp;
             const IA64TlbEntry *new_entry =
-                ia64_tlb_find(cpu->env.tlb_inst, cpu->env.tlb_inst_count,
-                              addr, rid, true);
+                ia64_tlb_find_mru(cpu->env.tlb_inst,
+                                  cpu->env.tlb_inst_count,
+                                  &cpu->env.tlb_inst_mru,
+                                  addr, rid, true);
             uint64_t page_size = new_entry ? new_entry->ps : TARGET_PAGE_SIZE;
 
             pte_excp = new_entry ?
@@ -11302,18 +11711,23 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             prot = ia64_tlb_prot_for_pte(&cpu->env,
                                          new_entry ? new_entry->pte : pte,
                                          perm, true);
+            ia64_record_suppressed_tlb_fill_if_needed(
+                &cpu->env, addr, mmu_idx,
+                new_entry ? new_entry->pte : pte, perm, true, prot);
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt hit i va=0x%016" PRIx64
                           " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
                           " perm=0x%x iha=0x%016" PRIx64 "\n",
                           (uint64_t)addr, rid, pa, perm,
                           ia64_vhpt_hash_address(&cpu->env, addr));
-            ia64_tlb_set_entry_page(cs, addr, pa, page_size, prot, mmu_idx);
+            ia64_tlb_set_entry_page(
+                cs, addr, pa, page_size, prot, mmu_idx,
+                ia64_pte_memory_speculation(new_entry ? new_entry->pte :
+                                                        pte));
             return true;
         }
     }
     if (ia64_sal_boot_identity_pa(&cpu->env, addr, &pa)) {
-        vaddr page = addr & TARGET_PAGE_MASK;
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
         qemu_log_mask(CPU_LOG_MMU,
@@ -11322,8 +11736,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                       is_ifetch ? 'i' :
                       (access_type == MMU_DATA_STORE ? 'w' : 'd'),
                       (uint64_t)addr, pa, cpu->env.psr);
-        tlb_set_page(cs, page, pa & TARGET_PAGE_MASK, prot, mmu_idx,
-                     TARGET_PAGE_SIZE);
+        ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
+                                mmu_idx, IA64_MEM_SPECULATIVE);
         return true;
     }
     if (probe) {
@@ -11470,7 +11884,7 @@ static uint64_t ia64_interruption_psr(CPUIA64State *env)
 static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
                                    uint64_t fault_addr, uint8_t slot)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint64_t vector;
     uint64_t isr_status = 0;
     bool psr_ic_inflight;
@@ -11527,6 +11941,8 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
      * performs data serialization (SDM Vol. 2, 3.1.4).  Complete any TLB
      * purges before the handler can make instruction or data references.
      */
+    ia64_flush_suppressed_tlb(&cpu->env);
+    cpu->env.psr_suppression_before_insn = 0;
     helper_tlb_serialize(&cpu->env, 1, 1);
 
     if (collect) {
@@ -11611,6 +12027,7 @@ static void ia64_gr_nat_clear_runtime(CPUIA64State *env, uint8_t reg)
     }
 
     env->nat[reg / 64] &= ~(1ULL << (reg % 64));
+    ia64_rse_mark_gr_dirty(env, reg);
 }
 
 static bool ia64_gr_nat_get_runtime(CPUIA64State *env, uint8_t reg)
@@ -11633,6 +12050,7 @@ static void ia64_gr_nat_set_runtime(CPUIA64State *env, uint8_t reg, bool nat)
     } else {
         env->nat[reg / 64] &= ~(1ULL << (reg % 64));
     }
+    ia64_rse_mark_gr_dirty(env, reg);
 }
 
 static void ia64_unaligned_base_update(CPUIA64State *env,
@@ -11661,7 +12079,8 @@ static void ia64_firmware_defer_speculative_load(CPUIA64State *env,
         env->gr[insn->r1] = 0;
         ia64_gr_nat_set_runtime(env, insn->r1, true);
     }
-    if (ia64_opcode_is_data_speculative_load(insn->opcode)) {
+    if (env->alat_full &&
+        ia64_opcode_is_data_speculative_load(insn->opcode)) {
         helper_invalidate_alat_reg(env, insn->r1);
     }
 }
@@ -11670,7 +12089,7 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
                                                 uint64_t fault_addr,
                                                 uint8_t fault_slot)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     CPUIA64State *env = &cpu->env;
     uint8_t bundle[16];
     uint8_t data[16];
@@ -11752,7 +12171,7 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
             return true;
         }
 
-        if (ia64_opcode_is_check_load(insn.opcode) &&
+        if (env->alat_full && ia64_opcode_is_check_load(insn.opcode) &&
             helper_check_load_alat_addr(env, insn.r1, addr, size,
                                         check_load_clear)) {
             ia64_unaligned_base_update(env, &insn, addr);
@@ -11776,7 +12195,7 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
                 }
             } else {
                 ia64_gr_nat_clear_runtime(env, insn.r1);
-                if (check_load_no_clear) {
+                if (check_load_no_clear && env->alat_full) {
                     helper_set_alat(env, insn.r1, addr, size);
                 }
             }
@@ -11803,7 +12222,9 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
         if (!ia64_debug_write(cs, addr, data, size)) {
             return false;
         }
-        helper_invalidate_alat_store(env, addr, size);
+        if (env->alat_full) {
+            helper_invalidate_alat_store(env, addr, size);
+        }
         if (insn.opcode == IA64_OP_ST8SPILL) {
             helper_st_spill_unat(env, insn.r2, addr);
         }
@@ -11850,7 +12271,7 @@ static bool ia64_exception_uses_psr_ri_slot(IA64Exception excp, uint64_t isr)
 
 static void ia64_cpu_do_interrupt(CPUState *cs)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     int excp = cs->exception_index;
     uint64_t fault_addr;
     uint8_t slot;
@@ -11960,7 +12381,7 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
 
 static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     /*
      * While RSE.CFLE is set, instruction execution is stalled until
      * the mandatory RSE loads complete (SDM Vol.2 6.6).  This
@@ -11979,7 +12400,8 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         cpu->env.rse_dirty >= 0 && cpu->env.rse_dirty_nat >= 0;
 
     if ((interrupt_request & CPU_INTERRUPT_HARD) &&
-        (cpu->env.psr & IA64_PSR_I) &&
+        ((cpu->env.psr & IA64_PSR_I) ||
+         (cpu->env.sapic_irr[0] & (1ULL << 2))) &&
         ia64_sapic_has_pending(&cpu->env) &&
         rse_frame_complete) {
         cs->exception_index = IA64_EXCP_EXTINT;
@@ -12002,6 +12424,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
         timer_del(cpu->itm_timer);
     }
     memset(&cpu->env, 0, sizeof(cpu->env));
+    cpu->env.alat_full = cpu->alat_full;
     cpu->env.fr[1] = IA64_FR_ONE;
     cpu->env.pr[0] = 1;
     cpu->env.psr = 0;
@@ -12085,7 +12508,7 @@ static void ia64_dump_tlb(FILE *f, const char *name, const IA64TlbEntry *tlb,
 
 static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     int i;
 
     qemu_fprintf(f, "IP: 0x%016" PRIx64 "  PSR: 0x%016" PRIx64
@@ -12174,7 +12597,7 @@ static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 
 static int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *buf, int reg)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     CPUIA64State *env = &cpu->env;
     uint64_t val = 0;
 
@@ -12221,17 +12644,21 @@ static int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *buf, int reg)
 
 static int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *buf, int reg)
 {
-    IA64CPU *cpu = IA64_CPU(cs);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     CPUIA64State *env = &cpu->env;
     uint64_t val = ldq_p(buf);
 
     if (reg < IA64_GR_COUNT) {
         env->gr[reg] = val;
+        ia64_rse_mark_gr_dirty(env, reg);
     } else if (reg < 128 + IA64_FR_COUNT) {
         uint32_t freg = reg - 128;
         if (freg > 1) {
             env->fr[freg] = val;
             env->fr_ext_valid[freg / 64] &= ~(1ULL << (freg % 64));
+            if (freg >= 32) {
+                env->rotating_fr_live = true;
+            }
         }
     } else if (reg < 256 + IA64_BR_COUNT) {
         env->br[reg - 256] = val;
@@ -12350,6 +12777,9 @@ static void ia64_cpu_tcg_init(void)
         cpu_fr_int_origin[i] = tcg_global_mem_new_i64(
             tcg_env, offsetof(CPUIA64State, fr_int_origin[i]),
             "fr_int_origin");
+        cpu_rse_gr_dirty[i] = tcg_global_mem_new_i64(
+            tcg_env, offsetof(CPUIA64State, rse_gr_dirty[i]),
+            "rse_gr_dirty");
     }
 }
 
@@ -12412,12 +12842,13 @@ static bool ia64_insn_is_empty_hint(const Ia64Instruction *insn)
 static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
 {
     DisasContext *ctx = container_of(db, DisasContext, base);
+    uint32_t flags = ctx->base.tb->flags;
 
     ctx->env = cpu_env(cs);
-    if (ctx->base.max_insns > 32) {
-        ctx->base.max_insns = 32;
-    }
-    ctx->mmu_idx = ia64_cpu_mmu_index(cs, false);
+    ctx->mmu_idx = (flags & IA64_TB_FLAG_DT) ?
+        MMU_IDX_VIRT_CPL((flags & IA64_TB_FLAG_CPL_MASK) >>
+                         IA64_TB_FLAG_CPL_SHIFT) :
+        MMU_PHYS_IDX;
     ctx->start_slot = (ctx->base.tb->flags & IA64_TB_FLAG_RI_MASK) >>
                       IA64_TB_FLAG_RI_SHIFT;
     if (ctx->start_slot > 2) {
@@ -12429,10 +12860,11 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->track_psr_suppression =
         ctx->base.tb->flags & IA64_TB_FLAG_PSR_SUPPRESS;
     ctx->be_data = ctx->base.tb->flags & IA64_TB_FLAG_BE;
+    ctx->full_alat = ctx->env->alat_full;
+    ctx->nat_known_clear[0] = 1;
+    ctx->nat_known_clear[1] = 0;
     ctx->instruction_group_start =
         ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START;
-    ctx->initial_instruction_group_start =
-        ctx->instruction_group_start;
     ctx->next_instruction_group_start =
         ctx->instruction_group_start;
 }
@@ -12504,6 +12936,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
 
         ia64_apply_mlx_long_fixup(template_code, slots, slot, &insn,
                                   &skip_x_slot);
+        insn.ctx = ctx;
         stop_after = template_info->stop_after[
             skip_x_slot && slot == 1 ? 2 : slot];
         insn.placement_illegal =
@@ -12543,6 +12976,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             db->is_jmp = DISAS_NORETURN;
             return;
         }
+        ia64_update_nat_known(ctx, &insn);
         ctx->instruction_group_start =
             ctx->next_instruction_group_start;
         if (ia64_insn_may_modify_psr_ri(&insn)) {
@@ -12578,8 +13012,7 @@ static void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
     ia64_gen_save_fault_slot_for_exit(ctx);
     ia64_gen_clear_ri();
     tcg_gen_movi_i64(cpu_ip, dest);
-    if (group_start == ctx->initial_instruction_group_start &&
-        slot < 2 && translator_use_goto_tb(&ctx->base, dest)) {
+    if (slot < 2 && translator_use_goto_tb(&ctx->base, dest)) {
         ctx->goto_tb_slots = slot + 1;
         tcg_gen_goto_tb(slot);
         tcg_gen_exit_tb(ctx->base.tb, slot);

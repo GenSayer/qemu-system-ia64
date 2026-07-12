@@ -217,9 +217,10 @@ def qmp_send_key(socket_path):
         })
 
 
-def run_qemu(qemu, firmware, disk, qmp_socket):
+def run_qemu(source_root, qemu, firmware, disk, qmp_socket):
     args = [
         qemu,
+        "-L", os.path.join(source_root, "pc-bios"),
         "-machine", "ia64-vpc,i8042=off",
         "-smp", "1",
         "-m", "512M",
@@ -315,7 +316,7 @@ def main():
         qmp_socket = os.path.join(tmpdir, "qmp.sock")
         make_boot_disk(disk, efi_app)
         returncode, output, key_sent, qmp_error = run_qemu(
-            qemu, firmware, disk, qmp_socket
+            source_root, qemu, firmware, disk, qmp_socket
         )
 
     required = [

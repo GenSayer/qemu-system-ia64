@@ -14,10 +14,19 @@
 #define CPU_RESOLVING_TYPE TYPE_IA64_CPU
 
 #undef NB_MMU_MODES
-#define MMU_PHYS_IDX     0
-#define MMU_IDX_VIRT     1
-#define MMU_IDX_RSE      2
-#define NB_MMU_MODES     3
+#define MMU_PHYS_IDX       0
+#define MMU_IDX_VIRT_CPL0  1
+#define MMU_IDX_VIRT_CPL1  2
+#define MMU_IDX_VIRT_CPL2  3
+#define MMU_IDX_VIRT_CPL3  4
+#define MMU_IDX_RSE        5
+#define NB_MMU_MODES       6
+
+#define MMU_IDX_VIRT_CPL(cpl) (MMU_IDX_VIRT_CPL0 + (cpl))
+#define MMU_IDX_VIRT_MASK \
+    (((1u << 4) - 1) << MMU_IDX_VIRT_CPL0)
+#define MMU_IDX_TRANSLATED_MASK \
+    (MMU_IDX_VIRT_MASK | (1u << MMU_IDX_RSE))
 
 #define IA64_GR_COUNT    128
 #define IA64_STACKED_GR_BASE   32
@@ -36,6 +45,7 @@
 /* Per translation-register bank: 16 instruction TRs and 16 data TRs. */
 #define IA64_TR_COUNT    16
 #define IA64_TLB_MAX     128
+#define IA64_SUPPRESSED_TLB_MAX 4
 
 #define IA64_REGION_BITS 3
 #define IA64_IMPL_PA_BITS 50
@@ -56,6 +66,12 @@
 /* Architected FP status expected by IA-64 firmware and OS hand-off. */
 #define IA64_FPSR_DEFAULT 0x0009804c0270033fULL
 
+#define IA64_FP_CONTEXT_SF_MASK       0x3u
+#define IA64_FP_CONTEXT_PREC_SHIFT    2
+#define IA64_FP_CONTEXT(sf, precision) \
+    (((sf) & IA64_FP_CONTEXT_SF_MASK) | \
+     ((precision) << IA64_FP_CONTEXT_PREC_SHIFT))
+
 /* ---- PSR bit definitions ---- */
 #define IA64_PSR_BE      (1ULL << 1)
 #define IA64_PSR_UP      (1ULL << 2)
@@ -65,7 +81,8 @@
 #define IA64_PSR_IC      (1ULL << 13)
 #define IA64_PSR_I       (1ULL << 14)
 #define IA64_PSR_PK      (1ULL << 15)
-#define IA64_PSR_UM_MASK 0x7fULL
+#define IA64_PSR_UM_MASK 0x3fULL
+#define IA64_PSR_UM_WRITABLE_MASK 0x3eULL
 #define IA64_PSR_DT      (1ULL << 17)
 #define IA64_PSR_DFL     (1ULL << 18)
 #define IA64_PSR_DFH     (1ULL << 19)
@@ -454,6 +471,27 @@ typedef struct IA64TlbEntry {
     uint16_t slot;
 } IA64TlbEntry;
 
+typedef enum IA64MemorySpeculation {
+    IA64_MEM_NON_SPECULATIVE,
+    IA64_MEM_LIMITED_SPECULATION,
+    IA64_MEM_SPECULATIVE,
+} IA64MemorySpeculation;
+
+static inline IA64MemorySpeculation
+ia64_pte_memory_speculation(uint64_t pte)
+{
+    switch ((pte >> 2) & 7) {
+    case 0: /* WB */
+    case 6: /* WC */
+    case 7: /* NaTPage */
+        return IA64_MEM_SPECULATIVE;
+    case 4: /* UC */
+    case 5: /* UCE */
+    default:
+        return IA64_MEM_NON_SPECULATIVE;
+    }
+}
+
 bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint16_t tlb_count,
                      uint64_t va, uint32_t rid, uint8_t access_level,
                      bool is_ifetch, uint64_t *pa, uint8_t *perm);
@@ -494,6 +532,10 @@ typedef struct CPUArchState {
     /* PSR.ic changes remain in-flight until a data serialization event. */
     bool psr_ic_inflight;
     uint64_t psr_suppression_before_insn;
+    uint64_t suppressed_tlb_pages[IA64_SUPPRESSED_TLB_MAX];
+    uint16_t suppressed_tlb_idxmaps[IA64_SUPPRESSED_TLB_MAX];
+    uint8_t suppressed_tlb_count;
+    bool suppressed_tlb_overflow;
 
     /* NaT bits for GRs (2x64 bits, little-endian bit numbering) */
     uint64_t nat[2];
@@ -577,9 +619,14 @@ typedef struct CPUArchState {
     uint16_t      tlb_inst_count;
     uint16_t      tlb_data_replace;
     uint16_t      tlb_inst_replace;
+    uint16_t      tlb_data_mru;
+    uint16_t      tlb_inst_mru;
+    uint16_t      pending_purge_data_count;
+    uint16_t      pending_purge_inst_count;
 
     /* pending external interrupt */
     uint8_t pending_extint;
+    bool pal_halt_wake;
 
     /* Local SAPIC state (IA-64 on-die interrupt controller) */
     uint64_t sapic_irr[4];
@@ -619,7 +666,8 @@ typedef struct CPUArchState {
      * the sequence.
      */
     uint64_t rse_pgr[IA64_STACKED_GR_COUNT];
-    uint8_t rse_pgr_nat[IA64_STACKED_GR_COUNT];
+    uint64_t rse_pgr_nat[2];
+    uint64_t rse_gr_dirty[2];
     uint32_t rse_bol;
     int32_t rse_dirty;
     int32_t rse_dirty_nat;
@@ -633,6 +681,7 @@ typedef struct CPUArchState {
     /* ALAT (Advanced Load Address Table) */
     IA64AlatEntry alat[IA64_ALAT_ENTRIES];
     uint32_t alat_active_count;
+    bool alat_full;
 
     /* ITC (Interval Timer Counter) timebase */
     int64_t itc_delta;
@@ -659,6 +708,7 @@ typedef struct CPUArchState {
     uint64_t fr_ext_valid[2];
     uint64_t fr_int_value[IA64_FR_COUNT];
     uint64_t fr_int_origin[2];
+    bool rotating_fr_live;
     uint64_t fp_backup_fr[IA64_FR_COUNT];
     uint64_t fp_backup_fr_nat[2];
     uint64_t fp_backup_fr_sig[2];
@@ -673,7 +723,17 @@ typedef struct CPUArchState {
     float_status fp_status;
 } CPUIA64State;
 
+static inline void ia64_rse_mark_gr_dirty(CPUIA64State *env, uint32_t reg)
+{
+    if (reg >= IA64_STACKED_GR_BASE && reg < IA64_GR_COUNT) {
+        uint32_t bit = reg - IA64_STACKED_GR_BASE;
+
+        env->rse_gr_dirty[bit / 64] |= 1ULL << (bit % 64);
+    }
+}
+
 void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb);
+void ia64_flush_suppressed_tlb(CPUIA64State *env);
 
 static inline bool ia64_key_check_enabled(const CPUIA64State *env,
                                           bool is_ifetch, bool is_rse)
@@ -1032,6 +1092,7 @@ struct ArchCPU {
     CPUState parent_obj;
     CPUIA64State env;
     QEMUTimer *itm_timer;
+    bool alat_full;
 };
 
 struct IA64CPUClass {
@@ -1040,5 +1101,10 @@ struct IA64CPUClass {
     DeviceRealize parent_realize;
     ResettablePhases parent_phases;
 };
+
+static inline IA64CPU *ia64_cpu_from_cpu_state(CPUState *cs)
+{
+    return container_of(cs, IA64CPU, parent_obj);
+}
 
 #endif

@@ -106,6 +106,7 @@ static qemu_irq ia64_vpc_isa_irqs[ISA_NUM_IRQS];
 static bool ia64_vpc_i8042_enabled = true;
 static bool ia64_vpc_firmware_ide_dma = true;
 static uint64_t ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
+static bool ia64_vpc_alat_full;
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
 {
@@ -320,6 +321,30 @@ static void ia64_vpc_set_firmware_console(Object *obj, const char *value,
     }
 
     error_setg(errp, "firmware-console must be 'serial' or 'vga'");
+}
+
+static char *ia64_vpc_get_alat(Object *obj, Error **errp)
+{
+    (void)obj;
+    (void)errp;
+
+    return g_strdup(ia64_vpc_alat_full ? "full" : "zero");
+}
+
+static void ia64_vpc_set_alat(Object *obj, const char *value, Error **errp)
+{
+    (void)obj;
+
+    if (g_strcmp0(value, "zero") == 0) {
+        ia64_vpc_alat_full = false;
+        return;
+    }
+    if (g_strcmp0(value, "full") == 0) {
+        ia64_vpc_alat_full = true;
+        return;
+    }
+
+    error_setg(errp, "alat must be 'zero' or 'full'");
 }
 
 static void ia64_vpc_acpi_update_sci(ACPIREGS *ar)
@@ -939,6 +964,7 @@ static IA64VpcDoneNotifier vpc_done_notifier;
 
 static void ia64_vpc_init(MachineState *machine)
 {
+    IA64CPU *cpu;
     DeviceState *pci_host;
     DeviceState *iosapic;
     PCIBus *pci_bus;
@@ -959,7 +985,9 @@ static void ia64_vpc_init(MachineState *machine)
     ia64_vpc_init_nvram(machine);
     ia64_vpc_write_firmware_handoff(machine);
 
-    cpu_create(machine->cpu_type);
+    cpu = IA64_CPU(cpu_create(machine->cpu_type));
+    cpu->alat_full = ia64_vpc_alat_full;
+    cpu->env.alat_full = ia64_vpc_alat_full;
     ia64_vpc_map_lsapic();
 
     iosapic = qdev_new(TYPE_IA64_IOSAPIC);
@@ -1102,6 +1130,11 @@ static void ia64_vpc_machine_init(MachineClass *mc)
                                   ia64_vpc_set_nvram);
     object_class_property_set_description(oc, "nvram",
         "Set the IA-64 EFI NVRAM file path, 'auto', or 'none'");
+    object_class_property_add_str(oc, "alat",
+                                  ia64_vpc_get_alat,
+                                  ia64_vpc_set_alat);
+    object_class_property_set_description(oc, "alat",
+        "Set the IA-64 ALAT model to 'zero' (default) or 'full'");
 }
 
 DEFINE_MACHINE("ia64-vpc", ia64_vpc_machine_init)
