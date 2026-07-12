@@ -18,7 +18,7 @@ _start:
      * validated.  start_after_pal moves to the selected RAM-top stack before
      * entering the C firmware.
      */
-    movl r12 = FW_BOOTSTRAP_STACK_TOP
+    movl r12 = (FW_BOOTSTRAP_STACK_TOP - 16)
     ;;
 
     br.cond.sptk.few start_after_pal
@@ -80,7 +80,12 @@ start_after_pal:
     ;;
     br.call.sptk.many b0 = fw_boot_stack_top
     ;;
-    mov r12 = r8
+    /*
+     * The region top may be the exact end of installed RAM, and the psABI
+     * lets callees use the 16-byte scratch area [sp, sp+16).  Start sp 16
+     * bytes below the region top so that scratch area stays inside RAM.
+     */
+    adds r12 = -16, r8
     mov r3 = r4
     ;;
 
@@ -89,9 +94,9 @@ start_after_pal:
     alloc r2 = ar.pfs, 0, 13, 3, 0
     ;;
 
-    /* Pass args: gp, sp, boot_b0 */
+    /* Pass args: gp, stack region top, boot_b0 */
     mov r45 = r1               /* arg0 → callee r32 = gp      */
-    mov r46 = r12              /* arg1 → callee r33 = sp      */
+    mov r46 = r8               /* arg1 → callee r33 = stack region top */
     mov r47 = r3               /* arg2 → callee r34 = boot_b0 */
     ;;
 

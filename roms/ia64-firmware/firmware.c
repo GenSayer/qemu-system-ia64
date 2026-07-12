@@ -25512,12 +25512,18 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
 
 /* --- Firmware Entry Point (updated) --------------------------------------- */
 
-void firmware_main(UINT64 gp, UINT64 sp, UINT64 boot_b0)
+void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 {
     BOOLEAN nvram_variable_selftest_ok;
 
-    mBootStackTop = sp;
-    mBootStackBase = sp - FW_BOOT_STACK_SIZE;
+    /*
+     * stack_top is the aligned top of the boot-stack region; the entry
+     * trampoline starts sp 16 bytes below it so the psABI scratch area
+     * [sp, sp+16) stays inside the region even when it ends exactly at
+     * the end of installed RAM.
+     */
+    mBootStackTop = stack_top;
+    mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 
