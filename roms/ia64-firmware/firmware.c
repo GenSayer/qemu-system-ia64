@@ -9728,11 +9728,21 @@ EFI_STATUS bs_exit_boot_services(EFI_HANDLE ImageHandle, UINTN MapKey)
     fw_signal_event_type(EVT_SIGNAL_EXIT_BOOT_SERVICES);
     if (!mGraphicsClientActive) {
         graphics_select_text_mode();
+
+        /*
+         * The VGA linear framebuffer and the legacy planes share VRAM.
+         * A subsequent planar mode may not clear every plane first.  Leaving
+         * the former GOP pixels, text cells, and font behind can therefore
+         * expose stale firmware contents.  Boot services have ended and the
+         * loader no longer needs the console, so hand the display to the OS
+         * with zeroed VRAM.
+         */
+        graphics_clear_framebuffer();
     }
     /*
-     * The loader owns RR/TR state by this point.  Windows setup, for example,
-     * installs RID=1 region-7 TR mappings before ExitBootServices(); resetting
-     * to the firmware SAL RR values here makes those TRs unreachable.
+     * The loader owns RR/TR state by this point and may have installed RID=1
+     * region-7 TR mappings before ExitBootServices().  Resetting to the
+     * firmware SAL RR values here would make those TRs unreachable.
      */
     mBootServicesExited = 1;
     return EFI_SUCCESS;

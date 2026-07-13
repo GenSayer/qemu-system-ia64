@@ -2293,6 +2293,12 @@ static const MemoryRegionPortio vbe_portio_list_x86[] = {
 
 static const MemoryRegionPortio vbe_portio_list_no_x86[] = {
     { 0, 1, 2, .read = vbe_ioport_read_index, .write = vbe_ioport_write_index },
+    /*
+     * Native non-x86 guests normally use the aligned data port at 0x1d0.
+     * Keep the legacy 0x1cf port as well because emulated option-ROM code
+     * uses the original unaligned VBE index/data pair at 0x1ce/0x1cf.
+     */
+    { 1, 1, 2, .read = vbe_ioport_read_data, .write = vbe_ioport_write_data },
     { 2, 1, 2, .read = vbe_ioport_read_data, .write = vbe_ioport_write_data },
     PORTIO_END_OF_LIST(),
 };
