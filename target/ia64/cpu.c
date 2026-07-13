@@ -5693,6 +5693,33 @@ static void ia64_gen_force_ri_tracked(DisasContext *ctx, uint8_t slot)
     ctx->current_ri_known = true;
 }
 
+/*
+ * Keep the architecturally visible restart point at the next instruction
+ * boundary after an instruction completes.  In particular, a vCPU kick can
+ * make TCG leave a translated block between the end of one instruction and
+ * the generated code for the next one.  Leaving PSR.ri at the slot that just
+ * completed makes an asynchronous interruption replay that instruction; at
+ * the end of a bundle it can also pair the following bundle address with a
+ * stale slot number.
+ *
+ * An MLX L+X instruction occupies slots 1 and 2, so its successor is slot 0
+ * of the next bundle rather than slot 2 of the current bundle.  SDM Vol. 2,
+ * 5.5.3 likewise defines the successor of an MLX slot-1 instruction as the
+ * next bundle at RI 0.
+ */
+static void ia64_gen_advance_restart_point(DisasContext *ctx,
+                                           uint64_t bundle_ip,
+                                           uint8_t slot,
+                                           bool mlx_long)
+{
+    if (slot == 2 || (slot == 1 && mlx_long)) {
+        ia64_gen_force_ri_tracked(ctx, 0);
+        tcg_gen_movi_i64(cpu_ip, bundle_ip + 16);
+    } else {
+        ia64_gen_force_ri_tracked(ctx, slot + 1);
+    }
+}
+
 static void ia64_gen_set_fault_slot(uint8_t slot)
 {
     tcg_gen_st_i32(tcg_constant_i32(slot), tcg_env,
@@ -12987,6 +13014,8 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         if (ia64_insn_is_empty_hint(&insn) &&
             !(record_iipa && track_iipa_for_insn) &&
             !ctx->track_psr_suppression) {
+            ia64_gen_advance_restart_point(ctx, bundle_ip, slot,
+                                           skip_x_slot);
             ctx->instruction_group_start =
                 ctx->next_instruction_group_start;
             continue;
@@ -13005,6 +13034,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             db->is_jmp = DISAS_NORETURN;
             return;
         }
+        ia64_gen_advance_restart_point(ctx, bundle_ip, slot, skip_x_slot);
         ia64_update_nat_known(ctx, &insn);
         ctx->instruction_group_start =
             ctx->next_instruction_group_start;

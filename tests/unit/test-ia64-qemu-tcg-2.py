@@ -13710,6 +13710,60 @@ test_async_timer_interrupt_records_boundary_ri = require_registers(
         "r31": (1 << 13) | (1 << 14),
     }, entry=0x10)
 
+def test_async_timer_interrupt_never_resumes_mlx_slot2(qemu):
+    program = [
+        (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
+        (0x30, 0x02, mov_m_ar_gr(4, 44), nop_i(), nop_i()),
+        (0x40, 0x00,
+         addl(4, 10 * IA64_ITC_TICKS_PER_MILLISECOND, 4),
+         nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
+        (0x60, *movl_mlx(19, (1 << 13) | (1 << 14))),
+        (0x70, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+    ]
+    mlx_addresses = set()
+    loop_addresses = set()
+    loop_start = 0x80
+    address = loop_start
+
+    # Alternate fully occupied bundles with MLX bundles.  A host timer kick
+    # at a bundle boundary must never combine the following MLX address with
+    # the completed preceding bundle's slot-2 restart state.
+    for index in range(32):
+        loop_addresses.add(address)
+        program.append((address, 0x01,
+                        adds(22, index, 0),
+                        adds(23, index + 1, 0),
+                        adds(24, index + 2, 0)))
+        address += 0x10
+        mlx_addresses.add(address)
+        loop_addresses.add(address)
+        program.append((address, *movl_mlx(25, index)))
+        address += 0x10
+
+    loop_addresses.add(address)
+    program.extend([
+        (address, 0x10, nop_m(), nop_i(),
+         br_cond(address, loop_start)),
+        (0x3000, 0x00, mov_m_cr_gr(30, 19), nop_i(), nop_i()),
+        (0x3010, 0x10, mov_m_cr_gr(31, 16), nop_i(),
+         br_cond(0x3010, 0x3010)),
+    ])
+
+    regs, output = run_program(qemu, program, entry=0x10)
+    interrupted_ip = regs.get("r30", 0)
+    interrupted_ri = (regs.get("r31", 0) >> 41) & 3
+    if (regs.get("ip") != 0x3010 or
+        regs.get("exception") != IA64_EXCP_NONE or
+        interrupted_ip not in loop_addresses or
+        (interrupted_ip in mlx_addresses and interrupted_ri not in (0, 1))):
+        raise RuntimeError(
+            "async_timer_interrupt_never_resumes_mlx_slot2 failed: "
+            f"iip={interrupted_ip:#x} ri={interrupted_ri} "
+            f"ip={regs.get('ip')!r} exception={regs.get('exception')!r}\n"
+            f"{output}")
+
 def test_timer_interrupt_exits_chained_loop_after_virtual_deadline(qemu):
     regs, output = run_program(qemu, [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
@@ -20558,6 +20612,8 @@ TEST_NAMES = {
         test_mov_to_read_only_cr_predicate_false,
     "async_timer_interrupt_enters_ivt": test_async_timer_interrupt_enters_ivt,
     "async_timer_interrupt_records_boundary_ri": test_async_timer_interrupt_records_boundary_ri,
+    "async_timer_interrupt_never_resumes_mlx_slot2":
+        test_async_timer_interrupt_never_resumes_mlx_slot2,
     "timer_interrupt_exits_chained_loop_after_virtual_deadline":
         test_timer_interrupt_exits_chained_loop_after_virtual_deadline,
     "async_timer_interrupt_preserves_bank1_grs": test_async_timer_interrupt_preserves_bank1_grs,
