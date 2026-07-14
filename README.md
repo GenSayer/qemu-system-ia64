@@ -50,22 +50,17 @@ The firmware build requires an IA-64 ELF cross toolchain named
   -machine ia64-vpc \
   -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
   -drive file=<guest-media.iso>,media=cdrom,format=raw,readonly=on \
-  -vga std \
   -display gtk
 ```
 
 Use `-serial stdio` to see the serial output. `-debug-port ...` can publish a debug port that Microsoft Windows kernels may use, as standardized in ACPI standard as `DBGP`.
 To disable i8042, append `i8042=off` to the `-machine ia64-vpc` option, like `-machine ia64-vpc,i8042=off`. You can use `firmware-console=serial`, which might route the kernel's standard output to the serial.
 
-EFI variables are persistent. By default, `ia64-vpc` loads and saves a 64 KiB
-file named `nvram` in the directory containing the firmware selected by
-`-bios`. Use a separate file for each virtual machine by specifying
-`-machine ia64-vpc,nvram=<path>`. Specify `nvram=none` to use volatile EFI
-variables without a backing file. Relative paths are resolved from QEMU's
-current working directory.
+EFI variables are persistent. By default, `ia64-vpc` loads and saves a 64 KiB file named `nvram` in the directory containing the firmware selected by `-bios`. 
+Use a separate file for each virtual machine by specifying `-machine ia64-vpc,nvram=<path>`. Specify `nvram=none` to use volatile EFI variables without a backing file.
+Relative paths are resolved from QEMU's current working directory.
 
-<img width="639" height="461" alt="Gentoo linux is booting on qemu-system-ia64" src="https://github.com/user-attachments/assets/d16ad66d-ffdb-4e27-8e3d-a056498e4ed7" />
-
+<img width="640" height="543" alt="Microsoft Windows Server 2008 R2 with Service Pack 1's preinstall environment is working on qemu-system-ia64, showing it's architecture is IA-64 in a command prompt." src="https://github.com/user-attachments/assets/155e4435-f07e-4860-b26c-7ee057f63e34" />
 
 ## Tests
 
@@ -95,5 +90,7 @@ QEMU is used as the upstream base for this fork. QEMU as a whole is licensed und
 Gentoo is a trademark of the Gentoo Foundation, Inc. and of Förderverein Gentoo e.V.
 
 Microsoft and Windows are trademarks of the Microsoft group of companies.
+
+The screenshot of Windows Operating System is used with permission from Microsoft.
 
 All other product names, project names, company names, and trademarks are the property of their respective owners.
