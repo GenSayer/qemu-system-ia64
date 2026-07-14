@@ -1092,6 +1092,7 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     if (!vga_common_init(vga, OBJECT(s), errp)) {
         return;
     }
+    vga->vbe_legacy_mode_switch = true;
     vga_init(vga, OBJECT(s), pci_address_space(dev),
              pci_address_space_io(dev), true);
     vga->con = graphic_console_init(DEVICE(s), 0, s->vga.hw_ops, vga);

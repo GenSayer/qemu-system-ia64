@@ -3353,7 +3353,7 @@ static Ia64Instruction ia64_decode_insn(Ia64SlotUnit unit, uint64_t raw,
                 insn.r2 = ia64_bits(raw, 20, 7);
             } else if (opcode == IA64_OP_MOV_IMMAR) {
                 insn.r2 = ia64_bits(raw, 20, 7);
-                insn.imm = ia64_bits(raw, 13, 7);
+                insn.imm = ia64_imm8(raw);
             } else if (opcode == IA64_OP_MOV_ARGR) {
                 insn.r1 = ia64_bits(raw, 6, 7);
                 insn.r2 = ia64_bits(raw, 20, 7);
@@ -9545,7 +9545,9 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(insn->r2),
                                ia64_gr_src(insn->r3),
-                               tcg_constant_i32(1));
+                               tcg_constant_i32(1),
+                               tcg_constant_i64(insn->raw),
+                               tcg_constant_i32(insn->slot));
         ctx->exit_after_bundle = true;
         break;
     case IA64_OP_ITR_I:
@@ -9555,7 +9557,9 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(insn->r2),
                                ia64_gr_src(insn->r3),
-                               tcg_constant_i32(0));
+                               tcg_constant_i32(0),
+                               tcg_constant_i64(insn->raw),
+                               tcg_constant_i32(insn->slot));
         ia64_gen_exit_to_slot_completed(ctx, insn->address, insn->slot + 1,
                                         insn->address,
                                         record_iipa,
@@ -9584,14 +9588,20 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     case IA64_OP_ITC_D:
         ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itc_insert(tcg_env, ia64_gr_src(insn->r2),
-                              tcg_constant_i32(1));
+                              tcg_constant_i32(1),
+                              tcg_constant_i64(insn->raw),
+                              tcg_constant_i32(insn->slot));
         ctx->exit_after_bundle = true;
         break;
     case IA64_OP_ITC_I:
         ia64_gen_check_nat_register(insn, insn->r2);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itc_insert(tcg_env, ia64_gr_src(insn->r2),
-                              tcg_constant_i32(0));
+                              tcg_constant_i32(0),
+                              tcg_constant_i64(insn->raw),
+                              tcg_constant_i32(insn->slot));
         ia64_gen_exit_to_slot_completed(ctx, insn->address, insn->slot + 1,
                                         insn->address,
                                         record_iipa,

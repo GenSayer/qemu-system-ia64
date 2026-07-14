@@ -38,6 +38,7 @@ IA64_ISR_W = 1 << 33
 IA64_ISR_R = 1 << 34
 IA64_ISR_NA = 1 << 35
 IA64_ISR_CODE_REG_NAT = 0x10
+UINT64_MAX = (1 << 64) - 1
 IA64_ISR_SP = 1 << 36
 IA64_ISR_RS = 1 << 37
 IA64_ISR_IR = 1 << 38
@@ -193,8 +194,8 @@ PAL_VERSION_VALUE = ((2 << 40) | (0x23 << 32) | (1 << 24) |
 PAL_INSERTABLE_PAGE_SIZE_MASK = ((1 << 12) | (1 << 13) | (1 << 14) |
                                  (1 << 16) | (1 << 18) | (1 << 20) |
                                  (1 << 22) | (1 << 24) | (1 << 26) |
-                                 (1 << 28) | (1 << 30) | (1 << 32))
-PAL_PURGE_PAGE_SIZE_MASK = PAL_INSERTABLE_PAGE_SIZE_MASK
+                                 (1 << 28) | (1 << 30))
+PAL_PURGE_PAGE_SIZE_MASK = PAL_INSERTABLE_PAGE_SIZE_MASK | (1 << 32)
 PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_PKR_COUNT - 1) << 16) |
                          (8 << 24) | ((IA64_TR_COUNT - 1) << 32) |
@@ -316,6 +317,9 @@ def alu_reg(x4, x2b, r1, r2, r3, qp=0):
 
 def add(r1, r2, r3, qp=0):
     return alu_reg(0x0, 0x0, r1, r2, r3, qp)
+
+def add_one(r1, r2, r3, qp=0):
+    return alu_reg(0x0, 0x1, r1, r2, r3, qp)
 
 def sub_reg(r1, r2, r3, qp=0):
     return alu_reg(0x1, 0x1, r1, r2, r3, qp)
@@ -578,7 +582,14 @@ def mov_lc_gr(r2, qp=0):
     return bitfield(0x2a, 27, 6) | bitfield(65, 20, 7) | bitfield(r2, 13, 7) | bitfield(qp, 0, 6)
 
 def mov_lc_imm(imm, qp=0):
-    return bitfield(0x0a, 27, 6) | bitfield(65, 20, 7) | bitfield(imm, 13, 7) | bitfield(qp, 0, 6)
+    encoded = imm & 0xff
+    return (
+        bitfield(0x0a, 27, 6)
+        | bitfield(65, 20, 7)
+        | bitfield(encoded & 0x7f, 13, 7)
+        | bitfield(encoded >> 7, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
 def mov_pr_rot_imm(value, qp=0):
     encoded = (value >> 16) & 0x0fffffff
@@ -594,17 +605,32 @@ def mov_pr_rot_imm(value, qp=0):
     )
 
 def mov_m_imm_ar(ar_num, imm, qp=0):
+    encoded = imm & 0xff
     if ar_num in (64, 65, 66):
         return IUnitInsn(
             bitfield(0x0a, 27, 6)
             | bitfield(ar_num, 20, 7)
-            | bitfield(imm, 13, 7)
+            | bitfield(encoded & 0x7f, 13, 7)
+            | bitfield(encoded >> 7, 36, 1)
             | bitfield(qp, 0, 6)
         )
-    return bitfield(0x28, 27, 6) | bitfield(ar_num, 20, 7) | bitfield(imm, 13, 7) | bitfield(qp, 0, 6)
+    return (
+        bitfield(0x28, 27, 6)
+        | bitfield(ar_num, 20, 7)
+        | bitfield(encoded & 0x7f, 13, 7)
+        | bitfield(encoded >> 7, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
 def mov_i_imm_ar(ar_num, imm, qp=0):
-    return bitfield(0x0a, 27, 6) | bitfield(ar_num, 20, 7) | bitfield(imm, 13, 7) | bitfield(qp, 0, 6)
+    encoded = imm & 0xff
+    return (
+        bitfield(0x0a, 27, 6)
+        | bitfield(ar_num, 20, 7)
+        | bitfield(encoded & 0x7f, 13, 7)
+        | bitfield(encoded >> 7, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
 def mov_m_gr_ar(r2, ar_num, qp=0):
     if ar_num in (64, 65, 66):
@@ -2569,6 +2595,9 @@ def cmp4_eq_imm(p1, p2, imm, r3, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def cmp_eq_imm(p1, p2, imm, r3, qp=0):
+    return cmp4_eq_imm(p1, p2, imm, r3, qp) & ~bitfield(1, 34, 1)
+
 def cmp_eq_and(p1, p2, r2, r3, qp=0):
     return (
         op(0xc)
@@ -3057,6 +3086,16 @@ def br_ctop_many(source, target, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def br_ctop_few(source, target, qp=0):
+    field = branch_target_field(source, target)
+    return (
+        op(4)
+        | bitfield(field & 0xfffff, 13, 20)
+        | bitfield((field >> 20) & 1, 36, 1)
+        | bitfield(7, 6, 3)
+        | bitfield(qp, 0, 6)
+    )
+
 def cover_b(qp=0):
     return EndGroupInsn(0x10000000 | bitfield(qp, 0, 6))
 
@@ -3149,6 +3188,16 @@ def bundle_words(template, slot0, slot1, slot2):
         template |= 1
     raw = template | (slot0 << 5) | (slot1 << 46) | (slot2 << 87)
     return raw & ((1 << 64) - 1), raw >> 64
+
+def raw_bundle(address, low, high):
+    raw = low | (high << 64)
+    return (
+        address,
+        raw & 0x1f,
+        (raw >> 5) & ((1 << 41) - 1),
+        (raw >> 46) & ((1 << 41) - 1),
+        (raw >> 87) & ((1 << 41) - 1),
+    )
 
 def loader_args(address, low, high):
     return [
@@ -3441,6 +3490,16 @@ def require_exception(name, bundles, excp, fault_ip=None, entry=0x10):
     return tc
 
 
+def require_uncollected_reserved_field(name, bundles, fault_ip, fault_imm,
+                                       entry=0x10):
+    return require_registers(name, bundles, {
+        "ip": fault_ip,
+        "fault_ip": fault_ip,
+        "fault_imm": fault_imm,
+        "exception": IA64_EXCP_RESERVED_REG_FIELD,
+    }, entry=entry)
+
+
 # ── RSE tests ──
 
 test_alloc_m34_ignored_bits_decode = require_registers(
@@ -3547,6 +3606,25 @@ test_rse_call_uses_high_sol_output_arg = require_registers(
         "cfm_sof": 3,
         "cfm_sol": 0,
         "ar_pfs": 0x813,
+    }, entry=0x10)
+
+test_rse_call_maps_all_high_output_args = require_registers(
+    "rse_call_maps_all_high_output_args", [
+        (0x10, 0x00, nop_m(), alloc(56, 32, 28, 0, 0), nop_i()),
+        (0x20, *movl_mlx(60, 0x200)),
+        (0x30, *movl_mlx(61, 1007)),
+        (0x40, *movl_mlx(62, 1)),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, 0x80)),
+        (0x80, 0x00, nop_m(), or_reg(8, 32, 0), or_reg(9, 33, 0)),
+        (0x90, 0x00, nop_m(), or_reg(10, 34, 0), add_one(11, 32, 33)),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+    ], {
+        "ip": 0xa0,
+        "r8": 0x200,
+        "r9": 1007,
+        "r10": 1,
+        "r11": 0x5f0,
+        "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
 test_rse_callee_alloc_stores_input_arg = require_registers(
@@ -3705,6 +3783,26 @@ test_rse_call_ret_preserves_caller_local = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 8,
         "cfm_sol": 6,
+    }, entry=0x10)
+
+test_rse_large_callee_preserves_high_caller_local = require_registers(
+    "rse_large_callee_preserves_high_caller_local", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), alloc(56, 32, 28, 0, 0), nop_i()),
+        (0x40, *movl_mlx(37, 1008)),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, 0x100)),
+        (0x60, 0x00, nop_m(), adds(8, 0, 37), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+        (0x100, 0x00, nop_m(), alloc(40, 96, 88, 0, 0), nop_i()),
+        (0x110, *movl_mlx(37, 0x0badf00d0badf00d)),
+        (0x120, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x70,
+        "r8": 1008,
+        "exception": IA64_EXCP_NONE,
+        "cfm_sof": 32,
+        "cfm_sol": 28,
     }, entry=0x10)
 
 test_rse_parent_spill_keeps_call_snapshot = require_registers(
@@ -4547,6 +4645,7 @@ HIGH_TR_TARGET = HIGH_TR_BASE + 0x8430
 HIGH_TR_PSR = ((1 << 13) | (1 << 17) | (1 << 27) |
                (1 << 36) | (1 << 44))
 LOW_VECTOR_TR_PTE = 0x0010000004000661
+FOUR_K_ITIR = 12 << 2
 LOW_VECTOR_ITIR = 0x38
 KERNEL_TR_ITIR = 26 << 2
 KERNEL_REGION5_RR = (5 << 8) | LOW_VECTOR_ITIR | 1
@@ -4777,8 +4876,12 @@ test_rfi_retries_interrupted_current_frame_fill = require_registers(
         (0x210, 0x00, nop_m(), adds(9, 0, 33), nop_i()),
         (0x220, 0x10, nop_m(), nop_i(), br_cond(0x220, 0x220)),
         (IA64_ALT_DTLB_VECTOR, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
-        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, itc_d(18), nop_i(), nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x20, 0x10, nop_m(), nop_i(), rfi_b()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, nop_m(),
+         adds(7, FOUR_K_ITIR, 0), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00, mov_m_gr_cr(7, 21),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, itc_d(18), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(), rfi_b()),
     ], {
         "ip": 0x220,
         "exception": IA64_EXCP_NONE,
@@ -4814,11 +4917,13 @@ test_rse_rfi_bspstore_rebase_preserves_interrupted_call = require_registers(
         (IA64_ALT_DTLB_VECTOR, 0x18, nop_m(), nop_m(),
          cover_b()),
         (IA64_ALT_DTLB_VECTOR + 0x10, *movl_mlx(3, 0x200000)),
-        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00, mov_ar(3, 18), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00, mov_ar(3, 18),
+         adds(7, LOW_VECTOR_ITIR, 0), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, mov_m_gr_cr(7, 21),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x00, itc_d(18), nop_i(),
          nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, itc_d(18), nop_i(),
-         nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0x50, 0x10, nop_m(), nop_i(),
          rfi_b()),
     ], {
         "ip": 0xb0,
@@ -4861,11 +4966,13 @@ test_rse_rfi_same_iip_preserves_interrupted_call_nat = require_registers(
          cover_b()),
         (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, flushrs_enc(), nop_i(),
          nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00, loadrs_enc(), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00, loadrs_enc(),
+         adds(7, LOW_VECTOR_ITIR, 0), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, mov_m_gr_cr(7, 21),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x00, itc_d(18), nop_i(),
          nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, itc_d(18), nop_i(),
-         nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0x50, 0x10, nop_m(), nop_i(),
          rfi_b()),
     ], {
         "ip": 0xd0,
@@ -6036,9 +6143,14 @@ test_rse_br_ret_fill_dtlb_miss_retries_atomically = require_registers(
         (0x3b0, 0x10, nop_m(), nop_i(),
          br_ret(6)),
         (IA64_ALT_DTLB_VECTOR, *movl_mlx(18, LOW_VECTOR_TR_PTE + 0x2000)),
-        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, itc_d(18), adds(29, 0x77, 0),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00,
+         adds(7, EIGHT_K_ITIR, 0), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00,
+         mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00,
+         itc_d(18), adds(29, 0x77, 0),
          nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
          rfi_b()),
     ], {
         "ip": 0x280,
@@ -6158,11 +6270,13 @@ test_rse_rfi_flushed_same_iip_uses_interrupted_frame = require_registers(
          cover_b()),
         (IA64_ALT_DTLB_VECTOR + 0x10, *movl_mlx(3, 0x100000)),
         (IA64_ALT_DTLB_VECTOR + 0x20, *movl_mlx(4, 3)),
-        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, st8(3, 4), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, st8(3, 4),
+         adds(7, LOW_VECTOR_ITIR, 0), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x00, mov_m_gr_cr(7, 21),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x50, 0x00, itc_d(18), nop_i(),
          nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x40, 0x00, itc_d(18), nop_i(),
-         nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x50, 0x10, nop_m(), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0x60, 0x10, nop_m(), nop_i(),
          rfi_b()),
     ], {
         "ip": 0xc0,
@@ -6221,10 +6335,12 @@ test_rse_rfi_nested_handler_preserves_faulting_frame = require_registers(
         (IA64_ALT_DTLB_VECTOR + 0xb0, 0x00, mov_m_gr_cr(27, 23),
          nop_i(), nop_i()),
         (IA64_ALT_DTLB_VECTOR + 0xc0, 0x00, mov_m_gr_cr(26, 19),
+         adds(7, LOW_VECTOR_ITIR, 0), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0xd0, 0x00, mov_m_gr_cr(7, 21),
          nop_i(), nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0xd0, 0x00, itc_d(18), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0xe0, 0x00, itc_d(18), nop_i(),
          nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0xe0, 0x10, nop_m(), nop_i(),
+        (IA64_ALT_DTLB_VECTOR + 0xf0, 0x10, nop_m(), nop_i(),
          rfi_b()),
         (IA64_BREAK_VECTOR, 0x18, nop_m(), nop_m(),
          cover_b()),
@@ -11144,6 +11260,56 @@ test_fcvt_xf_signed_sig_to_float = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+test_fcvt_xf_ignores_prior_precision = require_registers(
+    "fcvt_xf_ignores_prior_precision", [
+        (0x10, *movl_mlx(2, 0xc3369a5a)),
+        (0x20, 0x00, setf_sig(6, 2), nop_i(), nop_i()),
+        # Prime SoftFloat with an operation whose static precision is single.
+        (0x30, 0x0d, nop_m(), fma_s1(7, 1, 1, 0), nop_i()),
+        (0x40, 0x0d, nop_m(), fcvt_xf(8, 6), nop_i()),
+        (0x50, 0x10, getf_sig(4, 8), nop_i(),
+         br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "r4": 0xc3369a5a00000000,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcvt_xf_reads_register_significand = require_registers(
+    "fcvt_xf_reads_register_significand", [
+        (0x10, *movl_mlx(2, 0xc3369a5a)),
+        (0x20, 0x00, setf_sig(6, 2), nop_i(), nop_i()),
+        (0x30, 0x0d, nop_m(), fcvt_xf(8, 6), nop_i()),
+        # The second conversion consumes f8's architectural significand,
+        # not the binary64 cache used internally for display/convenience.
+        (0x40, 0x0d, nop_m(), fcvt_xf(9, 8), nop_i()),
+        (0x50, 0x10, getf_sig(4, 9), nop_i(),
+         br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "r4": 0xf325969800000000,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcvt_xf_extreme_signed_round_trip = require_registers(
+    "fcvt_xf_extreme_signed_round_trip", [
+        (0x10, *movl_mlx(2, 0x7fffffffffffffff)),
+        (0x20, *movl_mlx(3, 0x8000000000000000)),
+        (0x30, 0x09, setf_sig(6, 2), setf_sig(7, 3), nop_i()),
+        (0x40, 0x0d, nop_m(), fcvt_xf(8, 6), nop_i()),
+        (0x50, 0x0d, nop_m(), fcvt_xf(9, 7), nop_i()),
+        (0x60, 0x0d, nop_m(), fcvt_fx(10, 8, trunc=True), nop_i()),
+        (0x70, 0x0d, nop_m(), fcvt_fx(11, 9, trunc=True), nop_i()),
+        (0x80, 0x00, getf_sig(4, 10), nop_i(), nop_i()),
+        (0x90, 0x10, getf_sig(5, 11), nop_i(),
+         br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "r4": 0x7fffffffffffffff,
+        "r5": 0x8000000000000000,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_fcvt_xf_natval_propagates = require_registers(
     "fcvt_xf_natval_propagates", [
         (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
@@ -11314,6 +11480,36 @@ test_frcpa_setf_sig_high_integer_remainder = require_registers(
         "ip": 0xb0,
         "r4": _HIGH_SIG_DIVIDEND,
         "r5": 1,
+    }, entry=0x10)
+
+test_umodsi3_hash_remainder = require_registers(
+    "umodsi3_hash_remainder", [
+        # Arithmetic core of an IA-64 __umodsi3 implementation, using an
+        # operand pair observed in a guest hash-table bucket lookup.
+        (0x10, *movl_mlx(22, 0xc3369a5a)),
+        (0x20, *movl_mlx(23, 17)),
+        (0x30, 0x00, addl(2, 65501, 0), nop_i(), nop_i()),
+        (0x40, 0x09, setf_sig(13, 22), setf_sig(9, 23), nop_i()),
+        # Leave SoftFloat in single precision before fcvt.xf, as the guest
+        # process did.  fcvt.xf is architecturally exact and must not inherit
+        # the precision of the preceding status-field-controlled operation.
+        (0x50, 0x0d, nop_m(), fma_s1(6, 1, 1, 0), nop_i()),
+        (0x60, 0x0d, sub_reg(23, 0, 23), fcvt_xf(8, 13), nop_i()),
+        (0x70, 0x0d, nop_m(), fcvt_xf(9, 9), nop_i()),
+        (0x80, 0x0d, setf_exp(11, 2), frcpa(10, 6, 8, 9), nop_i()),
+        (0x90, 0x0c, nop_m(), fmpy_s1(12, 8, 10, qp=6), nop_i()),
+        (0xa0, 0x0d, nop_m(), fnma_s1(10, 9, 10, 1, qp=6), nop_i()),
+        (0xb0, 0x0c, setf_sig(9, 23),
+         fma_s1(12, 10, 12, 12, qp=6), nop_i()),
+        (0xc0, 0x0d, nop_m(), fma_s1(10, 10, 10, 11, qp=6), nop_i()),
+        (0xd0, 0x0d, nop_m(), fma_s1(10, 10, 12, 12, qp=6), nop_i()),
+        (0xe0, 0x0d, nop_m(), fcvt_fxu(10, 10), nop_i()),
+        (0xf0, 0x0d, nop_m(), xma_l(10, 13, 10, 9), nop_i()),
+        (0x100, 0x10, getf_sig(4, 10), nop_i(), br_cond(0x100, 0x100)),
+    ], {
+        "ip": 0x100,
+        "r4": 0,
+        "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
 test_frcpa_double_normal_reciprocal = require_registers(
@@ -12158,6 +12354,20 @@ test_mov_lc_imm_decode = require_registers("mov_lc_imm_decode", [
      br_cond(0x30, 0x30)),
 ], {"ip": 0x30, "r4": 15}, entry=0x10)
 
+test_mov_lc_negative_imm_sign_extends = require_registers(
+    "mov_lc_negative_imm_sign_extends", [
+        (0x10, 0x02, nop_m(), nop_i(), mov_lc_imm(-1)),
+        (0x20, 0x02, nop_m(), nop_i(), mov_ar_lc(4)),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "r4": UINT64_MAX}, entry=0x10)
+
+test_mov_m_negative_imm_ar_sign_extends = require_registers(
+    "mov_m_negative_imm_ar_sign_extends", [
+        (0x10, 0x00, mov_m_imm_ar(36, -1), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_ar_gr(4, 36), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "r4": UINT64_MAX}, entry=0x10)
+
 test_mov_m_imm_ar_decode = require_registers("mov_m_imm_ar_decode", [
     (0x10, 0x00, mov_m_imm_ar(16, 0), nop_i(),
      nop_i()),
@@ -12500,19 +12710,14 @@ test_itr_i_cached_translation_survives_region_register_write = \
             (0x60, *movl_mlx(23, (1 << 13) | (1 << 36) | (1 << 44))),
             (0x70, 0x00, mov_rr_write(20, 0), adds(7, LOW_VECTOR_ITIR, 0),
              adds(5, 5, 0)),
-            (0x80, 0x00, mov_m_gr_cr(21, 20), mov_m_gr_cr(7, 21),
-             nop_i()),
-            (0x90, 0x00, itr_i(5, 18), nop_i(),
-             nop_i()),
-            (0xa0, 0x00, mov_m_gr_cr(22, 20), nop_i(),
-             nop_i()),
-            (0xb0, 0x00, itr_i(5, 19), nop_i(),
-             nop_i()),
-            (0xc0, 0x00, mov_rr_write(20, 0), nop_i(),
-             nop_i()),
-            (0xd0, 0x00, srlz_i(), addl(31, 0x8430, 0),
-             nop_i()),
-            *rfi_to_gr(0xe0, 23, 31),
+            (0x80, 0x00, mov_m_gr_cr(21, 20), nop_i(), nop_i()),
+            (0x90, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+            (0xa0, 0x00, itr_i(5, 18), nop_i(), nop_i()),
+            (0xb0, 0x00, mov_m_gr_cr(22, 20), nop_i(), nop_i()),
+            (0xc0, 0x00, itr_i(5, 19), nop_i(), nop_i()),
+            (0xd0, 0x00, mov_rr_write(20, 0), nop_i(), nop_i()),
+            (0xe0, 0x00, srlz_i(), addl(31, 0x8430, 0), nop_i()),
+            *rfi_to_gr(0xf0, 23, 31),
             (0x4000430, 0x10, nop_m(), adds(31, 0x73, 0),
              br_cond(0x8430, 0x8430)),
         ], {
@@ -12782,6 +12987,94 @@ test_itc_d_preserves_24bit_key = require_registers(
         "exception": IA64_EXCP_NONE,
         "r31": 0x12345,
     }, entry=0x10)
+
+test_itc_d_4g_page_size_reserved_field_fault = \
+    require_uncollected_reserved_field(
+    "itc_d_4g_page_size_reserved_field_fault", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, 0x00, adds(7, 32 << 2, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+    ], fault_ip=0x60, fault_imm=itc_d(18), entry=0x10)
+
+test_itr_d_4g_page_size_reserved_field_fault = \
+    require_uncollected_reserved_field(
+    "itr_d_4g_page_size_reserved_field_fault", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, 0x00, adds(7, 32 << 2, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), adds(5, 5, 0), nop_i()),
+        (0x60, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+    ], fault_ip=0x60, fault_imm=itr_d(5, 18), entry=0x10)
+
+test_itc_d_present_reserved_pte_field_fault = \
+    require_uncollected_reserved_field(
+    "itc_d_present_reserved_pte_field_fault", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | (1 << 1))),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+    ], fault_ip=0x60, fault_imm=itc_d(18), entry=0x10)
+
+test_itc_d_present_reserved_itir_field_fault = \
+    require_uncollected_reserved_field(
+    "itc_d_present_reserved_itir_field_fault", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, *movl_mlx(7, LOW_VECTOR_ITIR | (1 << 63))),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+    ], fault_ip=0x60, fault_imm=itc_d(18), entry=0x10)
+
+test_itc_d_present_reserved_ma_field_fault = \
+    require_uncollected_reserved_field(
+    "itc_d_present_reserved_ma_field_fault", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | (1 << 2))),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+    ], fault_ip=0x60, fault_imm=itc_d(18), entry=0x10)
+
+test_itc_i_present_reserved_pte_field_fault = \
+    require_uncollected_reserved_field(
+    "itc_i_present_reserved_pte_field_fault", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | (1 << 1))),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itc_i(18), nop_i(), nop_i()),
+    ], fault_ip=0x60, fault_imm=itc_i(18), entry=0x10)
+
+test_itc_d_not_present_ignores_high_itir_field = require_registers(
+    "itc_d_not_present_ignores_high_itir_field", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE & ~1)),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, *movl_mlx(7, LOW_VECTOR_ITIR | (1 << 63))),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {"ip": 0x70, "exception": IA64_EXCP_NONE}, entry=0x10)
+
+test_itc_d_not_present_rejects_low_itir_reserved_field = \
+    require_uncollected_reserved_field(
+    "itc_d_not_present_rejects_low_itir_reserved_field", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE & ~1)),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, 0x00, adds(7, LOW_VECTOR_ITIR | 1, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+    ], fault_ip=0x60, fault_imm=itc_d(18), entry=0x10)
 
 test_itc_d_not_present_raises_page_fault = require_registers(
     "itc_d_not_present_raises_page_fault", [
@@ -13461,6 +13754,14 @@ test_ptc_l_m_unit_decode = require_registers("ptc_l_m_unit_decode", [
     (0x40, 0x10, nop_m(), nop_i(),
      br_cond(0x40, 0x40)),
 ], {"ip": 0x40, "exception": IA64_EXCP_NONE}, entry=0x10)
+
+test_ptc_l_4g_page_size_is_purgeable = require_registers(
+    "ptc_l_4g_page_size_is_purgeable", [
+        (0x10, *movl_mlx(16, 0xa000000100000000)),
+        (0x20, 0x00, adds(24, 32 << 2, 0), nop_i(), nop_i()),
+        (0x30, 0x00, ptc_l(16, 24), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {"ip": 0x40, "exception": IA64_EXCP_NONE}, entry=0x10)
 
 PTC_SURVIVOR_BUNDLE = (0x4010000, 0x00, 0xfeedfacecafebeef, 0, 0)
 PTC_SURVIVOR_LOW, _ = bundle_words(*PTC_SURVIVOR_BUNDLE[1:])
@@ -14376,9 +14677,10 @@ test_dtlb_miss_slot1_resumes_without_replaying_slot0 = require_registers(
          nop_i()),
         (0x70, 0x10, nop_m(), nop_i(),
          br_cond(0x70, 0x70)),
-        (0x1000, 0x00, itc_d(18), nop_i(),
-         nop_i()),
-        (0x1010, 0x10, nop_m(), nop_i(),
+        (0x1000, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(), nop_i()),
+        (0x1010, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x1020, 0x00, itc_d(18), nop_i(), nop_i()),
+        (0x1030, 0x10, nop_m(), nop_i(),
          rfi_b()),
     ], {
         "ip": 0x70,
@@ -16290,27 +16592,20 @@ test_itr_d_slot_replacement_keeps_old_translation_cached = require_registers(
         (0x40, *movl_mlx(21, 0x20000)),
         (0x50, 0x00, adds(7, 0x38, 0), adds(10, 4, 0),
          nop_i()),
-        (0x60, 0x00, mov_m_gr_cr(20, 20), mov_m_gr_cr(7, 21),
-         nop_i()),
-        (0x70, 0x00, itr_d(10, 18), nop_i(),
-         nop_i()),
-        (0x80, 0x00, mov_m_gr_cr(21, 20), nop_i(),
-         nop_i()),
-        (0x90, 0x00, itr_d(10, 19), nop_i(),
-         nop_i()),
-        (0xa0, *movl_mlx(22, (1 << 13) | (1 << 17))),
-        (0xb0, 0x00, mov_gr_psr_full(22), nop_i(),
-         nop_i()),
-        (0xc0, 0x00, ld8(31, 20), nop_i(),
-         nop_i()),
-        (0xd0, 0x00, ld8(30, 21), nop_i(),
-         nop_i()),
-        (0xe0, 0x10, nop_m(), nop_i(),
-         br_cond(0xe0, 0xe0)),
+        (0x60, 0x00, mov_m_gr_cr(20, 20), nop_i(), nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x80, 0x00, itr_d(10, 18), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(21, 20), nop_i(), nop_i()),
+        (0xa0, 0x00, itr_d(10, 19), nop_i(), nop_i()),
+        (0xb0, *movl_mlx(22, (1 << 13) | (1 << 17))),
+        (0xc0, 0x00, mov_gr_psr_full(22), nop_i(), nop_i()),
+        (0xd0, 0x00, ld8(31, 20), nop_i(), nop_i()),
+        (0xe0, 0x00, ld8(30, 21), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
         ITC_DATA_BUNDLE,
         PTC_SURVIVOR_BUNDLE,
     ], {
-        "ip": 0xe0,
+        "ip": 0xf0,
         "exception": IA64_EXCP_NONE,
         "r30": PTC_SURVIVOR_LOW,
         "r31": ITC_DATA_LOW,
@@ -16326,31 +16621,22 @@ test_itr_d_cached_translation_survives_region_register_write = \
             (0x50, *movl_mlx(23, (0x12345 << 8) | LOW_VECTOR_ITIR)),
             (0x60, 0x00, mov_rr_write(23, 0), adds(7, LOW_VECTOR_ITIR, 0),
              adds(10, 4, 0)),
-            (0x70, 0x00, mov_m_gr_cr(20, 20), mov_m_gr_cr(7, 21),
-             nop_i()),
-            (0x80, 0x00, itr_d(10, 18), nop_i(),
-             nop_i()),
-            (0x90, 0x00, mov_m_gr_cr(21, 20), nop_i(),
-             nop_i()),
-            (0xa0, 0x00, itr_d(10, 19), nop_i(),
-             nop_i()),
-            (0xb0, 0x00, mov_rr_write(23, 0), nop_i(),
-             nop_i()),
-            (0xc0, 0x00, srlz_d(), nop_i(),
-             nop_i()),
-            (0xd0, *movl_mlx(22, (1 << 13) | (1 << 17))),
-            (0xe0, 0x00, mov_gr_psr_full(22), nop_i(),
-             nop_i()),
-            (0xf0, 0x00, ld8(31, 20), nop_i(),
-             nop_i()),
-            (0x100, 0x00, ld8(30, 21), nop_i(),
-             nop_i()),
-            (0x110, 0x10, nop_m(), nop_i(),
-             br_cond(0x110, 0x110)),
+            (0x70, 0x00, mov_m_gr_cr(20, 20), nop_i(), nop_i()),
+            (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+            (0x90, 0x00, itr_d(10, 18), nop_i(), nop_i()),
+            (0xa0, 0x00, mov_m_gr_cr(21, 20), nop_i(), nop_i()),
+            (0xb0, 0x00, itr_d(10, 19), nop_i(), nop_i()),
+            (0xc0, 0x00, mov_rr_write(23, 0), nop_i(), nop_i()),
+            (0xd0, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0xe0, *movl_mlx(22, (1 << 13) | (1 << 17))),
+            (0xf0, 0x00, mov_gr_psr_full(22), nop_i(), nop_i()),
+            (0x100, 0x00, ld8(31, 20), nop_i(), nop_i()),
+            (0x110, 0x00, ld8(30, 21), nop_i(), nop_i()),
+            (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
             ITC_DATA_BUNDLE,
             PTC_SURVIVOR_BUNDLE,
         ], {
-            "ip": 0x110,
+            "ip": 0x120,
             "exception": IA64_EXCP_NONE,
             "r30": PTC_SURVIVOR_LOW,
             "r31": ITC_DATA_LOW,
@@ -18236,7 +18522,7 @@ test_pal_vm_tr_read_dtr = require_registers("pal_vm_tr_read_dtr", [
     (0x10, *movl_mlx(18, PAL_TR_TEST_PTE)),
     (0x20, 0x00, nop_m(), addl(19, PAL_TR_TEST_IFA & ~0xfff, 0),
      nop_i()),
-    (0x30, 0x00, nop_m(), addl(7, 0, 0), addl(5, 5, 0)),
+    (0x30, 0x00, nop_m(), addl(7, PAL_TR_TEST_ITIR, 0), addl(5, 5, 0)),
     (0x40, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
     (0x50, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
     (0x60, 0x00, itr_d(5, 18), nop_i(), nop_i()),
@@ -18264,8 +18550,8 @@ test_pal_vm_tr_read_max_dtr = require_registers("pal_vm_tr_read_max_dtr", [
     (0x20, 0x00, nop_m(), addl(19, PAL_TR_TEST_IFA & ~0xfff, 0),
      nop_i()),
     (0x30, 0x00, mov_m_gr_cr(19, 20),
-     addl(5, IA64_TR_COUNT - 1, 0), nop_i()),
-    (0x40, 0x00, mov_m_gr_cr(0, 21), nop_i(), nop_i()),
+     addl(5, IA64_TR_COUNT - 1, 0), addl(7, PAL_TR_TEST_ITIR, 0)),
+    (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
     (0x50, 0x00, itr_d(5, 18), nop_i(), nop_i()),
     (0x60, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
     (0x70, *movl_mlx(28, PAL_VM_TR_READ)),
@@ -19143,6 +19429,31 @@ test_cover_rfi_rebases_rotating_floating_registers = require_registers(
         "r4": 0x12345678,
         "r5": 0x12345678,
         "r6": 0x12345678,
+    }, entry=0x10)
+
+test_cover_rfi_rebases_rotating_general_registers = require_registers(
+    "cover_rfi_rebases_rotating_general_registers", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, *movl_mlx(3, 0x123456789abcdef0)),
+        (0x30, 0x00, alloc(4, 32, 2, 4, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x50, 0x00, nop_m(), adds(32, 0, 3), mov_i_imm_ar(66, 1)),
+        (0x60, 0x13, nop_m(), nop_b(), br_ctop_many(0x60, 0x60)),
+        (0x70, 0x00, nop_m(), adds(8, 0, 33), nop_i()),
+        (0x80, 0x00, break_m(0x42), nop_i(), nop_i()),
+        (0x90, 0x00, nop_m(), adds(9, 0, 33), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+        (IA64_BREAK_VECTOR, 0x10, nop_m(), nop_i(), cover_b()),
+        (IA64_BREAK_VECTOR + 0x10, *movl_mlx(20, 0x90)),
+        (IA64_BREAK_VECTOR + 0x20, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x30, 0x10, nop_m(), nop_i(), rfi_b()),
+    ], {
+        "ip": 0xa0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x123456789abcdef0,
+        "r9": 0x123456789abcdef0,
+        "cfm_rrb_gr": 31,
     }, entry=0x10)
 
 test_br_call_ret_rebases_rotating_floating_registers = require_registers(
@@ -20045,6 +20356,164 @@ test_br_ctop_rotating_pipeline = require_registers("br_ctop_rotating_pipeline", 
     (0x50, 0x11, nop_m(), nop_i(), break_b()),
 ], {"exception": IA64_EXCP_BREAK, "fault_ip": 0x50, "r8": 0x5a}, entry=0x10)
 
+test_br_ctop_long_rotating_pipeline = require_registers(
+    "br_ctop_long_rotating_pipeline", [
+        (0x10, *movl_mlx(5, 130)),
+        (0x20, 0x00, alloc_m(9, 32, 32, 4, 0),
+         mov_i_imm_ar(66, 1), mov_lc_gr(5)),
+        (0x30, 0x00, nop_m(), mov_pr_rot_imm(0x10000), adds(4, 1, 0)),
+        (0x40, 0x00, nop_m(), adds(32, 0, 4, qp=16), adds(4, 1, 4)),
+        (0x50, 0x10, nop_m(), adds(8, 0, 34, qp=18),
+         br_ctop_many(0x50, 0x40)),
+        (0x60, 0x11, nop_m(), nop_i(), break_b()),
+    ], {"exception": IA64_EXCP_BREAK, "fault_ip": 0x60,
+        "r4": 132, "r8": 129}, entry=0x10)
+
+_br_ctop_spec_data = [i + 1 for i in range(131)] + [0]
+test_br_ctop_long_speculative_load_pipeline = require_registers(
+    "br_ctop_long_speculative_load_pipeline", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, *movl_mlx(20, HIGH_TR_BASE + 0x8000)),
+        (0x80, *movl_mlx(5, 130)),
+        (0x90, 0x01, nop_m(), nop_i(), nop_i()),
+        (0xa0, 0x00, alloc_m(9, 32, 32, 4, 0),
+         mov_i_imm_ar(66, 1), mov_lc_gr(5)),
+        (0xb0, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0xc0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xd0, 0x00, nop_m(), mov_pr_rot_imm(0x10000), nop_i()),
+        (0xe0, 0x00, ld8_s_postinc(32, 20, 8, qp=16), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), adds(8, 0, 34, qp=18),
+         br_ctop_many(0xf0, 0xe0)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x100)),
+        *(raw_bundle(0x408000 + i * 8, _br_ctop_spec_data[i],
+                     _br_ctop_spec_data[i + 1])
+          for i in range(0, len(_br_ctop_spec_data), 2)),
+    ], {"exception": IA64_EXCP_NONE, "ip": 0x100,
+        "r8": 129, "r20": HIGH_TR_BASE + 0x8418}, entry=0x10)
+
+_strcpy_pipeline_data = [0x6d6e6f7071727374] * 126 + [0, 0]
+test_br_ctop_strcpy_pipeline_stops_on_first_zero_word = require_registers(
+    "br_ctop_strcpy_pipeline_stops_on_first_zero_word", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, *movl_mlx(20, HIGH_TR_BASE + 0x8000)),
+        (0x80, *movl_mlx(19, HIGH_TR_BASE + 0xc000)),
+        (0x90, *movl_mlx(21, HIGH_TR_BASE + 0xc000 + 1000)),
+        (0xa0, *movl_mlx(5, -1)),
+        (0xb0, *movl_mlx(17, (1 << 13) | (1 << 17))),
+        (0xc0, 0x08, mov_gr_psr_full(17), srlz_d(), nop_i()),
+        (0xd0, 0x00, alloc(2, 32, 2, 4, 0), mov_lc_imm(-1), nop_i()),
+        # Enter through a taken branch, as optimized library routines do.
+        # This also prevents a fall-through TB from executing the first loop
+        # iteration while it still contains the pipeline setup.
+        (0xe0, 0x11, nop_m(), mov_pr_rot_imm(0x10000),
+         br_cond(0xe0, 0xf0)),
+        # This is the three-stage software pipeline used by an IA-64
+        # word-at-a-time string copy: speculative load, check/zero search,
+        # then store.  The stop after slot 1 in the second bundle is
+        # intentional and matches the compare-to-branch dependency group.
+        (0xf0, 0x00, ld8_s_postinc(32, 20, 8, qp=16),
+         chk_s_i(34, 0xf0, 0x200, qp=18), nop_i()),
+        (0x100, 0x02, adds(31, 0, 34, qp=18),
+         czx1_r(24, 34, qp=18), cmp_eq_imm(0, 7, 8, 24, qp=18)),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x140, qp=7)),
+        (0x120, 0x11, st8_postinc(19, 34, 8, qp=18), nop_i(),
+         br_ctop_few(0x120, 0xf0)),
+        # Match the byte tail as well as the pipelined word loop.  Merely
+        # checking the last bulk store leaves an early exit undetected when
+        # the untouched destination bytes happen to be zero.
+        (0x140, 0x00, nop_m(), mov_lc_gr(24), nop_i()),
+        (0x150, 0x01, nop_m(), extr_u(27, 31, 0, 8),
+         shr_u_imm(31, 31, 8)),
+        (0x160, 0x11, st1_postinc(19, 27, 1), nop_i(),
+         br_cloop(0x160, 0x150)),
+        (0x170, 0x00, ld8_postinc(9, 21, 8), nop_i(), nop_i()),
+        (0x180, 0x00, ld1(10, 21), adds(8, 0, 19), nop_i()),
+        (0x190, 0x10, nop_m(), nop_i(), br_cond(0x190, 0x190)),
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+        *(raw_bundle(0x408000 + i * 8, _strcpy_pipeline_data[i],
+                     _strcpy_pipeline_data[i + 1])
+          for i in range(0, len(_strcpy_pipeline_data), 2)),
+        *(raw_bundle(0x40c000 + i * 16, 0x5a5a5a5a5a5a5a5a,
+                     0x5a5a5a5a5a5a5a5a)
+          for i in range(64)),
+    ], {"exception": IA64_EXCP_NONE, "ip": 0x190,
+        "r8": HIGH_TR_BASE + 0xc000 + 1009,
+        "r9": 0x6d6e6f7071727374, "r10": 0}, entry=0x10)
+
+test_br_ctop_strcpy_pipeline_survives_cover_rfi = require_registers(
+    "br_ctop_strcpy_pipeline_survives_cover_rfi", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, *movl_mlx(20, HIGH_TR_BASE + 0x8000)),
+        (0x80, *movl_mlx(19, HIGH_TR_BASE + 0xc000)),
+        (0x90, *movl_mlx(21, HIGH_TR_BASE + 0xc000 + 1000)),
+        (0xa0, *movl_mlx(5, -1)),
+        (0xb0, *movl_mlx(17, (1 << 13) | (1 << 17) | (1 << 44))),
+        (0xc0, 0x08, mov_gr_psr_full(17), srlz_d(), nop_i()),
+        (0xd0, 0x00, alloc(2, 32, 2, 4, 0), mov_lc_gr(5), nop_i()),
+        (0xe0, 0x00, nop_m(), mov_pr_rot_imm(0x10000), nop_i()),
+        (0xf0, 0x00, ld8_s_postinc(32, 20, 8, qp=16),
+         chk_s_i(34, 0xf0, 0x250, qp=18), nop_i()),
+        (0x100, 0x02, adds(31, 0, 34, qp=18),
+         czx1_r(24, 34, qp=18), cmp_eq_imm(0, 7, 8, 24, qp=18)),
+        (0x110, 0x00, nop_m(), adds(30, 1, 30),
+         cmp4_eq_imm(6, 0, 129, 30)),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x200, qp=6)),
+        (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x160, qp=7)),
+        (0x140, 0x11, st8_postinc(19, 34, 8, qp=18), nop_i(),
+         br_ctop_few(0x140, 0xf0)),
+        (0x160, 0x00, ld8_postinc(9, 21, 8), nop_i(), nop_i()),
+        (0x170, 0x00, ld8(10, 21), adds(8, 0, 19), nop_i()),
+        (0x180, 0x10, nop_m(), nop_i(), br_cond(0x180, 0x180)),
+        (0x200, 0x00, break_m(0x42), nop_i(), nop_i()),
+        (0x250, 0x10, nop_m(), nop_i(), br_cond(0x250, 0x250)),
+        (IA64_BREAK_VECTOR, 0x10, nop_m(), nop_i(), cover_b()),
+        (IA64_BREAK_VECTOR + 0x10, *movl_mlx(14, 0x130)),
+        (IA64_BREAK_VECTOR + 0x20, 0x00, mov_m_gr_cr(14, 19), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x30, 0x10, nop_m(), nop_i(), rfi_b()),
+        *(raw_bundle(0x408000 + i * 8, _strcpy_pipeline_data[i],
+                     _strcpy_pipeline_data[i + 1])
+          for i in range(0, len(_strcpy_pipeline_data), 2)),
+    ], {"exception": IA64_EXCP_NONE, "ip": 0x180,
+        "r8": HIGH_TR_BASE + 0xc000 + 1008,
+        "r9": 0x6d6e6f7071727374, "r10": 0,
+        "r30": 129}, entry=0x10)
+
+test_br_call_ret_strcpy_pipeline_stops_on_first_zero_word = require_registers(
+    "br_call_ret_strcpy_pipeline_stops_on_first_zero_word", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, *movl_mlx(17, (1 << 13) | (1 << 17))),
+        (0x80, 0x08, mov_gr_psr_full(17), srlz_d(), nop_i()),
+        (0x90, 0x00, nop_m(), alloc(2, 3, 1, 0, 0), nop_i()),
+        (0xa0, *movl_mlx(33, HIGH_TR_BASE + 0xc000)),
+        (0xb0, *movl_mlx(34, HIGH_TR_BASE + 0x8000)),
+        (0xc0, 0x10, nop_m(), nop_i(), br_call(0, 0xc0, 0x200)),
+        (0xd0, *movl_mlx(21, HIGH_TR_BASE + 0xc000 + 1000)),
+        (0xe0, 0x00, ld8_postinc(9, 21, 8), nop_i(), nop_i()),
+        (0xf0, 0x00, ld8(10, 21), nop_i(), nop_i()),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x100)),
+        (0x200, 0x00, nop_m(), alloc(2, 32, 2, 4, 0), nop_i()),
+        (0x210, 0x00, nop_m(), adds(19, 0, 32), adds(20, 0, 33)),
+        (0x220, 0x00, nop_m(), adds(8, 0, 32), nop_i()),
+        (0x230, *movl_mlx(5, -1)),
+        (0x240, 0x00, nop_m(), mov_lc_gr(5), nop_i()),
+        (0x250, 0x00, nop_m(), mov_pr_rot_imm(0x10000), nop_i()),
+        (0x260, 0x00, ld8_s_postinc(32, 20, 8, qp=16),
+         chk_s_i(34, 0x260, 0x2f0, qp=18), nop_i()),
+        (0x270, 0x02, adds(31, 0, 34, qp=18),
+         czx1_r(24, 34, qp=18), cmp_eq_imm(0, 7, 8, 24, qp=18)),
+        (0x280, 0x10, nop_m(), nop_i(), br_cond(0x280, 0x2c0, qp=7)),
+        (0x290, 0x11, st8_postinc(19, 34, 8, qp=18), nop_i(),
+         br_ctop_few(0x290, 0x260)),
+        (0x2c0, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (0x2f0, 0x10, nop_m(), nop_i(), br_cond(0x2f0, 0x2f0)),
+        *(raw_bundle(0x408000 + i * 8, _strcpy_pipeline_data[i],
+                     _strcpy_pipeline_data[i + 1])
+          for i in range(0, len(_strcpy_pipeline_data), 2)),
+    ], {"exception": IA64_EXCP_NONE, "ip": 0x100,
+        "r8": HIGH_TR_BASE + 0xc000,
+        "r9": 0x6d6e6f7071727374, "r10": 0}, entry=0x10)
+
 test_br_ctop_rotates_floating_registers = require_registers(
     "br_ctop_rotates_floating_registers", [
         (0x10, *movl_mlx(2, 0x12345678)),
@@ -20453,7 +20922,13 @@ TEST_NAMES = {
     "fcvt_fx_signed_trunc": test_fcvt_fx_signed_trunc,
     "fcvt_fxu_preserves_sig_payload": test_fcvt_fxu_preserves_sig_payload,
     "fcvt_xf_signed_sig_to_float": test_fcvt_xf_signed_sig_to_float,
+    "fcvt_xf_ignores_prior_precision": test_fcvt_xf_ignores_prior_precision,
+    "fcvt_xf_reads_register_significand":
+        test_fcvt_xf_reads_register_significand,
+    "fcvt_xf_extreme_signed_round_trip":
+        test_fcvt_xf_extreme_signed_round_trip,
     "fcvt_xf_natval_propagates": test_fcvt_xf_natval_propagates,
+    "umodsi3_hash_remainder": test_umodsi3_hash_remainder,
     "setf_sig_direct_scalar_operand": test_setf_sig_direct_scalar_operand,
     "fr1_is_read_only_one": test_fr1_is_read_only_one,
     "w2k_frcpa_capacity_calc": test_w2k_frcpa_capacity_calc,
@@ -20546,8 +21021,12 @@ TEST_NAMES = {
         test_probe_w_dt_disabled_miss_raises_alt_dtlb,
     "sxt1_decode": test_sxt1_decode,
     "mov_lc_imm_decode": test_mov_lc_imm_decode,
+    "mov_lc_negative_imm_sign_extends":
+        test_mov_lc_negative_imm_sign_extends,
     "mov_br_hint_decode": test_mov_br_hint_decode,
     "mov_m_imm_ar_decode": test_mov_m_imm_ar_decode,
+    "mov_m_negative_imm_ar_sign_extends":
+        test_mov_m_negative_imm_ar_sign_extends,
     "mov_m_cr_gr_decode": test_mov_m_cr_gr_decode,
     "itr_i_indexed_decode": test_itr_i_indexed_decode,
     "itr_i_slot_uses_low_8_bits": test_itr_i_slot_uses_low_8_bits,
@@ -20567,6 +21046,22 @@ TEST_NAMES = {
     "itc_d_replaces_full_tc": test_itc_d_replaces_full_tc,
     "itc_d_full_tc_replacement_rotates": test_itc_d_full_tc_replacement_rotates,
     "itc_d_preserves_24bit_key": test_itc_d_preserves_24bit_key,
+    "itc_d_4g_page_size_reserved_field_fault":
+        test_itc_d_4g_page_size_reserved_field_fault,
+    "itr_d_4g_page_size_reserved_field_fault":
+        test_itr_d_4g_page_size_reserved_field_fault,
+    "itc_d_present_reserved_pte_field_fault":
+        test_itc_d_present_reserved_pte_field_fault,
+    "itc_i_present_reserved_pte_field_fault":
+        test_itc_i_present_reserved_pte_field_fault,
+    "itc_d_present_reserved_itir_field_fault":
+        test_itc_d_present_reserved_itir_field_fault,
+    "itc_d_present_reserved_ma_field_fault":
+        test_itc_d_present_reserved_ma_field_fault,
+    "itc_d_not_present_ignores_high_itir_field":
+        test_itc_d_not_present_ignores_high_itir_field,
+    "itc_d_not_present_rejects_low_itir_reserved_field":
+        test_itc_d_not_present_rejects_low_itir_reserved_field,
     "itc_d_not_present_raises_page_fault":
         test_itc_d_not_present_raises_page_fault,
     "tak_not_present_dtlb_returns_one":
@@ -20598,6 +21093,8 @@ TEST_NAMES = {
     "itc_i_resumes_next_slot_after_tb_exit":
         test_itc_i_resumes_next_slot_after_tb_exit,
     "ptc_l_m_unit_decode": test_ptc_l_m_unit_decode,
+    "ptc_l_4g_page_size_is_purgeable":
+        test_ptc_l_4g_page_size_is_purgeable,
     "ptc_l_keeps_nonoverlapping_tc": test_ptc_l_keeps_nonoverlapping_tc,
     "ptc_l_does_not_clear_local_alat":
         test_ptc_l_does_not_clear_local_alat,
@@ -20894,6 +21391,8 @@ TEST_NAMES = {
     "rse_call_sets_callee_input_frame": test_rse_call_sets_callee_input_frame,
     "rse_nested_alloc_call_preserves_output_arg": test_rse_nested_alloc_call_preserves_output_arg,
     "rse_call_uses_high_sol_output_arg": test_rse_call_uses_high_sol_output_arg,
+    "rse_call_maps_all_high_output_args":
+        test_rse_call_maps_all_high_output_args,
     "rse_callee_alloc_stores_input_arg": test_rse_callee_alloc_stores_input_arg,
     "rse_alloc_preserves_ar_pfs": test_rse_alloc_preserves_ar_pfs,
     "alloc_clears_destination_nat": test_alloc_clears_destination_nat,
@@ -20901,6 +21400,8 @@ TEST_NAMES = {
     "rse_bsp_is_current_frame_base": test_rse_bsp_is_current_frame_base,
     "rse_call_ret_updates_bsp_base": test_rse_call_ret_updates_bsp_base,
     "rse_call_ret_preserves_caller_local": test_rse_call_ret_preserves_caller_local,
+    "rse_large_callee_preserves_high_caller_local":
+        test_rse_large_callee_preserves_high_caller_local,
     "rse_parent_spill_keeps_call_snapshot":
         test_rse_parent_spill_keeps_call_snapshot,
     "rse_call_preserves_same_bundle_local_write":
@@ -21206,6 +21707,15 @@ TEST_NAMES = {
     "reserved_ip_relative_branch_btype_illegal":
         test_reserved_ip_relative_branch_btype_illegal,
     "br_ctop_rotating_pipeline": test_br_ctop_rotating_pipeline,
+    "br_ctop_long_rotating_pipeline": test_br_ctop_long_rotating_pipeline,
+    "br_ctop_long_speculative_load_pipeline":
+        test_br_ctop_long_speculative_load_pipeline,
+    "br_ctop_strcpy_pipeline_stops_on_first_zero_word":
+        test_br_ctop_strcpy_pipeline_stops_on_first_zero_word,
+    "br_ctop_strcpy_pipeline_survives_cover_rfi":
+        test_br_ctop_strcpy_pipeline_survives_cover_rfi,
+    "br_call_ret_strcpy_pipeline_stops_on_first_zero_word":
+        test_br_call_ret_strcpy_pipeline_stops_on_first_zero_word,
     "br_ctop_rotates_floating_registers": test_br_ctop_rotates_floating_registers,
     "br_wtop_false_predicate_drains_epilog":
         test_br_wtop_false_predicate_drains_epilog,
@@ -21245,6 +21755,8 @@ TEST_NAMES = {
         test_rfi_restores_interrupted_bsp_after_cover,
     "cover_rfi_rebases_rotating_floating_registers":
         test_cover_rfi_rebases_rotating_floating_registers,
+    "cover_rfi_rebases_rotating_general_registers":
+        test_cover_rfi_rebases_rotating_general_registers,
     "br_call_ret_rebases_rotating_floating_registers":
         test_br_call_ret_rebases_rotating_floating_registers,
     "clrrrb_rebases_rotating_floating_registers":

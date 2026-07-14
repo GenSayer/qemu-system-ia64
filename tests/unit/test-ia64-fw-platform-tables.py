@@ -153,15 +153,15 @@ def main():
         return 1
 
     dsdt_size = symbol_size("mDsdt")
-    if dsdt_size != 0x1e7:
+    if dsdt_size != 0x219:
         print("not ok 1 - IA-64 DSDT layout size")
-        print(f"# expected mDsdt size 0x1e7, got 0x{dsdt_size:x}")
+        print(f"# expected mDsdt size 0x219, got 0x{dsdt_size:x}")
         return 1
 
     ssdt_size = symbol_size("mSsdt")
-    if ssdt_size != 0xfb:
-        print("not ok 1 - IA-64 SSDT serial layout size")
-        print(f"# expected mSsdt size 0xfb, got 0x{ssdt_size:x}")
+    if ssdt_size != 0x11a:
+        print("not ok 1 - IA-64 SSDT platform-device layout size")
+        print(f"# expected mSsdt size 0x11a, got 0x{ssdt_size:x}")
         return 1
 
     mcfg_size = symbol_size("mMcfg")
@@ -209,7 +209,9 @@ def main():
         print("not ok 1 - SSDT processor AML")
         print("# missing ACPI Processor CPU0 declaration")
         return 1
-    for token in [b"PCI0", b"UAR0", b"PNP0501", b"PS2K", b"PS2M", b"_CRS"]:
+    for token in [
+            b"PCI0", b"UAR0", b"PNP0501", b"PS2K", b"PS2M",
+            b"P2EN", b"_STA", b"_CRS"]:
         if token not in ssdt:
             print("not ok 1 - SSDT serial AML")
             print(f"# missing AML token: {token.decode('ascii')}")

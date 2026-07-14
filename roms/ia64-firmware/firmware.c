@@ -26,6 +26,7 @@ typedef __SIZE_TYPE__    size_t;
 
 #define UART_BASE   0x00000047f0000000ULL
 #define DEBUG_UART_BASE 0x00000047f0001000ULL
+#define UART_MMIO_SIZE 0x0000000000002000ULL
 /* 16550 UART register offsets */
 #define UART_RBR    0x00   /* Receiver Buffer Register (read) */
 #define UART_THR    0x00   /* Transmit Holding Register (write) */
@@ -63,8 +64,8 @@ typedef __SIZE_TYPE__    size_t;
 #define PCI_OHCI_MMIO_BAR             0xc1010000U
 #define PCI_AHCI_MMIO_BAR             0xc1020000U
 #define PCI_LSI_MMIO_BAR              0xc1030000U
-#define PCI_VGA_FB_BAR                0xc2000000U
-#define PCI_VGA_MMIO_BAR              0xc3000000U
+#define PCI_VGA_FB_BAR                0xc4000000U
+#define PCI_VGA_MMIO_BAR              0xc8000000U
 #define VGA_FB_BASE                   ((UINT64)PCI_VGA_FB_BAR)
 #define VGA_MMIO_BASE                 ((UINT64)PCI_VGA_MMIO_BAR)
 #define ACPI_RECLAIM_BASE 0x0000000000800000ULL
@@ -75,6 +76,8 @@ typedef __SIZE_TYPE__    size_t;
 #define ACPI_PM1_EVT_OFFSET 0x0U
 #define ACPI_PM1_CNT_OFFSET 0x4U
 #define ACPI_PM_TMR_OFFSET 0x8U
+#define ACPI_PM_RESET_OFFSET 0xcU
+#define ACPI_PM_RESET_VALUE  0x01U
 #define ACPI_PM1_CNT_SLEEP_ENABLE 0x2000U
 #define ACPI_SCI_IRQ     9U
 #define ACPI_GAS_SYSTEM_MEMORY 0U
@@ -83,6 +86,7 @@ typedef __SIZE_TYPE__    size_t;
 #define ACPI_FADT_FLAG_WBINVD        (1U << 0)
 #define ACPI_FADT_FLAG_PWR_BUTTON    (1U << 4)
 #define ACPI_FADT_FLAG_SLP_BUTTON    (1U << 5)
+#define ACPI_FADT_FLAG_RESET_REG_SUP (1U << 10)
 #define ACPI_FADT_FLAG_SW_CPU_SLP    (1U << 13)
 #define VGA_MODE_TEXT_WIDTH  640U
 #define VGA_MODE_TEXT_HEIGHT 400U
@@ -133,7 +137,7 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
 #define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
 #define FW_HANDOFF_MAGIC  0x4d41523436414951ULL /* "QIA64RAM" */
-#define FW_HANDOFF_VERSION 6ULL
+#define FW_HANDOFF_VERSION 7ULL
 #define FW_HANDOFF_DEBUG_PORT_PRESENT 1ULL
 #define FW_CONSOLE_POLICY_SERIAL 0ULL
 #define FW_CONSOLE_POLICY_VGA    1ULL
@@ -228,7 +232,6 @@ typedef __SIZE_TYPE__    size_t;
 #define IA64_REGION6_BASE             0xC000000000000000ULL
 #define PS2_DATA_PORT                 (LEGACY_IO_BASE + 0x60U)
 #define PS2_STATUS_PORT               (LEGACY_IO_BASE + 0x64U)
-#define PS2_COMMAND_RESET             0xFEU
 #define PS2_STATUS_OBF                0x01U
 #define PS2_STATUS_IBF                0x02U
 #define PS2_STATUS_MOUSE_OBF          0x20U
@@ -1192,12 +1195,12 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[451];
+    UINT8 Aml[501];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[215];
+    UINT8 Aml[246];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -1735,8 +1738,8 @@ FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 487, acpi_dsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 251, acpi_ssdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 537, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 282, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
@@ -1852,7 +1855,7 @@ static ACPI_DSDT               mDsdt = {
     .Aml = {
     /* Name (_S5, Package (0x04) { Zero, Zero, Zero, Zero }) */
     0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
-    0x10, 0x46, 0x1b, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x4d, 0x1a,
+    0x10, 0x48, 0x1e, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x4f, 0x1d,
     0x50, 0x43, 0x49, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50, 0x4e,
     0x50, 0x30, 0x41, 0x30, 0x38, 0x00, 0x08, 0x5f, 0x43, 0x49, 0x44, 0x0d,
     0x50, 0x4e, 0x50, 0x30, 0x41, 0x30, 0x33, 0x00, 0x08, 0x5f, 0x53, 0x45,
@@ -1868,7 +1871,7 @@ static ACPI_DSDT               mDsdt = {
     0x00, 0xc1, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xd0, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x79, 0x00, 0x08, 0x5f, 0x50, 0x52,
-    0x54, 0x12, 0x45, 0x0f, 0x14, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x00,
+    0x54, 0x12, 0x47, 0x12, 0x18, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x00,
     0x00, 0x0a, 0x10, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x01, 0x00, 0x0a,
     0x11, 0x12, 0x0a, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x02, 0x00, 0x0a, 0x12,
     0x12, 0x0a, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x03, 0x00, 0x0a, 0x13, 0x12,
@@ -1888,7 +1891,11 @@ static ACPI_DSDT               mDsdt = {
     0x00, 0x00, 0x00, 0x0a, 0x10, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x04,
     0x00, 0x01, 0x00, 0x0a, 0x11, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x04,
     0x00, 0x0a, 0x02, 0x00, 0x0a, 0x12, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff,
-    0x04, 0x00, 0x0a, 0x03, 0x00, 0x0a, 0x13,
+    0x04, 0x00, 0x0a, 0x03, 0x00, 0x0a, 0x13, 0x12, 0x0b, 0x04, 0x0c, 0xff,
+    0xff, 0x05, 0x00, 0x00, 0x00, 0x0a, 0x11, 0x12, 0x0b, 0x04, 0x0c, 0xff,
+    0xff, 0x05, 0x00, 0x01, 0x00, 0x0a, 0x12, 0x12, 0x0c, 0x04, 0x0c, 0xff,
+    0xff, 0x05, 0x00, 0x0a, 0x02, 0x00, 0x0a, 0x13, 0x12, 0x0c, 0x04, 0x0c,
+    0xff, 0xff, 0x05, 0x00, 0x0a, 0x03, 0x00, 0x0a, 0x10,
     },
 };
 static ACPI_SSDT               mSsdt = {
@@ -1898,31 +1905,38 @@ static ACPI_SSDT               mSsdt = {
          *
          * Scope (\_SB) { Processor (CPU0, 0, 0, 0) {} }
          * Scope (\_SB.PCI0) {
+         *   Name (P2EN, 0x0F)
          *   Device (UAR0) { _HID PNP0501; _CRS { QWordMemory UART; IRQ 4 } }
-         *   Device (PS2K) { _HID PNP0303; _CRS { IO 0x60; IO 0x64; IRQ 1 } }
-         *   Device (PS2M) { _HID PNP0F13; _CRS { IRQ 12 } }
+         *   Device (PS2K) { _HID PNP0303; _STA { Return (P2EN) };
+         *                   _CRS { IO 0x60; IO 0x64; IRQ 1 } }
+         *   Device (PS2M) { _HID PNP0F13; _STA { Return (P2EN) };
+         *                   _CRS { IRQ 12 } }
          * }
          */
         0xa0, 0x0f, 0x00, 0x15, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43,
         0x49, 0x30, 0x06, 0x00, 0x10, 0x13, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b,
         0x83, 0x0b, 0x43, 0x50, 0x55, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x10, 0x42, 0x0b, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43, 0x49,
-        0x30, 0x5b, 0x82, 0x46, 0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48,
+        0x10, 0x41, 0x0d, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43, 0x49,
+        0x30, 0x08, 0x50, 0x32, 0x45, 0x4e, 0x0a, 0x0f, 0x5b, 0x82, 0x46, 0x05,
+        0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48,
         0x49, 0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08,
         0x5f, 0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x36,
         0x0a, 0x33, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
         0x07, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x22, 0x10, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x2d, 0x50, 0x53, 0x32, 0x4b,
-        0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x08, 0x5f,
+        0x22, 0x10, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x39, 0x50, 0x53, 0x32, 0x4b,
+        0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x14, 0x0b,
+        0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32, 0x45, 0x4e, 0x08, 0x5f,
         0x43, 0x52, 0x53, 0x11, 0x18, 0x0a, 0x15, 0x47, 0x01, 0x60, 0x00, 0x60,
         0x00, 0x01, 0x01, 0x47, 0x01, 0x64, 0x00, 0x64, 0x00, 0x01, 0x01, 0x22,
-        0x02, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x1d, 0x50, 0x53, 0x32, 0x4d, 0x08,
-        0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0f, 0x13, 0x08, 0x5f, 0x43,
+        0x02, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x29, 0x50, 0x53, 0x32, 0x4d, 0x08,
+        0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0f, 0x13, 0x14, 0x0b, 0x5f,
+        0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32, 0x45, 0x4e, 0x08, 0x5f, 0x43,
         0x52, 0x53, 0x11, 0x08, 0x0a, 0x05, 0x22, 0x00, 0x10, 0x79, 0x00,
     },
 };
+#define SSDT_PS2_ENABLED_OFFSET 55U
 static ACPI_MCFG               mMcfg;
 static ACPI_MADT               mMadt;
 static ACPI_SRAT               mSrat;
@@ -2026,6 +2040,7 @@ typedef struct {
     UINT64 IdeDmaEnabled;
     UINT64 DebugPortFlags;
     UINT64 DebugPortBase;
+    UINT64 I8042Enabled;
 } FW_HANDOFF;
 
 static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
@@ -2217,6 +2232,19 @@ static UINT64 fw_handoff_debug_port_base(void)
     return (flags & FW_HANDOFF_DEBUG_PORT_PRESENT) != 0 ? base : 0;
 }
 
+static BOOLEAN fw_handoff_i8042_enabled(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
+    FW_HANDOFF *handoff;
+
+    if (!fw_handoff_valid(header) || header->Version < 7) {
+        return 1;
+    }
+    handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    return handoff->I8042Enabled != 0;
+}
+
 static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
                                            UINT64 BootStackBase,
                                            UINT64 BootStackTop)
@@ -2296,7 +2324,8 @@ static EFI_PHYSICAL_ADDRESS   mNextPageAddr = 0x01000000ULL;
 static BOOLEAN                mBootServicesExited;
 static UINTN                  mRuntimeAcpiPm1Cnt =
     LEGACY_IO_BASE + ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET;
-static UINTN                  mRuntimePs2Command = PS2_STATUS_PORT;
+static UINTN                  mRuntimeResetControl =
+    LEGACY_IO_BASE + ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET;
 static UINTN                  mRuntimePciConfigEcam =
     PCI_CONFIG_ECAM_BASE;
 static UINTN                  mRuntimeRtc = FW_RTC_BASE;
@@ -2364,6 +2393,7 @@ typedef struct {
     UINTN exit_data_size;
     CHAR16 *exit_data;
     UINT64 saved_psr;
+    UINT64 saved_rsc;
 } EFI_START_IMAGE_FRAME;
 
 static EFI_START_IMAGE_FRAME mStartImageFrames[LOADED_IMAGE_MAX];
@@ -2432,9 +2462,16 @@ typedef struct {
     IA64_EFI_FPSWA fpswa;
 } IA64_FPSWA_INTERFACE;
 
+typedef struct {
+    UINTN entry;
+    UINTN gp;
+} IA64_FUNCTION_DESCRIPTOR;
+
 FW_STATIC_ASSERT(sizeof(IA64_FPSWA_RET) == 32, ia64_fpswa_ret_size);
 FW_STATIC_ASSERT(sizeof(IA64_FPSWA_INTERFACE) == 16,
                  ia64_fpswa_interface_size);
+FW_STATIC_ASSERT(sizeof(IA64_FUNCTION_DESCRIPTOR) == 16,
+                 ia64_function_descriptor_size);
 
 /* IA-64 plabel (function descriptor): 2 x 64-bit values */
 typedef struct {
@@ -2742,6 +2779,9 @@ typedef struct {
 #define SAL_STATE_TYPE_CPE          3
 #define SAL_STATE_TYPE_DECONFIG     4
 #define SAL_ERROR_RECORD_HEADER_SIZE 40
+#define SAL_ERROR_SECTION_HEADER_SIZE 24
+#define SAL_ERROR_RECORD_MIN_SIZE \
+    (SAL_ERROR_RECORD_HEADER_SIZE + SAL_ERROR_SECTION_HEADER_SIZE)
 
 typedef struct {
     UINT64 HandlerAddr1;
@@ -2908,11 +2948,11 @@ sal_get_state_info_size(UINT64 Type, UINT64 Reserved1, UINT64 Reserved2,
     }
 
     /*
-     * Report at least the architected error-record header.  A successful
-     * zero-sized response leads operating systems to allocate an invalid
-     * record buffer even when no state information is currently pending.
+     * Advertise room for the generic record header and one section header.
+     * This also accommodates consumers that initialize first-section
+     * metadata before requesting a record when none is pending.
      */
-    return sal_return(SAL_STATUS_SUCCESS, SAL_ERROR_RECORD_HEADER_SIZE,
+    return sal_return(SAL_STATUS_SUCCESS, SAL_ERROR_RECORD_MIN_SIZE,
                       0, 0);
 }
 
@@ -2969,7 +3009,7 @@ static BOOLEAN __attribute__((noinline)) sal_state_info_selftest(void)
                                               0, 0, 0, 0, 0, 1);
 
     return size_valid.Status == SAL_STATUS_SUCCESS &&
-           size_valid.Value0 == SAL_ERROR_RECORD_HEADER_SIZE &&
+           size_valid.Value0 == SAL_ERROR_RECORD_MIN_SIZE &&
            size_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
            info_empty.Status == SAL_STATUS_NO_INFORMATION &&
            info_empty.Value0 == 0 &&
@@ -3884,9 +3924,24 @@ static UINT64 fw_read_psr(void)
     return psr;
 }
 
+static UINT64 __attribute__((noinline)) fw_read_rsc(void)
+{
+    UINT64 rsc;
+
+    __asm__ volatile ("mov %0 = ar.rsc" : "=r"(rsc));
+    return rsc;
+}
+
+static void __attribute__((noinline)) fw_restore_rsc(UINT64 rsc)
+{
+    __asm__ volatile ("mov ar.rsc = %0;;" : : "r"(rsc) : "memory");
+}
+
 static void fw_restore_psr(UINT64 psr)
 {
     __asm__ volatile (
+        "rsm psr.ic;;\n\t"
+        "srlz.d;;\n\t"
         "movl r14 = 1f;;\n\t"
         "mov cr.ipsr = %0;;\n\t"
         "mov cr.iip = r14\n\t"
@@ -4228,6 +4283,9 @@ static volatile UINT8 *ps2_reg(UINTN addr)
 
 static UINT8 ps2_read_status(void)
 {
+    if (!fw_handoff_i8042_enabled()) {
+        return 0;
+    }
     return *ps2_reg(PS2_STATUS_PORT);
 }
 
@@ -4304,6 +4362,10 @@ static BOOLEAN __attribute__((noinline, used)) ps2_keyboard_enable_scanning(void
 static void ps2_init_controller(void)
 {
     UINT8 mode;
+
+    if (!fw_handoff_i8042_enabled()) {
+        return;
+    }
 
     if (!ps2_write_command(PS2_CMD_READ_MODE) ||
         !ps2_wait_output_full()) {
@@ -4739,6 +4801,16 @@ static void text_write_legacy_cell(UINTN Column, UINTN Row, UINT8 Ch)
     UINT16 attr = (UINT16)mTextAttrs[Row][Column] << 8;
 
     fb[Row * VGA_TEXT_COLUMNS + Column] = attr | (UINT16)Ch;
+}
+
+static void text_clear_legacy_cells(void)
+{
+    volatile UINT16 *fb = (volatile UINT16 *)(UINTN)VGA_TEXT_FB_BASE;
+    UINTN cell;
+
+    for (cell = 0; cell < VGA_TEXT_COLUMNS * VGA_TEXT_ROWS; cell++) {
+        fb[cell] = 0x0720U;
+    }
 }
 
 static void text_draw_cell(UINTN Column, UINTN Row)
@@ -7268,8 +7340,7 @@ void *memset(void *Buffer, int Value, size_t Size)
 
 static volatile UINT8 *vga_io_reg(UINTN Port)
 {
-    return (volatile UINT8 *)(UINTN)(VGA_MMIO_BASE + PCI_VGA_IOPORT_OFFSET +
-                                     (Port - VGA_IOPORT_BASE));
+    return (volatile UINT8 *)(UINTN)(LEGACY_IO_BASE + Port);
 }
 
 static UINT8 vga_io_read(UINTN Port)
@@ -7284,18 +7355,13 @@ static void vga_io_write(UINTN Port, UINT8 Value)
 
 static void vga_bochs_write(UINTN Index, UINT16 Value)
 {
-    volatile UINT16 *reg =
-        (volatile UINT16 *)(UINTN)(VGA_MMIO_BASE + PCI_VGA_BOCHS_OFFSET +
-                                   Index * 2U);
-    *reg = Value;
-}
+    volatile UINT16 *index =
+        (volatile UINT16 *)(UINTN)(LEGACY_IO_BASE + 0x1ceU);
+    volatile UINT16 *data =
+        (volatile UINT16 *)(UINTN)(LEGACY_IO_BASE + 0x1d0U);
 
-static void vga_qext_write(UINTN Index, UINT32 Value)
-{
-    volatile UINT32 *reg =
-        (volatile UINT32 *)(UINTN)(VGA_MMIO_BASE + PCI_VGA_QEXT_OFFSET +
-                                   Index);
-    *reg = Value;
+    *index = (UINT16)Index;
+    *data = Value;
 }
 
 static void vga_indexed_write(UINTN IndexPort, UINTN DataPort,
@@ -7364,7 +7430,6 @@ static EFI_STATUS graphics_select_mode(UINT32 ModeNumber, BOOLEAN RedrawText)
     mGraphicsHeight = info->VerticalResolution;
     mGraphicsStride = info->PixelsPerScanLine * 4U;
 
-    vga_qext_write(PCI_VGA_QEXT_REG_BYTEORDER, PCI_VGA_QEXT_LITTLE_ENDIAN);
     vga_bochs_write(VBE_DISPI_INDEX_ENABLE, 0);
     vga_bochs_write(VBE_DISPI_INDEX_ID, VBE_DISPI_ID5);
     vga_bochs_write(VBE_DISPI_INDEX_XRES, mGraphicsWidth);
@@ -8495,6 +8560,7 @@ static EFI_START_IMAGE_FRAME *start_image_push_frame(EFI_HANDLE ImageHandle)
     frame->image_handle = ImageHandle;
     frame->exit_status = EFI_SUCCESS;
     frame->saved_psr = fw_read_psr() & ~(IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
+    frame->saved_rsc = fw_read_rsc();
     return frame;
 }
 
@@ -9690,6 +9756,7 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
         if (frame == NULL) {
             return EFI_ABORTED;
         }
+        fw_restore_rsc(frame->saved_rsc);
         fw_restore_psr(frame->saved_psr);
         status = frame->exit_status;
         if (ExitDataSize) {
@@ -9702,6 +9769,7 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
         return (EFI_STATUS)status;
     }
 
+    fw_restore_rsc(frame->saved_rsc);
     __asm__ volatile (
         "mov ar.lc = r0\n\t"
         "mov ar.ec = r0\n\t"
@@ -9727,17 +9795,15 @@ EFI_STATUS bs_exit_boot_services(EFI_HANDLE ImageHandle, UINTN MapKey)
     fw_signal_event_group(gEfiEventGroupExitBootServicesGuid);
     fw_signal_event_type(EVT_SIGNAL_EXIT_BOOT_SERVICES);
     if (!mGraphicsClientActive) {
-        graphics_select_text_mode();
-
         /*
          * The VGA linear framebuffer and the legacy planes share VRAM.
-         * A subsequent planar mode may not clear every plane first.  Leaving
-         * the former GOP pixels, text cells, and font behind can therefore
-         * expose stale firmware contents.  Boot services have ended and the
-         * loader no longer needs the console, so hand the display to the OS
-         * with zeroed VRAM.
+         * Clear former GOP pixels before loading the text font; clearing the
+         * linear framebuffer afterwards would erase that font from its VGA
+         * plane and make valid text cells render as black glyphs.
          */
         graphics_clear_framebuffer();
+        graphics_select_text_mode();
+        text_clear_legacy_cells();
     }
     /*
      * The loader owns RR/TR state by this point and may have installed RID=1
@@ -10696,6 +10762,9 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, PCI_MMIO_BASE,
                                        PCI_MMIO_BASE + PCI_MMIO_SIZE,
                                        EFI_MEMORY_UC) ||
+        !efi_memory_map_has_descriptor(EfiMemoryMappedIO, UART_BASE,
+                                       UART_BASE + UART_MMIO_SIZE,
+                                       EFI_MEMORY_UC) ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIOPortSpace,
                                        LEGACY_IO_BASE,
                                        LEGACY_IO_SPARSE_LIMIT,
@@ -11054,6 +11123,10 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_NVRAM_BASE + FW_NVRAM_SIZE,
                          FW_FIRMWARE_ADDRESS_SPACE_END, EFI_MEMORY_UC);
+
+    /* Reserve both platform UART pages described by HCDP and DBGP. */
+    efi_add_memory_range(&index, EfiMemoryMappedIO, UART_BASE,
+                         UART_BASE + UART_MMIO_SIZE, EFI_MEMORY_UC);
 
     mMemoryMapEntries = index;
 }
@@ -11918,14 +11991,16 @@ static void efi_init_platform_tables(void)
     mFadt.Reserved0 = 0;
     mFadt.Flags = ACPI_FADT_FLAG_WBINVD |
                   ACPI_FADT_FLAG_SLP_BUTTON |
+                  ACPI_FADT_FLAG_RESET_REG_SUP |
                   ACPI_FADT_FLAG_SW_CPU_SLP;
-    mFadt.ResetRegister.SpaceId = 0;
-    mFadt.ResetRegister.BitWidth = 0;
+    mFadt.ResetRegister.SpaceId = ACPI_GAS_SYSTEM_IO;
+    mFadt.ResetRegister.BitWidth = 8;
     mFadt.ResetRegister.BitOffset = 0;
     mFadt.ResetRegister.Reserved = 0;
-    mFadt.ResetRegister.AddressLow = 0;
+    mFadt.ResetRegister.AddressLow =
+        ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET;
     mFadt.ResetRegister.AddressHigh = 0;
-    mFadt.ResetValue = 0;
+    mFadt.ResetValue = ACPI_PM_RESET_VALUE;
     for (i = 0; i < sizeof(mFadt.Reserved1); i++) {
         mFadt.Reserved1[i] = 0;
     }
@@ -11944,6 +12019,8 @@ static void efi_init_platform_tables(void)
     mFadt.XGpe1Block = acpi_system_memory_gas(0, 0);
     mFadt.Hdr.Checksum = table_checksum8(&mFadt, sizeof(mFadt));
 
+    mSsdt.Aml[SSDT_PS2_ENABLED_OFFSET] =
+        fw_handoff_i8042_enabled() ? 0x0fU : 0;
     init_sdt_header(&mSsdt.Hdr, EFI_SIGNATURE_32('S', 'S', 'D', 'T'),
                     sizeof(mSsdt));
     mSsdt.Hdr.Revision = 2;
@@ -12078,8 +12155,8 @@ static void efi_init_platform_tables(void)
     mHcdp.Device[0].Pci.Bus = 0;
     mHcdp.Device[0].Pci.Device = 5;
     mHcdp.Device[0].Pci.Function = 0;
-    mHcdp.Device[0].Pci.DeviceId = 0x1111;
-    mHcdp.Device[0].Pci.VendorId = 0x1234;
+    mHcdp.Device[0].Pci.DeviceId = 0x5046;
+    mHcdp.Device[0].Pci.VendorId = 0x1002;
     mHcdp.Device[0].Pci.AcpiInterrupt = 0;
     mHcdp.Device[0].Pci.MmioTranslation = 0;
     mHcdp.Device[0].Pci.IoPortTranslation = LEGACY_IO_BASE;
@@ -12212,6 +12289,8 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     static const UINT8 hid_pci_express[] = "PNP0A08";
     static const UINT8 cid_pci[] = "PNP0A03";
     static const UINT8 hid_uart[] = "PNP0501";
+    static const UINT8 ps2_enabled[] = { 'P', '2', 'E', 'N' };
+    static const UINT8 sta_name[] = { '_', 'S', 'T', 'A' };
     static const UINT8 crs_name[] = { '_', 'C', 'R', 'S' };
     static const UINT8 prt_name[] = { '_', 'P', 'R', 'T' };
     UINTN i;
@@ -12311,6 +12390,10 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     if (!acpi_ssdt_has_bytes(cpu0_processor, sizeof(cpu0_processor)) ||
         !acpi_ssdt_has_bytes(uar0_name, sizeof(uar0_name)) ||
         !acpi_ssdt_has_bytes(hid_uart, sizeof(hid_uart) - 1) ||
+        !acpi_ssdt_has_bytes(ps2_enabled, sizeof(ps2_enabled)) ||
+        !acpi_ssdt_has_bytes(sta_name, sizeof(sta_name)) ||
+        mAcpiSsdt->Aml[SSDT_PS2_ENABLED_OFFSET] !=
+            (fw_handoff_i8042_enabled() ? 0x0fU : 0) ||
         !acpi_ssdt_has_bytes(crs_name, sizeof(crs_name))) {
         return 0;
     }
@@ -12328,7 +12411,12 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         !acpi_gas_matches(&mAcpiFadt->XPmTimerBlock,
                           ACPI_GAS_SYSTEM_IO, 32,
                           ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET) ||
+        !acpi_gas_matches(&mAcpiFadt->ResetRegister,
+                          ACPI_GAS_SYSTEM_IO, 8,
+                          ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET) ||
+        mAcpiFadt->ResetValue != ACPI_PM_RESET_VALUE ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_PWR_BUTTON) != 0 ||
+        (mAcpiFadt->Flags & ACPI_FADT_FLAG_RESET_REG_SUP) == 0 ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_SW_CPU_SLP) == 0) {
         return 0;
     }
@@ -12395,8 +12483,8 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiHcdp->Device[0].Pci.Bus != 0 ||
         mAcpiHcdp->Device[0].Pci.Device != 5 ||
         mAcpiHcdp->Device[0].Pci.Function != 0 ||
-        mAcpiHcdp->Device[0].Pci.DeviceId != 0x1111 ||
-        mAcpiHcdp->Device[0].Pci.VendorId != 0x1234) {
+        mAcpiHcdp->Device[0].Pci.DeviceId != 0x5046 ||
+        mAcpiHcdp->Device[0].Pci.VendorId != 0x1002) {
         return 0;
     }
     for (i = 0; i < FW_MEMORY_AFFINITY_MAX; i++) {
@@ -15914,7 +16002,7 @@ typedef struct {
     UINT8  fs_type[8];
 } __attribute__((packed)) FAT_BPB;
 
-static BOOLEAN bpb_is_valid(FAT_BPB *bpb)
+static BOOLEAN bpb_is_valid(const FAT_BPB *bpb)
 {
     return bpb->bytes_per_sec == 512 && bpb->sec_per_cluster > 0;
 }
@@ -18609,6 +18697,108 @@ static BOOLEAN fw_gpt_find_esp(UINT32 *StartLba, UINT32 *SectorCount)
     return 0;
 }
 
+static BOOLEAN fw_mbr_is_fat_partition(UINT8 type)
+{
+    switch (type) {
+    case 0x01: /* FAT12 */
+    case 0x04: /* FAT16, less than 32 MiB */
+    case 0x06: /* FAT16 */
+    case 0x0b: /* FAT32 */
+    case 0x0c: /* FAT32, LBA */
+    case 0x0e: /* FAT16, LBA */
+    case 0xef: /* EFI system partition */
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static BOOLEAN fw_fat12_16_bpb_matches_partition(const UINT8 *sec,
+                                                  UINT32 sectors)
+{
+    const FAT_BPB *bpb = (const FAT_BPB *)sec;
+    UINT32 filesystem_sectors;
+
+    if (!bpb_is_valid(bpb) ||
+        bpb->reserved_secs == 0 || bpb->num_fats == 0 ||
+        bpb->root_entries == 0 || bpb->secs_per_fat_small == 0) {
+        return 0;
+    }
+    filesystem_sectors = bpb->total_secs_small != 0 ?
+                         bpb->total_secs_small : bpb->total_secs_large;
+    return filesystem_sectors != 0 && filesystem_sectors <= sectors;
+}
+
+static BOOLEAN fw_mbr_find_fat_partition(UINT32 *StartLba,
+                                         UINT32 *SectorCount)
+{
+    UINT8 mbr[512];
+    UINT8 sec[512];
+    UINT32 starts[4];
+    UINT32 sizes[4];
+    UINT8 types[4];
+    UINT64 device_last_lba;
+    UINTN pass;
+    UINTN i;
+
+    if (StartLba == NULL || SectorCount == NULL ||
+        storage_is_cd(&mBootStorageDevice) ||
+        storage_block_size(&mBootStorageDevice) != 512U ||
+        !fw_read_512(mbr, 0) || mbr[510] != 0x55 || mbr[511] != 0xaa) {
+        return 0;
+    }
+
+    device_last_lba = storage_last_lba(&mBootStorageDevice);
+    for (i = 0; i < 4; i++) {
+        const UINT8 *entry = mbr + 446 + i * 16;
+        UINTN j;
+
+        types[i] = entry[4];
+        starts[i] = fw_le32(entry + 8);
+        sizes[i] = fw_le32(entry + 12);
+        if (types[i] == 0 || sizes[i] == 0) {
+            sizes[i] = 0;
+            continue;
+        }
+        if ((UINT64)starts[i] > device_last_lba ||
+            (UINT64)sizes[i] - 1U > device_last_lba - starts[i]) {
+            return 0;
+        }
+        for (j = 0; j < i; j++) {
+            UINT64 end;
+            UINT64 other_end;
+
+            if (sizes[j] == 0) {
+                continue;
+            }
+            end = (UINT64)starts[i] + sizes[i];
+            other_end = (UINT64)starts[j] + sizes[j];
+            if ((UINT64)starts[i] < other_end &&
+                (UINT64)starts[j] < end) {
+                return 0;
+            }
+        }
+    }
+
+    for (pass = 0; pass < 2; pass++) {
+        for (i = 0; i < 4; i++) {
+            if (sizes[i] == 0 ||
+                !fw_mbr_is_fat_partition(types[i]) ||
+                (pass == 0 ? types[i] != 0xef : types[i] == 0xef)) {
+                continue;
+            }
+            if (starts[i] == 0 || !fw_read_512(sec, starts[i]) ||
+                !fw_fat12_16_bpb_matches_partition(sec, sizes[i])) {
+                continue;
+            }
+            *StartLba = starts[i];
+            *SectorCount = sizes[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static BOOLEAN fw_fat_init(void)
 {
     static UINT8 sec[512];
@@ -18626,7 +18816,9 @@ static BOOLEAN fw_fat_init(void)
     }
     bpb = (FAT_BPB *)sec;
     if (!bpb_is_valid(bpb)) {
-        if (!fw_gpt_find_esp(&partition_start, &partition_sectors) ||
+        if ((!fw_gpt_find_esp(&partition_start, &partition_sectors) &&
+             !fw_mbr_find_fat_partition(&partition_start,
+                                        &partition_sectors)) ||
             !fw_read_512(sec, partition_start)) {
             return 0;
         }
@@ -21287,7 +21479,7 @@ typedef struct {
     FW_FIRMWARE_VARIABLE_READ read;
 } FW_FIRMWARE_VARIABLE;
 
-static const FW_FIRMWARE_VARIABLE mFirmwareVariables[] = {
+static FW_FIRMWARE_VARIABLE mFirmwareVariables[] = {
     {
         "Boot0000", mEfiGlobalVariableGuid,
         EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
@@ -21349,6 +21541,11 @@ static const FW_FIRMWARE_VARIABLE mFirmwareVariables[] = {
         mPlatformLangValue, sizeof(mPlatformLangValue), NULL,
     },
 };
+
+#define FW_FIRMWARE_VARIABLE_COUNT FW_ARRAY_SIZE(mFirmwareVariables)
+
+static FW_FIRMWARE_VARIABLE *mRuntimeFirmwareVariables =
+    mFirmwareVariables;
 
 static BOOLEAN rs_firmware_variable_enabled(const FW_FIRMWARE_VARIABLE *Var)
 {
@@ -22094,8 +22291,8 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     },
     {
         &mGraphicsHandle, &mPciVgaIoProto, &mGraphicsDevicePath,
-        0, 5, 0, FW_PCI_VGA_ATTRIBUTES, 0x11111234U,
-        0, PCI_VGA_FB_BAR | 0x8U, 0x1000000, "VGA", 0,
+        0, 5, 0, FW_PCI_VGA_ATTRIBUTES, 0x50461002U,
+        0, PCI_VGA_FB_BAR | 0x8U, 0x4000000, "VGA", 0,
     },
 };
 
@@ -24441,9 +24638,113 @@ static EFI_STATUS rs_convert_required_uintn(UINTN *Address)
     return rs_convert_pointer_value(Address);
 }
 
+static EFI_STATUS rs_convert_function_descriptor(UINTN Address,
+                                                  BOOLEAN Commit)
+{
+    IA64_FUNCTION_DESCRIPTOR *descriptor;
+    UINTN virtual_descriptor = Address;
+    UINTN entry;
+    UINTN gp;
+    EFI_STATUS st;
+
+    st = rs_convert_pointer_value(&virtual_descriptor);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
+
+    descriptor = (IA64_FUNCTION_DESCRIPTOR *)Address;
+    entry = descriptor->entry;
+    gp = descriptor->gp;
+    st = rs_convert_pointer_value(&entry);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
+    st = rs_convert_pointer_value(&gp);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
+
+    if (Commit) {
+        descriptor->entry = entry;
+        descriptor->gp = gp;
+    }
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS __attribute__((noinline))
+rs_convert_firmware_variables(void)
+{
+    UINTN names[FW_FIRMWARE_VARIABLE_COUNT];
+    UINTN guids[FW_FIRMWARE_VARIABLE_COUNT];
+    UINTN data[FW_FIRMWARE_VARIABLE_COUNT];
+    UINTN reads[FW_FIRMWARE_VARIABLE_COUNT];
+    UINTN read_descriptors[FW_FIRMWARE_VARIABLE_COUNT];
+    UINTN runtime_variables = (UINTN)mRuntimeFirmwareVariables;
+    UINTN i;
+    EFI_STATUS st;
+
+    st = rs_convert_required_uintn(&runtime_variables);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
+
+    for (i = 0; i < FW_FIRMWARE_VARIABLE_COUNT; i++) {
+        names[i] = (UINTN)mFirmwareVariables[i].name;
+        guids[i] = (UINTN)mFirmwareVariables[i].guid;
+        data[i] = (UINTN)mFirmwareVariables[i].data;
+        reads[i] = (UINTN)mFirmwareVariables[i].read;
+        read_descriptors[i] = reads[i];
+
+        st = rs_convert_required_uintn(&names[i]);
+        if (st != EFI_SUCCESS) {
+            return st;
+        }
+        st = rs_convert_required_uintn(&guids[i]);
+        if (st != EFI_SUCCESS) {
+            return st;
+        }
+        if (data[i] != 0) {
+            st = rs_convert_required_uintn(&data[i]);
+            if (st != EFI_SUCCESS) {
+                return st;
+            }
+        }
+        if (reads[i] != 0) {
+            st = rs_convert_function_descriptor(read_descriptors[i], 0);
+            if (st != EFI_SUCCESS) {
+                return st;
+            }
+            st = rs_convert_required_uintn(&reads[i]);
+            if (st != EFI_SUCCESS) {
+                return st;
+            }
+        }
+    }
+
+    for (i = 0; i < FW_FIRMWARE_VARIABLE_COUNT; i++) {
+        if (read_descriptors[i] != 0) {
+            st = rs_convert_function_descriptor(read_descriptors[i], 1);
+            if (st != EFI_SUCCESS) {
+                return st;
+            }
+        }
+    }
+    for (i = 0; i < FW_FIRMWARE_VARIABLE_COUNT; i++) {
+        mFirmwareVariables[i].name = (const char *)names[i];
+        mFirmwareVariables[i].guid = (const UINT8 *)guids[i];
+        mFirmwareVariables[i].data = (const VOID *)data[i];
+        mFirmwareVariables[i].read =
+            (FW_FIRMWARE_VARIABLE_READ)reads[i];
+    }
+    mRuntimeFirmwareVariables =
+        (FW_FIRMWARE_VARIABLE *)runtime_variables;
+    return EFI_SUCCESS;
+}
+
 static EFI_STATUS rs_convert_runtime_tables(void)
 {
     EFI_STATUS st;
+    UINTN i;
     UINTN get_time = mRuntimeServices.GetTime;
     UINTN set_time = mRuntimeServices.SetTime;
     UINTN get_wakeup_time = mRuntimeServices.GetWakeupTime;
@@ -24454,15 +24755,30 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     UINTN get_next_high = mRuntimeServices.GetNextHighMonotonicCount;
     UINTN reset_system = mRuntimeServices.ResetSystem;
     UINTN query_variable_info = mRuntimeServices.QueryVariableInfo;
+    UINTN fpswa = (UINTN)mFpswaProto.fpswa;
     UINTN firmware_vendor = (UINTN)mSystemTable.FirmwareVendor;
     UINTN runtime_services = (UINTN)mSystemTable.RuntimeServices;
     UINTN configuration_table = (UINTN)mSystemTable.ConfigurationTable;
     UINTN runtime_acpi_pm1_cnt = mRuntimeAcpiPm1Cnt;
-    UINTN runtime_ps2_command = mRuntimePs2Command;
+    UINTN runtime_reset_control = mRuntimeResetControl;
     UINTN runtime_pci_config_ecam = mRuntimePciConfigEcam;
     UINTN runtime_rtc = mRuntimeRtc;
     UINTN runtime_rtc_state = mRuntimeRtcState;
     UINTN nvram_store = (UINTN)mNvramStore;
+    /* Physical-only virtual-memory services are deliberately excluded. */
+    UINTN function_descriptors[] = {
+        mRuntimeServices.GetTime,
+        mRuntimeServices.SetTime,
+        mRuntimeServices.GetWakeupTime,
+        mRuntimeServices.SetWakeupTime,
+        mRuntimeServices.GetVariable,
+        mRuntimeServices.GetNextVariableName,
+        mRuntimeServices.SetVariable,
+        mRuntimeServices.GetNextHighMonotonicCount,
+        mRuntimeServices.ResetSystem,
+        mRuntimeServices.QueryVariableInfo,
+        (UINTN)mFpswaProto.fpswa,
+    };
 
     st = rs_convert_required_uintn(&get_time);
     if (st != EFI_SUCCESS) {
@@ -24504,6 +24820,10 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     if (st != EFI_SUCCESS) {
         return st;
     }
+    st = rs_convert_required_uintn(&fpswa);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
     st = rs_convert_required_uintn(&firmware_vendor);
     if (st != EFI_SUCCESS) {
         return st;
@@ -24520,7 +24840,7 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     if (st != EFI_SUCCESS) {
         return st;
     }
-    st = rs_convert_required_uintn(&runtime_ps2_command);
+    st = rs_convert_required_uintn(&runtime_reset_control);
     if (st != EFI_SUCCESS) {
         return st;
     }
@@ -24541,6 +24861,23 @@ static EFI_STATUS rs_convert_runtime_tables(void)
         return st;
     }
 
+    for (i = 0; i < FW_ARRAY_SIZE(function_descriptors); i++) {
+        st = rs_convert_function_descriptor(function_descriptors[i], 0);
+        if (st != EFI_SUCCESS) {
+            return st;
+        }
+    }
+    st = rs_convert_firmware_variables();
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
+    for (i = 0; i < FW_ARRAY_SIZE(function_descriptors); i++) {
+        st = rs_convert_function_descriptor(function_descriptors[i], 1);
+        if (st != EFI_SUCCESS) {
+            return st;
+        }
+    }
+
     mRuntimeServices.GetTime = get_time;
     mRuntimeServices.SetTime = set_time;
     mRuntimeServices.GetWakeupTime = get_wakeup_time;
@@ -24551,12 +24888,13 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     mRuntimeServices.GetNextHighMonotonicCount = get_next_high;
     mRuntimeServices.ResetSystem = reset_system;
     mRuntimeServices.QueryVariableInfo = query_variable_info;
+    mFpswaProto.fpswa = (IA64_EFI_FPSWA)fpswa;
     mSystemTable.FirmwareVendor = (CHAR16 *)firmware_vendor;
     mSystemTable.RuntimeServices = (EFI_RUNTIME_SERVICES *)runtime_services;
     mSystemTable.ConfigurationTable =
         (EFI_CONFIGURATION_TABLE *)configuration_table;
     mRuntimeAcpiPm1Cnt = runtime_acpi_pm1_cnt;
-    mRuntimePs2Command = runtime_ps2_command;
+    mRuntimeResetControl = runtime_reset_control;
     mRuntimePciConfigEcam = runtime_pci_config_ecam;
     mRuntimeRtc = runtime_rtc;
     mRuntimeRtcState = runtime_rtc_state;
@@ -24656,9 +24994,10 @@ static BOOLEAN rs_find_firmware_variable(CHAR16 *VariableName,
 {
     UINTN i;
 
-    for (i = 0; i < FW_ARRAY_SIZE(mFirmwareVariables); i++) {
-        if (guid_matches(VendorGuid, mFirmwareVariables[i].guid) &&
-            fw_char16_eq_ascii_z(VariableName, mFirmwareVariables[i].name)) {
+    for (i = 0; i < FW_FIRMWARE_VARIABLE_COUNT; i++) {
+        if (guid_matches(VendorGuid, mRuntimeFirmwareVariables[i].guid) &&
+            fw_char16_eq_ascii_z(VariableName,
+                                 mRuntimeFirmwareVariables[i].name)) {
             if (Index != NULL) {
                 *Index = i;
             }
@@ -24694,11 +25033,13 @@ static BOOLEAN rs_nvram_aliases_firmware_variable(const NVRAM_VARIABLE *Var)
 {
     UINTN i;
 
-    for (i = 0; i < FW_ARRAY_SIZE(mFirmwareVariables); i++) {
-        if (rs_nvram_name_eq_ascii(Var, mFirmwareVariables[i].name)) {
+    for (i = 0; i < FW_FIRMWARE_VARIABLE_COUNT; i++) {
+        if (rs_nvram_name_eq_ascii(
+                Var, mRuntimeFirmwareVariables[i].name)) {
             UINTN n;
             for (n = 0; n < 16; n++) {
-                if (Var->guid[n] != mFirmwareVariables[i].guid[n]) {
+                if (Var->guid[n] !=
+                    mRuntimeFirmwareVariables[i].guid[n]) {
                     break;
                 }
             }
@@ -24735,11 +25076,12 @@ static BOOLEAN rs_firmware_variable_deleted(UINTN Index)
 {
     UINTN nvram_index;
 
-    if (Index >= FW_ARRAY_SIZE(mFirmwareVariables)) {
+    if (Index >= FW_FIRMWARE_VARIABLE_COUNT) {
         return 0;
     }
-    if (!rs_find_nvram_ascii_variable(mFirmwareVariables[Index].name,
-                                      mFirmwareVariables[Index].guid,
+    if (!rs_find_nvram_ascii_variable(
+                                      mRuntimeFirmwareVariables[Index].name,
+                                      mRuntimeFirmwareVariables[Index].guid,
                                       &nvram_index)) {
         return 0;
     }
@@ -24816,10 +25158,10 @@ static EFI_STATUS rs_get_firmware_variable(UINTN Index, UINT32 *Attributes,
 {
     const FW_FIRMWARE_VARIABLE *var;
 
-    if (Index >= FW_ARRAY_SIZE(mFirmwareVariables)) {
+    if (Index >= FW_FIRMWARE_VARIABLE_COUNT) {
         return EFI_NOT_FOUND;
     }
-    var = &mFirmwareVariables[Index];
+    var = &mRuntimeFirmwareVariables[Index];
     if (!rs_firmware_variable_enabled(var) ||
         !rs_variable_visible(var->attributes) ||
         rs_firmware_variable_deleted(Index)) {
@@ -24970,7 +25312,8 @@ EFI_STATUS rs_set_variable(CHAR16 *VariableName, void *VendorGuid,
         existing_attributes = mNvramVars[i].attributes;
     } else if (!have_nvram && have_firmware) {
         existing = 1;
-        existing_attributes = mFirmwareVariables[firmware_index].attributes;
+        existing_attributes =
+            mRuntimeFirmwareVariables[firmware_index].attributes;
     }
 
     if (deleting) {
@@ -25078,28 +25421,31 @@ EFI_STATUS rs_get_next_var_name(UINTN *VariableNameSize,
 
     if (VariableName[0] != 0) {
         if (rs_find_firmware_variable(VariableName, VendorGuid, &index) &&
-            rs_variable_visible(mFirmwareVariables[index].attributes) &&
+            rs_variable_visible(
+                mRuntimeFirmwareVariables[index].attributes) &&
             !rs_firmware_variable_deleted(index)) {
             start_static = index + 1;
             previous_static = 1;
         } else if (rs_find_nvram_variable(VariableName, VendorGuid, &index) &&
                    !mNvramVars[index].deleted &&
                    rs_variable_visible(mNvramVars[index].attributes)) {
-            start_static = FW_ARRAY_SIZE(mFirmwareVariables);
+            start_static = FW_FIRMWARE_VARIABLE_COUNT;
             start_nvram = index + 1;
         } else {
             return EFI_INVALID_PARAMETER;
         }
     }
 
-    for (index = start_static; index < FW_ARRAY_SIZE(mFirmwareVariables);
+    for (index = start_static; index < FW_FIRMWARE_VARIABLE_COUNT;
          index++) {
-        if (rs_firmware_variable_enabled(&mFirmwareVariables[index]) &&
-            rs_variable_visible(mFirmwareVariables[index].attributes) &&
+        if (rs_firmware_variable_enabled(
+                &mRuntimeFirmwareVariables[index]) &&
+            rs_variable_visible(
+                mRuntimeFirmwareVariables[index].attributes) &&
             !rs_firmware_variable_deleted(index)) {
             return rs_copy_ascii_variable_name(
-                                    mFirmwareVariables[index].name,
-                                    mFirmwareVariables[index].guid,
+                                    mRuntimeFirmwareVariables[index].name,
+                                    mRuntimeFirmwareVariables[index].guid,
                                     VariableNameSize, VariableName,
                                     VendorGuid);
         }
@@ -25423,9 +25769,10 @@ VOID rs_reset_system(UINTN ResetType, EFI_STATUS ResetStatus,
     } else if (ResetType == EFI_RESET_COLD ||
                ResetType == EFI_RESET_WARM ||
                ResetType == EFI_RESET_PLATFORM_SPECIFIC) {
-        volatile UINT8 *ps2_command = (volatile UINT8 *)mRuntimePs2Command;
+        volatile UINT8 *reset_control =
+            (volatile UINT8 *)mRuntimeResetControl;
 
-        *ps2_command = PS2_COMMAND_RESET;
+        *reset_control = ACPI_PM_RESET_VALUE;
     }
 
     while (1) {}
@@ -25932,7 +26279,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mPciRootBridgeIoProto.ParentHandle = mPciRootBridgeHandle;
     efi_init_graphics();
     efi_conout_ascii("QEMU IA-64 EFI firmware\r\n");
-    efi_conout_ascii("GOP/UGA stdvga text console ready\r\n\r\n");
+    efi_conout_ascii("GOP/UGA VGA text console ready\r\n\r\n");
 
     mRuntimeServices.GetTime = (UINTN)rs_get_time;
     mRuntimeServices.SetTime = (UINTN)rs_set_time;
@@ -25994,9 +26341,9 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("UEFI Stall:           ");
     uart_puts(uefi_stall_selftest() ? "ITC delay verified\r\n" :
               "verification failed\r\n");
-    uart_puts("Graphics Output:      GOP/UGA stdvga BGRx "
+    uart_puts("Graphics Output:      GOP/UGA VGA BGRx "
               "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
-              "1280x1024x32 @ 0xc2000000\r\n");
+              "1280x1024x32 @ 0xc4000000\r\n");
     uart_puts("GOP SetMode Test:     ");
     uart_puts(graphics_gop_set_mode_selftest() ?
               "BGRx framebuffer cleared\r\n" :

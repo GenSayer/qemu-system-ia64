@@ -5,6 +5,7 @@ config IA64_VPC
     select SERIAL_MM
     select PCI
     select VGA_PCI
+    select ATI_VGA
     select ISA_BUS
     select PCKBD
     select USB_OHCI_PCI

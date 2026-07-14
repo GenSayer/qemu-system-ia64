@@ -265,9 +265,9 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_INSERTABLE_PAGE_SIZE_MASK \
     ((1ULL << 12) | (1ULL << 13) | (1ULL << 14) | (1ULL << 16) | \
      (1ULL << 18) | (1ULL << 20) | (1ULL << 22) | (1ULL << 24) | \
-     (1ULL << 26) | (1ULL << 28) | (1ULL << 30) | (1ULL << 32))
+     (1ULL << 26) | (1ULL << 28) | (1ULL << 30))
 #define IA64_PURGEABLE_PAGE_SIZE_MASK \
-    IA64_INSERTABLE_PAGE_SIZE_MASK
+    (IA64_INSERTABLE_PAGE_SIZE_MASK | (1ULL << 32))
 
 /* ---- General exception codes ---- */
 #define IA64_GENEX_UNIMPL_DATA_ADDR 43

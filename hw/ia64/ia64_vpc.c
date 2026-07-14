@@ -61,22 +61,25 @@
 #define IA64_UHCI_IO_BASE       0x0000c120U
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
 #define IA64_LSI_IO_BASE        0x0000c200U
+#define IA64_VGA_IO_BASE        0x0000c300U
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
 #define IA64_LSI_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x00030000ULL)
 #define IA64_LSI_RAM_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x00032000ULL)
-#define IA64_VGA_FB_PCI_BASE    (IA64_PCI_MMIO_BASE + 0x01000000ULL)
-#define IA64_VGA_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x02000000ULL)
+#define IA64_VGA_FB_PCI_BASE    0x00000000c4000000ULL
+#define IA64_VGA_MMIO_PCI_BASE  0x00000000c8000000ULL
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #define IA64_IOSAPIC_BASE       0x0000000080110000ULL
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
 #define IA64_ACPI_PM_IO_BASE    0x00002000U
 #define IA64_ACPI_PM_IO_SIZE    0x00000010U
+#define IA64_ACPI_PM_RESET_OFFSET 0x0000000cU
+#define IA64_ACPI_PM_RESET_VALUE  0x01U
 #define IA64_ACPI_SCI_IRQ       9
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION      6ULL
+#define IA64_FW_HANDOFF_VERSION      7ULL
 #define IA64_FW_CONSOLE_SERIAL       0ULL
 #define IA64_FW_CONSOLE_VGA          1ULL
 #define IA64_FW_DEBUG_PORT_PRESENT   1ULL
@@ -102,6 +105,7 @@ static char *ia64_vpc_nvram_path;
 static char *ia64_vpc_nvram_resolved_path;
 static bool ia64_vpc_nvram_write_warning;
 static MemoryRegion ia64_vpc_acpi_pm;
+static MemoryRegion ia64_vpc_acpi_reset;
 static ACPIREGS ia64_vpc_acpi_regs;
 static qemu_irq ia64_vpc_acpi_sci_irq;
 static Notifier ia64_vpc_powerdown_notifier;
@@ -397,6 +401,35 @@ static void ia64_vpc_acpi_update_sci(ACPIREGS *ar)
     acpi_update_sci(ar, ia64_vpc_acpi_sci_irq);
 }
 
+static uint64_t ia64_vpc_acpi_reset_read(void *opaque, hwaddr addr,
+                                         unsigned size)
+{
+    (void)opaque;
+    (void)addr;
+    (void)size;
+    return 0;
+}
+
+static void ia64_vpc_acpi_reset_write(void *opaque, hwaddr addr,
+                                      uint64_t value, unsigned size)
+{
+    (void)opaque;
+    if (addr == 0 && size == 1 &&
+        (value & 0xff) == IA64_ACPI_PM_RESET_VALUE) {
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+    }
+}
+
+static const MemoryRegionOps ia64_vpc_acpi_reset_ops = {
+    .read = ia64_vpc_acpi_reset_read,
+    .write = ia64_vpc_acpi_reset_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
 static void ia64_vpc_init_acpi_pm(MachineState *machine, DeviceState *iosapic,
                                   MemoryRegion *pci_io)
 {
@@ -413,6 +446,12 @@ static void ia64_vpc_init_acpi_pm(MachineState *machine, DeviceState *iosapic,
                       false, false, 0, true);
     acpi_pm_tmr_init(&ia64_vpc_acpi_regs, ia64_vpc_acpi_update_sci,
                      &ia64_vpc_acpi_pm);
+    memory_region_init_io(&ia64_vpc_acpi_reset, OBJECT(machine),
+                          &ia64_vpc_acpi_reset_ops, NULL,
+                          "ia64-acpi-reset", 1);
+    memory_region_add_subregion(&ia64_vpc_acpi_pm,
+                                IA64_ACPI_PM_RESET_OFFSET,
+                                &ia64_vpc_acpi_reset);
 
     /*
      * acpi_update_sci() always folds in GPE status.  The current platform
@@ -591,7 +630,7 @@ static void ia64_vpc_map_ram(MachineState *machine)
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
 {
-    uint8_t handoff[56] = { 0 };
+    uint8_t handoff[64] = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
     stq_le_p(handoff, IA64_FW_HANDOFF_MAGIC);
@@ -602,6 +641,7 @@ static void ia64_vpc_write_firmware_handoff(MachineState *machine)
     stq_le_p(handoff + 40,
              debug_port_present ? IA64_FW_DEBUG_PORT_PRESENT : 0);
     stq_le_p(handoff + 48, debug_port_present ? IA64_DEBUG_UART_BASE : 0);
+    stq_le_p(handoff + 56, ia64_vpc_i8042_enabled);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
 }
 
@@ -685,6 +725,10 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
                              IA64_VGA_FB_PCI_BASE, 4);
+    if (pci_dev->io_regions[1].memory != NULL) {
+        pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0 + 4,
+                                 IA64_VGA_IO_BASE, 4);
+    }
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0 + 8,
                              IA64_VGA_MMIO_PCI_BASE, 4);
     pci_default_write_config(pci_dev, PCI_COMMAND,
@@ -850,6 +894,9 @@ static void ia64_vpc_reset(void *opaque)
     CPUIA64State *env = cpu_env(cs);
 
     (void)opaque;
+
+    /* The CPU is not a child of the platform system bus. */
+    cpu_reset(cs);
 
     /* Set initial PSR: physical mode, interrupts disabled, cpl=0 */
     env->psr = 0;
@@ -1102,10 +1149,7 @@ static void ia64_vpc_init(MachineState *machine)
 
     ia64_vpc_init_usb(machine, pci_bus);
 
-    /*
-     * Put the SCSI HBA on device 4.  The firmware DSDT _PRT covers root-bus
-     * devices 0..4, and VGA does not require an interrupt line.
-     */
+    /* Put the SCSI HBA on device 4. */
     ia64_vpc_lsi_dev = pci_new(PCI_DEVFN(4, 0), "lsi53c895a");
     qdev_prop_set_bit(DEVICE(ia64_vpc_lsi_dev),
                       "disconnect-on-data-wait", false);
@@ -1137,7 +1181,7 @@ static void ia64_vpc_machine_init(MachineClass *mc)
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("itanium2");
     mc->default_ram_size = 2 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
-    mc->default_display = "std";
+    mc->default_display = "ati";
     mc->block_default_type = IF_SCSI;
     mc->no_serial = 0;
     mc->no_parallel = 1;

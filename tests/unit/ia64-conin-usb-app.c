@@ -55,6 +55,10 @@ struct _EFI_SIMPLE_TEXT_OUT_PROTOCOL {
 };
 
 typedef struct _EFI_BOOT_SERVICES EFI_BOOT_SERVICES;
+typedef EFI_STATUS EFI_EXIT(EFI_HANDLE ImageHandle,
+                            EFI_STATUS ExitStatus,
+                            UINTN ExitDataSize,
+                            CHAR16 *ExitData);
 struct _EFI_BOOT_SERVICES {
     EFI_TABLE_HEADER Hdr;
     VOID *RaiseTpl;
@@ -81,7 +85,7 @@ struct _EFI_BOOT_SERVICES {
     VOID *InstallConfigurationTable;
     VOID *LoadImage;
     VOID *StartImage;
-    VOID *Exit;
+    EFI_EXIT *Exit;
     VOID *UnloadImage;
     VOID *ExitBootServices;
     VOID *GetNextMonotonicCount;
@@ -136,10 +140,9 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
 {
     UINTN attempt;
 
-    (void)image_handle;
-
     if (system_table == (VOID *)0 || system_table->ConIn == (VOID *)0 ||
-        system_table->BootServices == (VOID *)0) {
+        system_table->BootServices == (VOID *)0 ||
+        system_table->BootServices->Exit == (VOID *)0) {
         return EFI_DEVICE_ERROR;
     }
 
@@ -156,7 +159,10 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
             if (key.ScanCode == 0 &&
                 (key.UnicodeChar == 'x' || key.UnicodeChar == 'X')) {
                 output(system_table, success_message);
-                return EFI_SUCCESS;
+                status = system_table->BootServices->Exit(
+                    image_handle, EFI_SUCCESS, 0, (VOID *)0);
+                output(system_table, failure_message);
+                return status;
             }
             output(system_table, unexpected_message);
             return EFI_DEVICE_ERROR;

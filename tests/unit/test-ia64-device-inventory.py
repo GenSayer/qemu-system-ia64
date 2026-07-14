@@ -38,6 +38,7 @@ def run_inventory(qemu, extra_args=(), machine="ia64-vpc"):
             "xp /3wx 0x7ff0020010\n"
             "xp /1wx 0x7ff0028000\n"
             "xp /3wx 0x7ff0028010\n"
+            "xp /1hx 0x800010801004\n"
             "quit\n"
         ),
         stdout=subprocess.PIPE,
@@ -76,7 +77,7 @@ def main():
         "LSI SCSI INTx": (
             r"SCSI controller: PCI device 1000:0012[\s\S]*?IRQ 16, pin A"
         ),
-        "VGA": r"VGA controller: PCI device 1234:1111",
+        "VGA": r"VGA controller: PCI device 1002:5046",
         "SAL PCI config aperture": r"ia64-pci-config",
         "empty PCI slot 0": r"7ff0000000:\s+0xffffffff",
         "SAL PCI config AHCI read": r"7ff0008000:\s+0x29228086",
@@ -91,10 +92,11 @@ def main():
         "SAL PCI config LSI BARs": (
             r"7ff0020010:\s+0x0000c201\s+0xc1030000\s+0xc1032000"
         ),
-        "SAL PCI config VGA read": r"7ff0028000:\s+0x11111234",
+        "SAL PCI config VGA read": r"7ff0028000:\s+0x50461002",
         "SAL PCI config VGA BARs": (
-            r"7ff0028010:\s+0xc2000008\s+0x00000000\s+0xc3000000"
+            r"7ff0028010:\s+0xc4000008\s+0x0000c301\s+0xc8000000"
         ),
+        "sparse PM1 control SCI_EN": r"800010801004:\s+0x0001",
     }
     missing = [
         name for name, pattern in required.items()

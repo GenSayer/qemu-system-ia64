@@ -560,6 +560,26 @@ static uint64_t ia64_gr_page_size(uint64_t value)
                                      IA64_ITIR_PS_MASK);
 }
 
+static bool ia64_translation_insert_fields_valid(uint64_t pte, uint64_t itir)
+{
+    uint8_t page_shift = (itir >> IA64_ITIR_PS_SHIFT) &
+                         IA64_ITIR_PS_MASK;
+    uint64_t itir_reserved = IA64_ITIR_RESERVED_MASK;
+    uint8_t ma;
+
+    if (!ia64_page_shift_insertable(page_shift)) {
+        return false;
+    }
+    if (!(pte & IA64_PTE_PRESENT)) {
+        itir_reserved &= 3;
+        return !(itir & itir_reserved);
+    }
+
+    ma = (pte & IA64_PTE_MA_MASK) >> IA64_PTE_MA_SHIFT;
+    return !(pte & IA64_PTE_RESERVED_MASK) &&
+           !(itir & itir_reserved) && (ma == 0 || ma >= 4);
+}
+
 static bool ia64_tlb_entry_overlaps(const IA64TlbEntry *entry,
                                     uint64_t va, uint32_t rid, uint64_t ps)
 {
@@ -4230,7 +4250,7 @@ static bool ia64_cache_replaced_tr(IA64TlbEntry *tlb, uint16_t *cnt,
 }
 
 void helper_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
-                       uint32_t is_data)
+                       uint32_t is_data, uint64_t raw, uint32_t fault_slot)
 {
     IA64TlbEntry *tlb;
     uint16_t *cnt;
@@ -4247,10 +4267,17 @@ void helper_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     CPUState *cs = env_cpu(env);
 
     if (slot >= IA64_TR_COUNT) {
-        helper_raise_exception(env, IA64_EXCP_ILLEGAL,
-                               ia64_ip_bundle_addr(env->ip), slot_reg,
-                               (env->psr & IA64_PSR_RI_MASK) >>
-                               IA64_PSR_RI_SHIFT);
+        env->cr_isr = 0x30;
+        helper_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
+                               ia64_ip_bundle_addr(env->ip), raw,
+                               fault_slot);
+        return;
+    }
+    if (!ia64_translation_insert_fields_valid(pte, env->cr_itir)) {
+        env->cr_isr = 0x30;
+        helper_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
+                               ia64_ip_bundle_addr(env->ip), raw,
+                               fault_slot);
         return;
     }
 
@@ -5929,16 +5956,33 @@ void helper_fpnegabs(CPUIA64State *env, uint32_t r1, uint32_t r2)
 
 void helper_fcvt_xf(CPUIA64State *env, uint32_t r1, uint32_t r2)
 {
-    float128 value;
+    uint64_t value;
+    uint64_t magnitude;
+    uint32_t shift;
+    bool sign;
 
     if (ia64_fr_nat_get(env, r2)) {
         ia64_fr_write_nat(env, r1);
         return;
     }
 
-    value = int64_to_float128((int64_t)env->fr[r2], &env->fp_status);
-    ia64_fr_write_floatx80(
-        env, r1, float128_to_floatx80(value, &env->fp_status));
+    /*
+     * fcvt.xf produces register-file precision, is always exact, and is
+     * independent of FPSR rounding controls.  Building the register-format
+     * value directly also prevents it from inheriting SoftFloat's precision
+     * from a preceding status-field-controlled instruction.
+     */
+    value = ia64_fr_significand(env, r2);
+    if (value == 0) {
+        ia64_fr_write_ext(env, r1, false, 0, 0);
+        return;
+    }
+
+    sign = (int64_t)value < 0;
+    magnitude = sign ? -value : value;
+    shift = clz64(magnitude);
+    ia64_fr_write_ext(env, r1, sign, IA64_FP_REG_INTEGER_EXP - shift,
+                      magnitude << shift);
 }
 
 static void ia64_do_fcvt_fx(CPUIA64State *env, uint32_t r1, uint32_t r2,
@@ -7791,7 +7835,8 @@ static bool ia64_itc_insert_overlaps_identity(CPUIA64State *env,
            ia64_ranges_overlap(base, ps, 0, IA64_FW_BOOT_IDENTITY_LIMIT);
 }
 
-void helper_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data)
+void helper_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
+                       uint64_t raw, uint32_t fault_slot)
 {
     IA64TlbEntry *tlb;
     uint16_t *cnt;
@@ -7807,6 +7852,14 @@ void helper_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data)
     uint8_t perm = ia64_pte_perm(pte, 0);
     bool matched;
     int slot;
+
+    if (!ia64_translation_insert_fields_valid(pte, env->cr_itir)) {
+        env->cr_isr = 0x30;
+        helper_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
+                               ia64_ip_bundle_addr(env->ip), raw,
+                               fault_slot);
+        return;
+    }
 
     if (!ia64_va_is_implemented(env->cr_ifa)) {
         ia64_raise_unimplemented_data_address(

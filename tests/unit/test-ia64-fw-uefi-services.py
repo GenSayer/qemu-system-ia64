@@ -100,6 +100,8 @@ def main():
         "mPoolAllocations",
         "bs_load_image",
         "bs_start_image",
+        "fw_read_rsc",
+        "fw_restore_rsc",
         "fw_call_efi_entry",
         "fw_boot_stack_top",
         "mBootStackBase",
@@ -122,6 +124,8 @@ def main():
         "rs_convert_pointer",
         "mVirtualAddressMap",
         "mVirtualAddressMapApplied",
+        "rs_convert_firmware_variables",
+        "mRuntimeFirmwareVariables",
         "rs_get_variable",
         "rs_set_variable",
         "rs_get_next_var_name",
@@ -237,11 +241,32 @@ def main():
         "mSmbiosMaxStructureSize",
         "smbios_table_integrity_selftest",
     ]
+    source_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)
+    )))
+    with open(
+            os.path.join(source_root, "roms/ia64-firmware/firmware.c"),
+            "r", encoding="utf-8") as source_file:
+        firmware_source = source_file.read()
+    convert_start = firmware_source.index(
+        "static EFI_STATUS rs_convert_runtime_tables(void)"
+    )
+    convert_end = firmware_source.index(
+        "\nstatic UINTN rs_variable_name_size", convert_start
+    )
+    convert_block = firmware_source[convert_start:convert_end]
+    physical_only_converted = [
+        field for field in ("SetVirtualAddressMap", "ConvertPointer")
+        if f"mRuntimeServices.{field}" in convert_block
+    ]
+
     missing = [sym for sym in required_symbols if sym not in objdump.stdout]
-    if missing:
+    if missing or physical_only_converted:
         print("not ok 1 - firmware contains minimum UEFI service symbols")
         for sym in missing:
             print(f"# missing symbol: {sym}")
+        for field in physical_only_converted:
+            print(f"# physical-only runtime service was converted: {field}")
         print("not ok 2 - firmware entry ABI and GP fixup")
         print("not ok 3 - firmware StartImage/Exit nonlocal handoff")
         print("not ok 4 - firmware StartImage protocol handoff")
@@ -316,6 +341,14 @@ def main():
         r"<fw_call_efi_entry>:(?:.|\n)*?(?=\n[0-9a-fA-F]+ <)",
         text,
     )
+    restore_psr_block = re.search(
+        r"<fw_restore_psr>:(?:.|\n)*?(?=\n[0-9a-fA-F]+ <)",
+        text,
+    )
+    start_image_block = re.search(
+        r"<bs_start_image>:(?:.|\n)*?(?=\n[0-9a-fA-F]+ <)",
+        text,
+    )
     handoff_checks = [
         ("bs_exit" in objdump.stdout, "missing bs_exit symbol"),
         (exit_boot_services_block is not None,
@@ -328,6 +361,9 @@ def main():
          "missing IA-64 nonlocal stack save helper"),
         ("__ia64_nonlocal_goto" in objdump.stdout,
          "missing IA-64 nonlocal goto helper"),
+        (start_image_block is not None and
+         start_image_block.group(0).count("fw_restore_rsc") >= 2,
+         "StartImage must restore caller RSC after both setjmp continuations"),
         ("adds r12=-16,r12" in text and
          "st8 [r12]=r33" in text and
          "st8 [r14]=r34" in text and
@@ -339,6 +375,11 @@ def main():
          "mov.m ar.rsc=r0" in call_efi_entry_block.group(0) and
          "mov.m ar.rsc=r43" in call_efi_entry_block.group(0),
          "EFI image entry must receive enforced-lazy RSC and restore its caller"),
+        (restore_psr_block is not None and
+         "rsm 0x2000" in restore_psr_block.group(0) and
+         restore_psr_block.group(0).find("rsm 0x2000") <
+         restore_psr_block.group(0).find("mov cr.ipsr"),
+         "PSR restore must disable interruption collection before CR[IPSR]"),
         ("mov cr.dcr=r14" in text and
          "mov cr.iva=r14" in text and
          "movl r14=0x3c" in text and
@@ -592,9 +633,9 @@ def main():
         text=True,
     )
     expected_banner = (
-        "Graphics Output:      GOP/UGA stdvga BGRx "
+        "Graphics Output:      GOP/UGA VGA BGRx "
         "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
-        "1280x1024x32 @ 0xc2000000"
+        "1280x1024x32 @ 0xc4000000"
     )
     expected_setmode_label = "GOP SetMode Test:"
     expected_setmode_result = "BGRx framebuffer cleared"

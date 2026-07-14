@@ -13,6 +13,8 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
 
     Scope (\_SB.PCI0)
     {
+        Name (P2EN, 0x0F)
+
         Device (UAR0)
         {
             Name (_HID, "PNP0501")
@@ -30,6 +32,10 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
         Device (PS2K)
         {
             Name (_HID, EisaId ("PNP0303"))
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (P2EN)
+            }
             Name (_CRS, ResourceTemplate ()
             {
                 IO (Decode16, 0x0060, 0x0060, 1, 1)
@@ -41,6 +47,10 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
         Device (PS2M)
         {
             Name (_HID, EisaId ("PNP0F13"))
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (P2EN)
+            }
             Name (_CRS, ResourceTemplate ()
             {
                 IRQNoFlags () {12}

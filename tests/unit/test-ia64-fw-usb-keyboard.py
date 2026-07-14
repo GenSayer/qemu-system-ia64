@@ -24,6 +24,9 @@ DATA_START = 1 + FAT_SECTORS + ROOT_SECTORS
 
 WAITING_SIGNATURE = "IA64 USB KBD: waiting"
 SUCCESS_SIGNATURE = "IA64 USB KBD: read x"
+EXIT_SIGNATURE = (
+    "Boot Manager:        StartImage returned status=0x0000000000000000"
+)
 FAILURE_SIGNATURES = [
     "IA64 USB KBD: failed",
     "IA64 USB KBD: unexpected key",
@@ -259,7 +262,7 @@ def run_qemu(source_root, qemu, firmware, disk, qmp_socket):
                     except Exception as exc:
                         qmp_error = str(exc)
                         break
-                if (SUCCESS_SIGNATURE in output or
+                if (EXIT_SIGNATURE in output or
                         any(sig in output for sig in FAILURE_SIGNATURES)):
                     break
 
@@ -325,6 +328,7 @@ def main():
         "Boot Manager:        trying Boot0000000000000000",
         WAITING_SIGNATURE,
         SUCCESS_SIGNATURE,
+        EXIT_SIGNATURE,
     ]
     missing = [signature for signature in required if signature not in output]
     failures = [signature for signature in FAILURE_SIGNATURES

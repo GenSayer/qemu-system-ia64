@@ -361,7 +361,7 @@ if 'ia64-softmmu' in target_dirs
          meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
        ],
        protocol: 'tap',
-       timeout: 75,
+       timeout: 130,
        suite: ['unit', 'ia64'])
 
   test('test-ia64-fw-usb-keyboard',

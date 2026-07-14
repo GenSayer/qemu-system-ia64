@@ -470,6 +470,20 @@ void vga_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 #ifdef DEBUG_VGA_REG
         printf("vga: write SR%x = 0x%02x\n", s->sr_index, val);
 #endif
+        if (s->vbe_legacy_mode_switch &&
+            s->sr_index == VGA_SEQ_RESET && vbe_enabled(s)) {
+            /*
+             * Some devices expose the synthetic VBE interface only so
+             * firmware can provide a linear framebuffer.  A guest selecting
+             * a standard VGA mode has no reason to know that interface is
+             * still active.  The sequencer reset is the unambiguous start of
+             * VGA mode programming, so restore legacy register and memory
+             * interpretation at that point.
+             */
+            s->bank_offset = 0;
+            s->dac_8bit = 0;
+            s->vbe_regs[VBE_DISPI_INDEX_ENABLE] = 0;
+        }
         s->sr[s->sr_index] = val & sr_mask[s->sr_index];
         if (s->sr_index == VGA_SEQ_CLOCK_MODE) {
             s->update_retrace_info(s);

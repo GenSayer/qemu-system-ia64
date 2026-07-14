@@ -37,16 +37,20 @@ RSDP_SIGNATURE = b"RSD PTR "
 ACPI_RECLAIM_BASE = 0x00800000
 ACPI_RECLAIM_END = 0x00820000
 ACPI_PM_IO_BASE = 0x2000
+ACPI_PM_RESET_OFFSET = 0x0c
+ACPI_PM_RESET_VALUE = 0x01
 ACPI_GAS_SYSTEM_MEMORY = 0
 ACPI_GAS_SYSTEM_IO = 1
 ACPI_SCI_IRQ = 9
 ACPI_FADT_FLAG_WBINVD = 1 << 0
 ACPI_FADT_FLAG_PWR_BUTTON = 1 << 4
 ACPI_FADT_FLAG_SLP_BUTTON = 1 << 5
+ACPI_FADT_FLAG_RESET_REG_SUP = 1 << 10
 ACPI_FADT_FLAG_SW_CPU_SLP = 1 << 13
 ACPI_FADT_EXPECTED_FLAGS = (
     ACPI_FADT_FLAG_WBINVD |
     ACPI_FADT_FLAG_SLP_BUTTON |
+    ACPI_FADT_FLAG_RESET_REG_SUP |
     ACPI_FADT_FLAG_SW_CPU_SLP
 )
 PCI_CONFIG_ECAM_BASE = 0x7FF0000000
@@ -77,14 +81,15 @@ IOSAPIC_RTE_TRIGGER_LEVEL = 1 << 15
 IOSAPIC_RTE_MASKED = 1 << 16
 UART_BASE = 0x47F0000000
 DEBUG_UART_BASE = 0x47F0001000
+UART_MMIO_SIZE = 0x2000
 UART_BAUD = 115200
 HCDP_UART_IRQ = 4
 HCDP_UART_PRIMARY_CONSOLE = 1 << 2
 HCDP_DEVICE_PRIMARY_CONSOLE = 1
 HCDP_PCI_TRANSLATE_IOPORT = 1 << 1
 HCDP_VGA_PCI_DEVICE = 5
-VGA_VENDOR_ID = 0x1234
-VGA_DEVICE_ID = 0x1111
+VGA_VENDOR_ID = 0x1002
+VGA_DEVICE_ID = 0x5046
 EFI_RUNTIME_SERVICES_CODE = 5
 EFI_ACPI_RECLAIM_MEMORY = 9
 EFI_MEMORY_MAPPED_IO = 11
@@ -1152,6 +1157,10 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
         PCI_MMIO_BASE, PCI_MMIO_SIZE, EFI_MEMORY_UC,
     )
     find_efi_descriptor(
+        "platform UART MMIO", EFI_MEMORY_MAPPED_IO,
+        UART_BASE, UART_MMIO_SIZE, EFI_MEMORY_UC,
+    )
+    find_efi_descriptor(
         "PAL/SAL firmware address space below RTC", EFI_MEMORY_MAPPED_IO,
         FW_FIRMWARE_ADDRESS_SPACE_BASE,
         FW_RTC_BASE - FW_FIRMWARE_ADDRESS_SPACE_BASE,
@@ -1473,6 +1482,11 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
                 fadt[off + 2] != 0 or fadt[off + 3] != 0 or
                 gas_address(fadt, off) != address):
             raise RuntimeError(f"FADT {label} System I/O GAS mismatch")
+    if (fadt[116] != ACPI_GAS_SYSTEM_IO or fadt[117] != 8 or
+            fadt[118] != 0 or fadt[119] != 0 or
+            gas_address(fadt, 116) != ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET or
+            fadt[128] != ACPI_PM_RESET_VALUE):
+        raise RuntimeError("FADT reset register System I/O GAS mismatch")
 
     fadt_children = qemu_physical_bytes(qemu, firmware, {
         "mFacs": (facs_addr, symbols["mFacs"][1]),
@@ -1494,7 +1508,7 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     if s5_count != 4 or s5_values != [0, 0, 0, 0] or s5_off != s5_end:
         raise RuntimeError("DSDT _S5 package mismatch")
     expected_prt = []
-    for slot in range(5):
+    for slot in range(6):
         for pin in range(PCI_INTX_LINES):
             expected_prt.append([
                 (slot << 16) | 0xffff,
@@ -1523,9 +1537,26 @@ def test_acpi_efi_sal_binary_tables(qemu, firmware):
     ssdt = table_data["mSsdt"]
     if b"\x5b\x83\x0bCPU0\x00\x00\x00\x00\x00\x00" not in ssdt:
         raise RuntimeError("SSDT Processor CPU0 declaration missing")
-    for token in [b"UAR0", b"PNP0501", b"_CRS"]:
+    for token in [b"UAR0", b"PNP0501", b"P2EN", b"_STA", b"_CRS"]:
         if token not in ssdt:
             raise RuntimeError(f"SSDT UART namespace missing {token!r}")
+    ps2_enabled_off = ssdt.index(b"P2EN") + len(b"P2EN")
+    if (ssdt[ps2_enabled_off:ps2_enabled_off + 2] != b"\x0a\x0f" or
+            ssdt.count(b"_STA") != 2):
+        raise RuntimeError("SSDT enabled PS/2 status policy mismatch")
+
+    disabled_ssdt = qemu_physical_bytes(
+        qemu,
+        firmware,
+        {"mSsdt": (table_addrs["mSsdt"], symbols["mSsdt"][1])},
+        machine="ia64-vpc,i8042=off",
+    )["mSsdt"]
+    validate_sdt("mSsdt (i8042=off)", disabled_ssdt, "SSDT", 2)
+    disabled_ps2_enabled_off = disabled_ssdt.index(b"P2EN") + len(b"P2EN")
+    if (disabled_ssdt[
+            disabled_ps2_enabled_off:disabled_ps2_enabled_off + 2
+            ] != b"\x0a\x00" or disabled_ssdt.count(b"_STA") != 2):
+        raise RuntimeError("SSDT disabled PS/2 status policy mismatch")
     ssdt_resources = aml_named_buffer_resource_bytes(ssdt, b"_CRS", "SSDT _CRS")
     ssdt_qword_crs = qword_address_descriptors(ssdt_resources, "SSDT _CRS")
     uart_crs = next((desc for desc in ssdt_qword_crs

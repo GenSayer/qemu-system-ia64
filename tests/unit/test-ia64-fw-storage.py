@@ -24,6 +24,7 @@ ROOT_SECTORS = ROOT_ENTRIES * 32 // SECTOR_SIZE
 DATA_START = 1 + FAT_SECTORS + ROOT_SECTORS
 TEST_BLOCKS = 256
 GPT_ESP_START = 63
+MBR_ESP_START = 63
 SUCCESS_SIGNATURE = "IA64 STORAGE IO: read/write verified"
 FAILURE_SIGNATURE = "IA64 STORAGE IO: failed"
 
@@ -106,7 +107,7 @@ def directory_entry(name, attributes, cluster, size=0):
     return entry
 
 
-def make_storage_disk(path, efi_path, gpt=False):
+def make_storage_disk(path, efi_path, layout="whole"):
     with open(efi_path, "rb") as f:
         efi_image = f.read()
 
@@ -163,7 +164,7 @@ def make_storage_disk(path, efi_path, gpt=False):
     file_start = (DATA_START + first_file_cluster - 2) * SECTOR_SIZE
     image[file_start:file_start + len(efi_image)] = efi_image
 
-    if gpt:
+    if layout == "gpt":
         total_sectors = GPT_ESP_START + DISK_SECTORS + 33
         raw = bytearray(total_sectors * SECTOR_SIZE)
         raw[446 + 4] = 0xEE
@@ -217,10 +218,36 @@ def make_storage_disk(path, efi_path, gpt=False):
         raw[GPT_ESP_START * SECTOR_SIZE:
             (GPT_ESP_START + DISK_SECTORS) * SECTOR_SIZE] = image
         image = raw
+    elif layout in ("mbr", "mbr-fallback"):
+        total_sectors = MBR_ESP_START + DISK_SECTORS
+        raw = bytearray(total_sectors * SECTOR_SIZE)
+        partition_entry = 446
+        if layout == "mbr-fallback":
+            raw[partition_entry] = 0x80
+            raw[partition_entry + 4] = 0x0B
+            struct.pack_into("<I", raw, partition_entry + 8, 1)
+            struct.pack_into(
+                "<I", raw, partition_entry + 12, MBR_ESP_START - 1
+            )
+            partition_entry += 16
+            raw[partition_entry] = 0x7F
+            raw[partition_entry + 4] = 0xEF
+        else:
+            raw[partition_entry] = 0x80
+            raw[partition_entry + 4] = 0x0B
+        struct.pack_into(
+            "<I", raw, partition_entry + 8, MBR_ESP_START
+        )
+        struct.pack_into("<I", raw, partition_entry + 12, DISK_SECTORS)
+        raw[510:512] = b"\x55\xaa"
+        raw[MBR_ESP_START * SECTOR_SIZE:] = image
+        image = raw
+    elif layout != "whole":
+        raise ValueError(f"unknown disk layout: {layout}")
 
     test_start = len(image) - TEST_BLOCKS * SECTOR_SIZE
     test_size = TEST_BLOCKS * SECTOR_SIZE
-    if not gpt:
+    if layout == "whole":
         for index in range(test_size):
             image[test_start + index] = (index * 19 + 0x31) & 0xff
     original_test_region = bytes(image[test_start:test_start + test_size])
@@ -307,7 +334,7 @@ def main():
 
     source_root, qemu, firmware = sys.argv[1:]
     print("TAP version 13")
-    print("1..4")
+    print("1..6")
 
     for path in [qemu, firmware]:
         if not os.path.exists(path):
@@ -325,7 +352,7 @@ def main():
                 "(ATA DMA-capable, primary IDE)",
             ],
             "dma",
-            False,
+            "whole",
         ),
         (
             "IDE PIO read/write",
@@ -336,7 +363,7 @@ def main():
                 "Block I/O Protocol:   installed (ATA PIO, primary IDE)",
             ],
             "pio",
-            False,
+            "whole",
         ),
         (
             "LSI SCSI read/write",
@@ -347,7 +374,7 @@ def main():
                 "Block I/O Protocol:   installed (SCSI disk, LSI53C895A)",
             ],
             None,
-            False,
+            "whole",
         ),
         (
             "GPT EFI system partition",
@@ -358,7 +385,29 @@ def main():
                 "Block I/O Protocol:   installed (SCSI disk, LSI53C895A)",
             ],
             None,
-            True,
+            "gpt",
+        ),
+        (
+            "MBR FAT system partition",
+            "ia64-vpc",
+            "scsi",
+            [
+                "SCSI device:          target 0000000000000000 disk media",
+                "Block I/O Protocol:   installed (SCSI disk, LSI53C895A)",
+            ],
+            None,
+            "mbr",
+        ),
+        (
+            "MBR EFI partition ignores legacy boot indicator",
+            "ia64-vpc",
+            "scsi",
+            [
+                "SCSI device:          target 0000000000000000 disk media",
+                "Block I/O Protocol:   installed (SCSI disk, LSI53C895A)",
+            ],
+            None,
+            "mbr-fallback",
         ),
     ]
 
@@ -373,9 +422,11 @@ def main():
 
         status = 0
         for index, scenario in enumerate(scenarios, 1):
-            name, machine, interface, signatures, ide_mode, gpt = scenario
+            name, machine, interface, signatures, ide_mode, layout = scenario
             disk = os.path.join(tmpdir, f"storage-{index}.img")
-            expected_region = make_storage_disk(disk, efi_app, gpt=gpt)
+            expected_region = make_storage_disk(
+                disk, efi_app, layout=layout
+            )
             returncode, output = run_qemu(
                 qemu, firmware, disk, machine, interface,
                 trace_ide_dma=ide_mode is not None,
