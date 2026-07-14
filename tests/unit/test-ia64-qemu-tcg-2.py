@@ -3627,6 +3627,54 @@ test_rse_call_maps_all_high_output_args = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+test_rse_call_moves_output_nat_across_word_boundary = require_registers(
+    "rse_call_moves_output_nat_across_word_boundary", [
+        (0x10, 0x00, nop_m(), alloc(20, 96, 30, 0, 0), nop_i()),
+        (0x20, 0x00, mov_m_imm_ar(36, 1),
+         addl(6, 0x400, 0), nop_i()),
+        (0x30, 0x08, ld8_fill_postinc(62, 6, 0), nop_i(), nop_i()),
+        (0x40, 0x08, ld8_fill_postinc(64, 6, 0), nop_i(), nop_i()),
+        (0x50, 0x08, ld8_fill_postinc(94, 6, 0), nop_i(), nop_i()),
+        (0x60, 0x08, ld8_fill_postinc(126, 6, 0), nop_i(), nop_i()),
+        # r33 starts NaT, but must be cleared by the source r63 bit.
+        (0x70, 0x08, ld8_fill_postinc(33, 6, 0), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_call(0, 0x80, 0x100)),
+
+        # The caller's r62..r127 outputs become the callee's r32..r97.
+        # Probe a NaT and a clear bit at both sides of each bit-63 boundary.
+        (0x100, 0x00, nop_m(), tnat_z(1, 2, 32),
+         tnat_z(3, 4, 33)),
+        (0x110, 0x00, nop_m(), addl(8, 1, 0, qp=2),
+         addl(9, 1, 0, qp=3)),
+        (0x120, 0x00, nop_m(), tnat_z(5, 6, 34),
+         tnat_z(7, 8, 63)),
+        (0x130, 0x00, nop_m(), addl(10, 1, 0, qp=6),
+         addl(11, 1, 0, qp=7)),
+        (0x140, 0x00, nop_m(), tnat_z(9, 10, 64),
+         tnat_z(11, 12, 65)),
+        (0x150, 0x00, nop_m(), addl(12, 1, 0, qp=10),
+         addl(13, 1, 0, qp=11)),
+        (0x160, 0x00, nop_m(), tnat_z(13, 14, 96),
+         tnat_z(15, 16, 97)),
+        (0x170, 0x00, nop_m(), addl(14, 1, 0, qp=14),
+         addl(15, 1, 0, qp=15)),
+        (0x180, 0x10, nop_m(), nop_i(), br_cond(0x180, 0x180)),
+        (0x400, 0x00, 0, 0, 0),
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "cfm_sof": 66,
+        "cfm_sol": 0,
+        "r8": 1,
+        "r9": 1,
+        "r10": 1,
+        "r11": 1,
+        "r12": 1,
+        "r13": 1,
+        "r14": 1,
+        "r15": 1,
+    }, entry=0x10)
+
 test_rse_callee_alloc_stores_input_arg = require_registers(
     "rse_callee_alloc_stores_input_arg", [
         (0x10, 0x00, nop_m(), alloc(45, 19, 16, 0, 0),
@@ -21393,6 +21441,8 @@ TEST_NAMES = {
     "rse_call_uses_high_sol_output_arg": test_rse_call_uses_high_sol_output_arg,
     "rse_call_maps_all_high_output_args":
         test_rse_call_maps_all_high_output_args,
+    "rse_call_moves_output_nat_across_word_boundary":
+        test_rse_call_moves_output_nat_across_word_boundary,
     "rse_callee_alloc_stores_input_arg": test_rse_callee_alloc_stores_input_arg,
     "rse_alloc_preserves_ar_pfs": test_rse_alloc_preserves_ar_pfs,
     "alloc_clears_destination_nat": test_alloc_clears_destination_nat,

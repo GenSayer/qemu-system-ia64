@@ -88,6 +88,7 @@ def main():
         print("not ok 5 - firmware RAM handoff memory map")
         print("not ok 6 - firmware GOP multi-mode table")
         print("not ok 7 - firmware EFI input scan tables")
+        print("not ok 8 - firmware EFI event notification core")
         return 1
 
     required_symbols = [
@@ -95,7 +96,6 @@ def main():
         "bs_free_pages",
         "bs_get_memory_map",
         "bs_unload_image",
-        "efi_coalesce_memory_map",
         "bs_allocate_pool",
         "mPoolAllocations",
         "bs_load_image",
@@ -113,6 +113,7 @@ def main():
         "sal_loader_handoff_selftest",
         "mSalHandoffProbe",
         "bs_exit_boot_services",
+        "uefi_exit_boot_services_system_table_selftest",
         "rs_get_time",
         "mRuntimeRtc",
         "mRuntimeRtcState",
@@ -122,6 +123,7 @@ def main():
         "uefi_time_services_selftest",
         "rs_set_virtual_address_map",
         "rs_convert_pointer",
+        "uefi_convert_pointer_selftest",
         "mVirtualAddressMap",
         "mVirtualAddressMapApplied",
         "rs_convert_firmware_variables",
@@ -166,6 +168,10 @@ def main():
         "mDsdt",
         "graphics_select_mode",
         "graphics_gop_set_mode_selftest",
+        "graphics_begin_loader_handoff",
+        "graphics_prepare_os_handoff",
+        "graphics_handoff_selftest",
+        "mGraphicsHandoffClaimed",
         "mGopModeInfo",
         "uefi_conout_selftest",
         "mPs2ExtendedEfiScanMap",
@@ -190,7 +196,10 @@ def main():
         "fw_event_queue_notify",
         "fw_dispatch_event_notifications",
         "fw_signal_event_group",
+        "fw_signal_event_group_and_type",
         "fw_cancel_all_timers",
+        "fw_event_timer_consume",
+        "fw_prepare_exit_boot_services",
         "uefi_stall_selftest",
         "gEfiEventGroupExitBootServicesGuid",
         "gEfiEventGroupVirtualAddressChangeGuid",
@@ -200,6 +209,15 @@ def main():
         "bs_open_protocol_information",
         "add_open_protocol_record",
         "mOpenProtocolRecords",
+        "pci_poll_timer_consume",
+        "pci_poll_address",
+        "pci_root_poll_mem",
+        "pci_root_poll_io",
+        "pci_io_poll_mem",
+        "pci_io_poll_io",
+        "pci_root_poll_selftest",
+        "pci_io_transfer_selftest",
+        "pci_io_poll_selftest",
         "pci_root_bridge_io_selftest",
         "pci_io_protocol_selftest",
         "mPciIdeIoProto",
@@ -259,7 +277,17 @@ def main():
         field for field in ("SetVirtualAddressMap", "ConvertPointer")
         if f"mRuntimeServices.{field}" in convert_block
     ]
-
+    exit_start = firmware_source.index(
+        "EFI_STATUS bs_exit_boot_services(EFI_HANDLE ImageHandle, UINTN MapKey)"
+    )
+    exit_end = firmware_source.index(
+        "\nEFI_STATUS bs_unload_image", exit_start
+    )
+    exit_source = firmware_source[exit_start:exit_end]
+    start_image_start = firmware_source.index(
+        "EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle"
+    )
+    start_image_source = firmware_source[start_image_start:exit_start]
     missing = [sym for sym in required_symbols if sym not in objdump.stdout]
     if missing or physical_only_converted:
         print("not ok 1 - firmware contains minimum UEFI service symbols")
@@ -357,6 +385,19 @@ def main():
          "fw_prepare_sal_handoff_registers" not in
          exit_boot_services_block.group(0),
          "ExitBootServices must preserve OS-loader RR/TR state"),
+        (all(token in exit_source for token in (
+            "graphics_prepare_os_handoff",
+            "fw_handoff_vga_console_primary",
+        )),
+         "ExitBootServices must reconcile GOP state with the PCDP console"),
+        ("graphics_begin_loader_handoff(sal_loader_handoff)" in
+         start_image_source,
+         "top-level StartImage must reset graphics handoff ownership"),
+        (all(token in exit_source for token in (
+            "efi_exit_boot_services_update_system_table",
+            "mBootServicesExited = 1",
+        )),
+         "ExitBootServices must invalidate boot-time System Table fields"),
         ("__ia64_save_stack_nonlocal" in objdump.stdout,
          "missing IA-64 nonlocal stack save helper"),
         ("__ia64_nonlocal_goto" in objdump.stdout,
@@ -439,10 +480,16 @@ def main():
         "I/O Port Space:       0x0000800010000000-0x0000800013FFFFFF",
         "Memory Map Test:      descriptor and pool placement verified",
         "UEFI Time Services:   GetTime/SetTime/GetWakeupTime verified",
+        "UEFI Event Services:  contract checks verified",
+        "Graphics Handoff:    GOP preserve + PCDP VGA text fallback verified",
         "Loaded Image Paths:   protocol storage verified",
         "EFI Image Handoff:    P64 register/stack arguments verified",
         "SAL Loader Handoff:   registers/stack/TR verified",
         "PE Runtime Relocation: base adjustment/fixup log verified",
+        "ExitBootServices:     System Table handoff verified",
+        "ConvertPointer Test:  reserved DebugDisposition bits rejected",
+        "PCI Root Bridge Test: config/resources/polling verified",
+        "PCI I/O Protocol:    controllers/polling verified",
         "SMBIOS Table:         published",
         "SMBIOS Table Checks:  entry point verified",
     ]
@@ -723,8 +770,17 @@ def main():
          "missing event notification dispatcher"),
         ("fw_signal_event_group" in objdump.stdout,
          "missing event group signaling helper"),
+        ("fw_signal_event_group_and_type" in objdump.stdout,
+         "missing equivalent group/type transition helper"),
         ("fw_cancel_all_timers" in objdump.stdout,
          "missing ExitBootServices timer cancellation helper"),
+        ("fw_event_record_from_handle" in firmware_source,
+         "missing safe event handle validation helper"),
+        ("fw_event_timer_consume" in objdump.stdout,
+         "missing full-range wrap-aware event timer helper"),
+        ("fw_prepare_exit_boot_services" in firmware_source and
+         "fw_signal_exit_boot_services_events" in firmware_source,
+         "missing one-shot ExitBootServices event transition helpers"),
         ("gEfiEventGroupExitBootServicesGuid" in objdump.stdout,
          "missing ExitBootServices event group GUID"),
         ("gEfiEventGroupVirtualAddressChangeGuid" in objdump.stdout,

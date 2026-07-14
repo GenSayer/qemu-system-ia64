@@ -2295,7 +2295,7 @@ static UINT32 mGraphicsWidth;
 static UINT32 mGraphicsHeight;
 static UINT32 mGraphicsStride;
 static BOOLEAN                mGraphicsActive;
-static BOOLEAN                mGraphicsClientActive;
+static BOOLEAN                mGraphicsHandoffClaimed;
 static FW_CONIN_KEY_NOTIFY_RECORD mConInKeyNotifyRecords[FW_CONIN_KEY_NOTIFY_MAX];
 static BOOLEAN                mConInBufferedKeyValid;
 static EFI_INPUT_KEY          mConInBufferedKey;
@@ -2322,6 +2322,8 @@ static BOOLEAN                mTextWrapPending;
 static UINTN                  mMapKey = 1;
 static EFI_PHYSICAL_ADDRESS   mNextPageAddr = 0x01000000ULL;
 static BOOLEAN                mBootServicesExited;
+static BOOLEAN                mBeforeExitBootServicesSignaled;
+static BOOLEAN                mExitBootServicesEventsSignaled;
 static UINTN                  mRuntimeAcpiPm1Cnt =
     LEGACY_IO_BASE + ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET;
 static UINTN                  mRuntimeResetControl =
@@ -2339,6 +2341,7 @@ static EFI_STATUS rs_get_boot0000_variable(UINT32 *Attributes,
 static EFI_STATUS rs_convert_pointer_value(UINTN *Address);
 static BOOLEAN ranges_overlap(UINT64 a_base, UINT64 a_size,
                               UINT64 b_base, UINT64 b_size);
+static BOOLEAN efi_pages_to_size(UINTN Pages, UINT64 *Size);
 static void fw_poll_timers(void);
 static UINT64 fw_read_itc(void);
 static void nvram_commit(void);
@@ -2487,8 +2490,10 @@ typedef struct {
     BOOLEAN signaled;
     BOOLEAN timer_active;
     UINTN timer_type;
-    UINT64 due_tick;
-    UINT64 period_ticks;
+    UINT64 timer_last_tick;
+    UINT64 timer_remaining_100ns;
+    UINT64 timer_partial_ticks;
+    UINT64 timer_period_100ns;
     EFI_TPL notify_tpl;
     EFI_EVENT_NOTIFY notify_function;
     VOID *notify_context;
@@ -6425,11 +6430,88 @@ static EFI_UNICODE_COLLATION_PROTOCOL mUnicodeCollationProto = {
 
 /* --- Boot services stubs -------------------------------------------------- */
 
+/*
+ * EfiConventionalMemory is a valid AllocatePages()/AllocatePool() type.
+ * Such an allocation does not change the descriptor type, so the memory map
+ * alone cannot distinguish it from free memory.  Keep the allocation records
+ * in every availability decision as well as in the free paths.
+ */
+static BOOLEAN efi_find_allocation_overlap(UINT64 Start, UINT64 End,
+                                           UINT64 *FirstEnd,
+                                           UINT64 *LastStart)
+{
+    UINT64 first_end = ~0ULL;
+    UINT64 last_start = 0;
+    BOOLEAN found = 0;
+    UINTN i;
+
+    if (End <= Start) {
+        return 0;
+    }
+
+    for (i = 0; i < PAGE_ALLOCATION_MAX; i++) {
+        EFI_PAGE_ALLOCATION_RECORD *rec = &mPageAllocations[i];
+        UINT64 size;
+        UINT64 end;
+
+        if (!rec->in_use ||
+            !efi_pages_to_size(rec->pages, &size) ||
+            rec->base > ~0ULL - size) {
+            continue;
+        }
+        end = rec->base + size;
+        if (Start >= end || rec->base >= End) {
+            continue;
+        }
+        if (!found || end < first_end) {
+            first_end = end;
+        }
+        if (!found || rec->base > last_start) {
+            last_start = rec->base;
+        }
+        found = 1;
+    }
+
+    for (i = 0; i < POOL_ALLOCATION_MAX; i++) {
+        EFI_POOL_ALLOCATION_RECORD *rec = &mPoolAllocations[i];
+        UINT64 size;
+        UINT64 end;
+
+        if (!rec->in_use ||
+            !efi_pages_to_size(rec->pages, &size) ||
+            rec->base > ~0ULL - size) {
+            continue;
+        }
+        end = rec->base + size;
+        if (Start >= end || rec->base >= End) {
+            continue;
+        }
+        if (!found || end < first_end) {
+            first_end = end;
+        }
+        if (!found || rec->base > last_start) {
+            last_start = rec->base;
+        }
+        found = 1;
+    }
+
+    if (found) {
+        if (FirstEnd != NULL) {
+            *FirstEnd = first_end;
+        }
+        if (LastStart != NULL) {
+            *LastStart = last_start;
+        }
+    }
+    return found;
+}
+
 static BOOLEAN efi_range_is_available(UINT64 Start, UINT64 End)
 {
     UINT64 current = Start;
 
-    if (End <= Start) {
+    if (End <= Start ||
+        efi_find_allocation_overlap(Start, End, NULL, NULL)) {
         return 0;
     }
 
@@ -6603,42 +6685,34 @@ static void efi_coalesce_page_allocations(void)
     }
 }
 
-static BOOLEAN efi_record_page_allocation(EFI_PHYSICAL_ADDRESS Base,
-                                          UINTN Pages,
-                                          EFI_MEMORY_TYPE Type)
+static EFI_PAGE_ALLOCATION_RECORD *
+efi_record_page_allocation(EFI_PHYSICAL_ADDRESS Base, UINTN Pages,
+                           EFI_MEMORY_TYPE Type,
+                           EFI_PAGE_ALLOCATION_RECORD *Previous)
 {
     UINT64 size;
     UINTN i;
 
-    if (!efi_pages_to_size(Pages, &size) || Base + size < Base) {
-        return 0;
-    }
-    for (i = 0; i < PAGE_ALLOCATION_MAX; i++) {
-        EFI_PAGE_ALLOCATION_RECORD *rec = &mPageAllocations[i];
-
-        if (!rec->in_use) {
-            continue;
-        }
-        if (ranges_overlap(Base, size, rec->base,
-                           (UINT64)rec->pages << 12)) {
-            return 0;
-        }
+    if (Previous == NULL || !efi_pages_to_size(Pages, &size) ||
+        Base + size < Base ||
+        efi_find_allocation_overlap(Base, Base + size, NULL, NULL)) {
+        return NULL;
     }
 
     for (i = 0; i < PAGE_ALLOCATION_MAX; i++) {
         EFI_PAGE_ALLOCATION_RECORD *rec = &mPageAllocations[i];
 
         if (!rec->in_use) {
+            fw_copy_mem(Previous, rec, sizeof(*Previous));
             rec->in_use = 1;
             rec->base = Base;
             rec->pages = Pages;
             rec->type = Type;
-            efi_coalesce_page_allocations();
-            return 1;
+            return rec;
         }
     }
 
-    return 0;
+    return NULL;
 }
 
 static BOOLEAN efi_page_allocation_covers_type(EFI_PHYSICAL_ADDRESS Base,
@@ -6785,6 +6859,66 @@ static BOOLEAN efi_forget_page_allocation(EFI_PHYSICAL_ADDRESS Base,
     return 1;
 }
 
+static BOOLEAN efi_find_free_pages_forward(UINT64 Start, UINT64 End,
+                                           UINT64 Size, UINT64 Alignment,
+                                           EFI_PHYSICAL_ADDRESS *Memory)
+{
+    UINT64 addr;
+
+    if (Size == 0 || End <= Start || End - Start < Size ||
+        !efi_align_up_u64(Start, Alignment, &addr)) {
+        return 0;
+    }
+
+    while (addr <= End - Size) {
+        UINT64 allocation_end;
+
+        if (!efi_find_allocation_overlap(addr, addr + Size,
+                                         &allocation_end, NULL)) {
+            *Memory = addr;
+            return 1;
+        }
+        if (allocation_end <= addr ||
+            !efi_align_up_u64(allocation_end, Alignment, &addr)) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static BOOLEAN efi_find_free_pages_backward(UINT64 Start, UINT64 End,
+                                            UINT64 Size, UINT64 Alignment,
+                                            EFI_PHYSICAL_ADDRESS *Memory)
+{
+    UINT64 limit_end = End;
+
+    if (Size == 0 || End <= Start || End - Start < Size ||
+        Alignment == 0 || (Alignment & (Alignment - 1U)) != 0) {
+        return 0;
+    }
+
+    while (limit_end > Start && limit_end - Start >= Size) {
+        UINT64 allocation_start;
+        UINT64 addr = limit_end - Size;
+
+        addr &= ~(Alignment - 1U);
+
+        if (addr < Start) {
+            return 0;
+        }
+        if (!efi_find_allocation_overlap(addr, addr + Size, NULL,
+                                         &allocation_start)) {
+            *Memory = addr;
+            return 1;
+        }
+        if (allocation_start >= limit_end) {
+            return 0;
+        }
+        limit_end = allocation_start;
+    }
+    return 0;
+}
+
 static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
                                   EFI_PHYSICAL_ADDRESS *Memory)
 {
@@ -6792,7 +6926,7 @@ static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
     unsigned pass;
 
     if (!efi_align_up_u64(mNextPageAddr, Alignment, &lower_bound)) {
-        return 0;
+        lower_bound = ~0ULL;
     }
 
     for (pass = 0; pass < 2; pass++) {
@@ -6802,7 +6936,8 @@ static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
             EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
             UINT64 desc_start;
             UINT64 desc_end;
-            UINT64 addr;
+            UINT64 range_start;
+            UINT64 range_end;
 
             if (desc->Type != EfiConventionalMemory) {
                 continue;
@@ -6813,15 +6948,24 @@ static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
                 continue;
             }
             desc_end = desc->PhysicalStart + (desc->NumberOfPages << 12);
-            addr = desc_start;
-            if (pass == 0 && addr < lower_bound) {
-                addr = lower_bound;
-            } else if (pass == 1 && addr >= lower_bound) {
+            if (desc_end <= desc->PhysicalStart) {
                 continue;
             }
 
-            if (addr + Size >= addr && addr + Size <= desc_end) {
-                *Memory = addr;
+            range_start = desc_start;
+            range_end = desc_end;
+            if (pass == 0) {
+                if (range_start < lower_bound) {
+                    range_start = lower_bound;
+                }
+            } else {
+                if (range_start >= lower_bound) {
+                    continue;
+                }
+            }
+
+            if (efi_find_free_pages_forward(range_start, range_end, Size,
+                                            Alignment, Memory)) {
                 return 1;
             }
         }
@@ -6846,7 +6990,6 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
         UINT64 desc_start;
         UINT64 desc_end;
         UINT64 limit_end;
-        UINT64 addr;
 
         if (desc->Type != EfiConventionalMemory) {
             continue;
@@ -6856,6 +6999,9 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
             continue;
         }
         desc_end = desc->PhysicalStart + (desc->NumberOfPages << 12);
+        if (desc_end <= desc->PhysicalStart) {
+            continue;
+        }
         limit_end = desc_end;
         if (MaxAddress != ~0ULL && limit_end > MaxAddress + 1) {
             limit_end = MaxAddress + 1;
@@ -6864,10 +7010,8 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
             continue;
         }
 
-        addr = limit_end - Size;
-        addr -= addr % Alignment;
-        if (addr >= desc_start && addr + Size <= desc_end) {
-            *Memory = addr;
+        if (efi_find_free_pages_backward(desc_start, limit_end, Size,
+                                         Alignment, Memory)) {
             return 1;
         }
     }
@@ -6878,9 +7022,12 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
 EFI_STATUS bs_allocate_pages(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
                                      UINTN Pages, EFI_PHYSICAL_ADDRESS *Memory)
 {
+    EFI_PAGE_ALLOCATION_RECORD previous_allocation;
+    EFI_PAGE_ALLOCATION_RECORD *allocation;
     EFI_PHYSICAL_ADDRESS addr;
     UINT64 alignment;
     UINT64 size;
+    UINTN previous_map_key;
     UINTN rounded_pages;
 
     if (Memory == NULL || Pages == 0 ||
@@ -6912,29 +7059,33 @@ EFI_STATUS bs_allocate_pages(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
         if (!efi_find_max_pages(*Memory, size, alignment, &addr)) {
             return EFI_NOT_FOUND;
         }
-        if (addr + size > mNextPageAddr) {
-            mNextPageAddr = addr + size;
-        }
-        *Memory = addr;
     } else {
         if (!efi_find_any_pages(size, alignment, &addr)) {
             return EFI_NOT_FOUND;
         }
-        if (addr + size > mNextPageAddr) {
-            mNextPageAddr = addr + size;
-        }
-        *Memory = addr;
     }
 
-    if (!efi_record_page_allocation(addr, rounded_pages, MemoryType)) {
+    allocation = efi_record_page_allocation(addr, rounded_pages, MemoryType,
+                                            &previous_allocation);
+    if (allocation == NULL) {
         return EFI_OUT_OF_RESOURCES;
     }
+    previous_map_key = mMapKey;
     if (!efi_mark_memory_range(MemoryType, addr, addr + size,
                                efi_memory_attribute(MemoryType,
                                                    EFI_MEMORY_WB))) {
-        (void)efi_forget_page_allocation(addr, rounded_pages);
+        fw_copy_mem(allocation, &previous_allocation,
+                    sizeof(previous_allocation));
         return EFI_OUT_OF_RESOURCES;
     }
+    efi_coalesce_page_allocations();
+    if (mMapKey == previous_map_key) {
+        mMapKey++;
+    }
+    if (Type != AllocateAddress && addr + size > mNextPageAddr) {
+        mNextPageAddr = addr + size;
+    }
+    *Memory = addr;
     return EFI_SUCCESS;
 }
 
@@ -6943,6 +7094,7 @@ EFI_STATUS bs_free_pages(EFI_PHYSICAL_ADDRESS Memory, UINTN Pages)
     EFI_MEMORY_TYPE type;
     UINT64 size;
     UINT64 alignment;
+    UINTN previous_map_key;
     UINTN rounded_pages;
 
     if ((Memory & 0xfffULL) != 0 || Pages == 0) {
@@ -6964,11 +7116,15 @@ EFI_STATUS bs_free_pages(EFI_PHYSICAL_ADDRESS Memory, UINTN Pages)
         efi_page_allocation_free_slots()) {
         return EFI_OUT_OF_RESOURCES;
     }
+    previous_map_key = mMapKey;
     if (!efi_mark_memory_range(EfiConventionalMemory, Memory,
                                Memory + size, EFI_MEMORY_WB)) {
         return EFI_NOT_FOUND;
     }
     (void)efi_forget_page_allocation(Memory, rounded_pages);
+    if (mMapKey == previous_map_key) {
+        mMapKey++;
+    }
     return EFI_SUCCESS;
 }
 
@@ -6990,25 +7146,27 @@ EFI_STATUS bs_get_memory_map(UINTN *MemoryMapSize,
     UINTN needed;
     UINTN i;
 
-    if (MemoryMapSize == NULL || DescriptorSize == NULL || DescriptorVersion == NULL) {
+    if (MemoryMapSize == NULL || DescriptorSize == NULL ||
+        DescriptorVersion == NULL) {
         return EFI_INVALID_PARAMETER;
     }
     needed = mMemoryMapEntries * sizeof(EFI_MEMORY_DESCRIPTOR);
     *DescriptorSize = sizeof(EFI_MEMORY_DESCRIPTOR);
     *DescriptorVersion = EFI_MEMORY_DESCRIPTOR_VERSION;
 
-    if (MemoryMap == NULL || *MemoryMapSize < needed) {
+    if (*MemoryMapSize < needed) {
         *MemoryMapSize = needed;
         return EFI_BUFFER_TOO_SMALL;
+    }
+    if (MemoryMap == NULL || MapKey == NULL) {
+        return EFI_INVALID_PARAMETER;
     }
 
     for (i = 0; i < mMemoryMapEntries; i++) {
         MemoryMap[i] = mMemoryMap[i];
     }
     *MemoryMapSize = needed;
-    if (MapKey) {
-        *MapKey = mMapKey;
-    }
+    *MapKey = mMapKey;
     return EFI_SUCCESS;
 }
 
@@ -7038,6 +7196,7 @@ EFI_STATUS bs_allocate_pool(EFI_MEMORY_TYPE PoolType, UINTN Size, VOID **Buffer)
     EFI_PHYSICAL_ADDRESS memory;
     UINT64 alloc_size;
     UINT64 alignment;
+    UINTN previous_map_key;
     UINTN request_size;
     UINTN pages;
     UINTN i;
@@ -7069,6 +7228,7 @@ EFI_STATUS bs_allocate_pool(EFI_MEMORY_TYPE PoolType, UINTN Size, VOID **Buffer)
     if (!efi_find_pool_pages(alloc_size, alignment, &memory)) {
         return EFI_OUT_OF_RESOURCES;
     }
+    previous_map_key = mMapKey;
     if (!efi_mark_memory_range(PoolType, memory, memory + alloc_size,
                                efi_memory_attribute(PoolType,
                                                     EFI_MEMORY_WB))) {
@@ -7082,7 +7242,9 @@ EFI_STATUS bs_allocate_pool(EFI_MEMORY_TYPE PoolType, UINTN Size, VOID **Buffer)
         fw_set_mem((VOID *)(UINTN)memory, Size, 0);
     }
     *Buffer = (VOID *)(UINTN)memory;
-    mMapKey++;
+    if (mMapKey == previous_map_key) {
+        mMapKey++;
+    }
     return EFI_SUCCESS;
 }
 
@@ -7099,6 +7261,7 @@ EFI_STATUS bs_free_pool(VOID *Buffer)
 
         if (rec->in_use && rec->base == addr) {
             UINT64 end = efi_pool_allocation_end(rec);
+            UINTN previous_map_key = mMapKey;
 
             if (!efi_mark_memory_range(EfiConventionalMemory, rec->base, end,
                                        EFI_MEMORY_WB)) {
@@ -7108,7 +7271,9 @@ EFI_STATUS bs_free_pool(VOID *Buffer)
             rec->base = 0;
             rec->pages = 0;
             rec->type = EfiBootServicesData;
-            mMapKey++;
+            if (mMapKey == previous_map_key) {
+                mMapKey++;
+            }
             return EFI_SUCCESS;
         }
     }
@@ -7560,6 +7725,48 @@ static void graphics_select_text_mode(void)
     text_redraw_screen();
 }
 
+/*
+ * EFI 1.10 section 5.4 does not prescribe a video hardware mode after
+ * ExitBootServices().  The IA-64 Linux boot ABI, however, supplies only text
+ * geometry in ia64_boot_param and the PCDP VGA path selects vgacon, which
+ * expects the firmware to leave legacy VGA text mode usable.  GRUB 2.12 can
+ * draw directly into the already-active GOP framebuffer without calling a
+ * mutating GOP method, then hand a non-framebuffer Linux kernel to us.
+ *
+ * Preserve graphics when the loader explicitly selected or blitted a GOP/UGA
+ * mode.  Otherwise, when PCDP designates VGA as the primary OS console,
+ * restore the legacy text state expected by vgacon.  Serial-primary boots do
+ * not need or want a display transition.
+ */
+static void graphics_prepare_os_handoff(BOOLEAN VgaPrimary)
+{
+    if (!VgaPrimary || mGraphicsHandoffClaimed || !mGraphicsActive) {
+        return;
+    }
+
+    /*
+     * The linear framebuffer and legacy planes share VGA memory.  Clear GOP
+     * pixels before loading the font; clearing afterwards would erase the
+     * freshly loaded font plane and produce black text glyphs.
+     */
+    graphics_clear_framebuffer();
+    graphics_select_text_mode();
+    text_clear_legacy_cells();
+}
+
+static void __attribute__((noinline))
+graphics_begin_loader_handoff(BOOLEAN TopLevelLoader)
+{
+    /*
+     * Only a firmware-launched top-level loader starts a new ownership
+     * window.  Nested StartImage() calls made by that loader may load a video
+     * driver, so their GOP/UGA activity must remain attributed to the loader.
+     */
+    if (TopLevelLoader) {
+        mGraphicsHandoffClaimed = 0;
+    }
+}
+
 static BOOLEAN graphics_rect_in_bounds(UINTN X, UINTN Y, UINTN Width,
                                        UINTN Height)
 {
@@ -7605,11 +7812,11 @@ static EFI_STATUS graphics_blt(EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer,
     UINTN x;
     UINTN y;
 
+    if ((UINTN)BltOperation >= EfiGraphicsOutputBltOperationMax) {
+        return EFI_INVALID_PARAMETER;
+    }
     if (Width == 0 || Height == 0) {
         return EFI_SUCCESS;
-    }
-    if (BltOperation >= EfiGraphicsOutputBltOperationMax) {
-        return EFI_INVALID_PARAMETER;
     }
     if (Delta == 0) {
         Delta = Width * sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL);
@@ -7697,6 +7904,18 @@ static EFI_STATUS graphics_blt(EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer,
     }
 }
 
+static BOOLEAN graphics_blt_claims_handoff(
+    EFI_GRAPHICS_OUTPUT_BLT_OPERATION BltOperation,
+    UINTN Width, UINTN Height)
+{
+    if (Width == 0 || Height == 0) {
+        return 0;
+    }
+    return BltOperation == EfiBltVideoFill ||
+           BltOperation == EfiBltBufferToVideo ||
+           BltOperation == EfiBltVideoToVideo;
+}
+
 static EFI_STATUS gop_query_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
                                  UINT32 ModeNumber, UINTN *SizeOfInfo,
                                  EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info)
@@ -7728,7 +7947,7 @@ static EFI_STATUS gop_set_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
     (void)This;
     st = graphics_select_mode(ModeNumber, 0);
     if (st == EFI_SUCCESS) {
-        mGraphicsClientActive = 1;
+        mGraphicsHandoffClaimed = 1;
     }
     return st;
 }
@@ -7745,8 +7964,9 @@ static EFI_STATUS gop_blt(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
     (void)This;
     st = graphics_blt(BltBuffer, BltOperation, SourceX, SourceY,
                       DestinationX, DestinationY, Width, Height, Delta);
-    if (st == EFI_SUCCESS) {
-        mGraphicsClientActive = 1;
+    if (st == EFI_SUCCESS &&
+        graphics_blt_claims_handoff(BltOperation, Width, Height)) {
+        mGraphicsHandoffClaimed = 1;
     }
     return st;
 }
@@ -7787,7 +8007,7 @@ static EFI_STATUS uga_set_mode(EFI_UGA_DRAW_PROTOCOL *This,
             EFI_STATUS st = graphics_select_mode(mode, 0);
 
             if (st == EFI_SUCCESS) {
-                mGraphicsClientActive = 1;
+                mGraphicsHandoffClaimed = 1;
             }
             return st;
         }
@@ -7807,8 +8027,9 @@ static EFI_STATUS uga_blt(EFI_UGA_DRAW_PROTOCOL *This,
     (void)This;
     st = graphics_blt(BltBuffer, BltOperation, SourceX, SourceY,
                       DestinationX, DestinationY, Width, Height, Delta);
-    if (st == EFI_SUCCESS) {
-        mGraphicsClientActive = 1;
+    if (st == EFI_SUCCESS &&
+        graphics_blt_claims_handoff(BltOperation, Width, Height)) {
+        mGraphicsHandoffClaimed = 1;
     }
     return st;
 }
@@ -7830,15 +8051,17 @@ static BOOLEAN graphics_visible_framebuffer_is_black(void)
 static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
 {
     EFI_GRAPHICS_OUTPUT_BLT_PIXEL marker;
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL observed;
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mode_info = NULL;
     UINT32 saved_mode = mGopMode.Mode;
     BOOLEAN saved_active = mGraphicsActive;
-    BOOLEAN saved_client = mGraphicsClientActive;
+    BOOLEAN saved_handoff = mGraphicsHandoffClaimed;
     UINTN info_size = 0;
     UINTN expected_size;
     EFI_STATUS st;
     BOOLEAN ok = 1;
 
+    mGraphicsHandoffClaimed = 0;
     st = gop_query_mode(&mGopProto, 0, &info_size, &mode_info);
     if (st != EFI_SUCCESS || info_size != sizeof(*mode_info) ||
         mode_info == NULL ||
@@ -7885,6 +8108,10 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
         mode_info = NULL;
     }
 
+    if (mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+
     st = gop_set_mode(&mGopProto, 3);
     expected_size = (UINTN)VGA_MODE_1024_WIDTH *
                     (UINTN)VGA_MODE_1024_HEIGHT * 4U;
@@ -7892,7 +8119,8 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
         mGraphicsWidth != VGA_MODE_1024_WIDTH ||
         mGraphicsHeight != VGA_MODE_1024_HEIGHT ||
         mGopMode.FrameBufferSize != expected_size ||
-        !graphics_visible_framebuffer_is_black()) {
+        !graphics_visible_framebuffer_is_black() ||
+        !mGraphicsHandoffClaimed) {
         ok = 0;
     }
 
@@ -7900,11 +8128,52 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
     marker.Green = 0x44;
     marker.Red = 0x66;
     marker.Reserved = 0;
-    st = gop_blt(&mGopProto, &marker, EfiBltVideoFill, 0, 0, 0, 0,
-                 8, 8, 0);
-    if (st != EFI_SUCCESS) {
+
+    mGraphicsHandoffClaimed = 0;
+    st = gop_blt(&mGopProto, NULL,
+                 (EFI_GRAPHICS_OUTPUT_BLT_OPERATION)
+                 EfiGraphicsOutputBltOperationMax,
+                 0, 0, 0, 0, 0, 1, 0);
+    if (st != EFI_INVALID_PARAMETER || mGraphicsHandoffClaimed) {
         ok = 0;
     }
+    st = gop_blt(&mGopProto, NULL, EfiBltVideoFill,
+                 0, 0, 0, 0, 0, 1, 0);
+    if (st != EFI_SUCCESS || mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+
+    mGraphicsHandoffClaimed = 0;
+    st = gop_blt(&mGopProto, &marker, EfiBltVideoFill, 0, 0, 0, 0,
+                 8, 8, 0);
+    if (st != EFI_SUCCESS || !mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+
+    fw_set_mem(&observed, sizeof(observed), 0);
+    mGraphicsHandoffClaimed = 0;
+    st = gop_blt(&mGopProto, &observed, EfiBltVideoToBltBuffer,
+                 0, 0, 0, 0, 1, 1, 0);
+    if (st != EFI_SUCCESS || mGraphicsHandoffClaimed ||
+        observed.Blue != marker.Blue ||
+        observed.Green != marker.Green || observed.Red != marker.Red ||
+        observed.Reserved != marker.Reserved) {
+        ok = 0;
+    }
+
+    mGraphicsHandoffClaimed = 0;
+    st = gop_blt(&mGopProto, &marker, EfiBltBufferToVideo,
+                 0, 0, 1, 0, 1, 1, 0);
+    if (st != EFI_SUCCESS || !mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+    mGraphicsHandoffClaimed = 0;
+    st = gop_blt(&mGopProto, NULL, EfiBltVideoToVideo,
+                 0, 0, 2, 0, 1, 1, 0);
+    if (st != EFI_SUCCESS || !mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+
     st = gop_set_mode(&mGopProto, 3);
     if (st != EFI_SUCCESS || !graphics_visible_framebuffer_is_black()) {
         ok = 0;
@@ -7915,13 +8184,15 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
         ok = 0;
     }
 
+    mGraphicsHandoffClaimed = 0;
     st = uga_set_mode(&mUgaDrawProto, VGA_MODE_TEXT_WIDTH, VGA_MODE_TEXT_HEIGHT,
                       VGA_BPP, 0);
     expected_size = (UINTN)VGA_MODE_TEXT_WIDTH *
                     (UINTN)VGA_MODE_TEXT_HEIGHT * 4U;
     if (st != EFI_SUCCESS || mGopMode.Mode != 0 ||
         mGopMode.FrameBufferSize != expected_size ||
-        !graphics_visible_framebuffer_is_black()) {
+        !graphics_visible_framebuffer_is_black() ||
+        !mGraphicsHandoffClaimed) {
         ok = 0;
     }
 
@@ -7940,7 +8211,74 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
     } else {
         graphics_select_text_mode();
     }
-    mGraphicsClientActive = saved_client;
+    mGraphicsHandoffClaimed = saved_handoff;
+    return ok;
+}
+
+static BOOLEAN __attribute__((noinline)) graphics_handoff_selftest(void)
+{
+    volatile UINT16 *text_fb =
+        (volatile UINT16 *)(UINTN)VGA_TEXT_FB_BASE;
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL marker;
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL observed;
+    UINT32 saved_mode = mGopMode.Mode;
+    BOOLEAN saved_active = mGraphicsActive;
+    BOOLEAN saved_handoff = mGraphicsHandoffClaimed;
+    BOOLEAN ok = 1;
+
+    if (graphics_select_mode(0, 0) != EFI_SUCCESS) {
+        return 0;
+    }
+    marker.Blue = 0x12;
+    marker.Green = 0x34;
+    marker.Red = 0x56;
+    marker.Reserved = 0x78;
+    mGraphicsHandoffClaimed = 0;
+    graphics_write_pixel(0, 0, marker);
+    if (mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+
+    mGraphicsHandoffClaimed = 1;
+    graphics_begin_loader_handoff(0);
+    if (!mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+    graphics_begin_loader_handoff(1);
+    if (mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+
+    mGraphicsHandoffClaimed = 1;
+    graphics_prepare_os_handoff(1);
+    observed = graphics_read_pixel(0, 0);
+    if (!mGraphicsActive || observed.Blue != marker.Blue ||
+        observed.Green != marker.Green || observed.Red != marker.Red ||
+        observed.Reserved != marker.Reserved) {
+        ok = 0;
+    }
+
+    mGraphicsHandoffClaimed = 0;
+    graphics_prepare_os_handoff(0);
+    observed = graphics_read_pixel(0, 0);
+    if (!mGraphicsActive || observed.Blue != marker.Blue ||
+        observed.Green != marker.Green || observed.Red != marker.Red ||
+        observed.Reserved != marker.Reserved) {
+        ok = 0;
+    }
+
+    graphics_prepare_os_handoff(1);
+    if (mGraphicsActive || text_fb[0] != 0x0720U ||
+        text_fb[VGA_TEXT_COLUMNS * VGA_TEXT_ROWS - 1U] != 0x0720U) {
+        ok = 0;
+    }
+
+    if (saved_active) {
+        (void)graphics_select_mode(saved_mode, 1);
+    } else {
+        graphics_select_text_mode();
+    }
+    mGraphicsHandoffClaimed = saved_handoff;
     return ok;
 }
 
@@ -7953,7 +8291,7 @@ static BOOLEAN __attribute__((noinline))
 fw_event_type_valid(UINT32 Type, BOOLEAN CreateEventEx)
 {
     UINT32 notify = Type & (EVT_NOTIFY_WAIT | EVT_NOTIFY_SIGNAL);
-    UINT32 legal = EVT_TIMER | EVT_RUNTIME |
+    UINT32 legal = EVT_TIMER | EVT_RUNTIME | EVT_RUNTIME_CONTEXT |
                    EVT_NOTIFY_WAIT | EVT_NOTIFY_SIGNAL;
 
     if (CreateEventEx &&
@@ -8040,12 +8378,37 @@ static BOOLEAN fw_guid_equal(const UINT8 *A, const UINT8 *B)
     return 1;
 }
 
+static FW_EVENT_RECORD *fw_event_record_from_handle(EFI_EVENT Event)
+{
+    UINTN address = (UINTN)Event;
+    UINTN base = (UINTN)&mEventRecords[0];
+    UINTN offset;
+    FW_EVENT_RECORD *rec;
+
+    if (address < base) {
+        return NULL;
+    }
+    offset = address - base;
+    if (offset >= sizeof(mEventRecords) ||
+        (offset % sizeof(mEventRecords[0])) != 0) {
+        return NULL;
+    }
+    rec = &mEventRecords[offset / sizeof(mEventRecords[0])];
+    return rec->signature == FW_EVENT_SIGNATURE ? rec : NULL;
+}
+
 static void fw_event_queue_notify(FW_EVENT_RECORD *Event)
 {
     UINTN i;
 
     if (Event == NULL || Event->notify_function == NULL) {
         return;
+    }
+    for (i = 0; i < FW_EVENT_NOTIFY_MAX; i++) {
+        if (mEventNotifyQueue[i].in_use &&
+            mEventNotifyQueue[i].event == Event) {
+            return;
+        }
     }
     for (i = 0; i < FW_EVENT_NOTIFY_MAX; i++) {
         FW_EVENT_NOTIFY_RECORD *rec = &mEventNotifyQueue[i];
@@ -8090,11 +8453,19 @@ static void fw_dispatch_event_notifications(void)
 
         {
             FW_EVENT_NOTIFY_RECORD rec = mEventNotifyQueue[selected];
+            FW_EVENT_RECORD *event = rec.event;
             EFI_TPL old_tpl = mCurrentTpl;
 
             mEventNotifyQueue[selected].in_use = 0;
+            if (event == NULL || event->signature != FW_EVENT_SIGNATURE ||
+                event->notify_function != rec.notify_function) {
+                continue;
+            }
+            if ((event->type & EVT_NOTIFY_SIGNAL) != 0) {
+                event->signaled = 0;
+            }
             mCurrentTpl = rec.notify_tpl;
-            rec.notify_function((EFI_EVENT)rec.event, rec.notify_context);
+            rec.notify_function((EFI_EVENT)event, rec.notify_context);
             mCurrentTpl = old_tpl;
         }
     }
@@ -8123,11 +8494,19 @@ static EFI_STATUS fw_create_event_common(UINT32 Type, UINTN NotifyTpl,
                                          BOOLEAN CreateEventEx,
                                          EFI_EVENT *Event)
 {
+    const void *effective_group = EventGroup;
     UINTN i;
 
     if (!fw_event_validate_create(Type, NotifyTpl, NotifyFunction, Event,
                                   CreateEventEx)) {
         return EFI_INVALID_PARAMETER;
+    }
+    if (effective_group == NULL &&
+        Type == EVT_SIGNAL_EXIT_BOOT_SERVICES) {
+        effective_group = gEfiEventGroupExitBootServicesGuid;
+    } else if (effective_group == NULL &&
+               Type == EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE) {
+        effective_group = gEfiEventGroupVirtualAddressChangeGuid;
     }
     for (i = 0; i < FW_EVENT_MAX; i++) {
         if (mEventRecords[i].signature != FW_EVENT_SIGNATURE) {
@@ -8140,8 +8519,8 @@ static EFI_STATUS fw_create_event_common(UINT32 Type, UINTN NotifyTpl,
                 fw_event_capture_notify(&mEventRecords[i], NotifyTpl,
                                         NotifyFunction, NotifyContext);
             }
-            if (EventGroup != NULL) {
-                const UINT8 *group = (const UINT8 *)EventGroup;
+            if (effective_group != NULL) {
+                const UINT8 *group = (const UINT8 *)effective_group;
 
                 mEventRecords[i].has_group = 1;
                 for (j = 0; j < 16; j++) {
@@ -8171,7 +8550,7 @@ EFI_STATUS bs_create_event_ex(UINT32 Type, UINTN NotifyTpl,
 {
     return fw_create_event_common(Type, NotifyTpl, NotifyFunction,
                                   NotifyContext, EventGroup,
-                                  EventGroup != NULL, Event);
+                                  1, Event);
 }
 
 static UINT64 fw_read_itc(void)
@@ -8182,42 +8561,89 @@ static UINT64 fw_read_itc(void)
     return tick;
 }
 
-static UINT64 fw_timer_100ns_to_ticks(UINT64 time_100ns)
+static BOOLEAN __attribute__((noinline))
+fw_event_timer_consume(FW_EVENT_RECORD *rec, UINT64 Now)
 {
-    UINT64 ticks = time_100ns * FW_ITC_TICKS_PER_100NS;
+    UINT64 delta = Now - rec->timer_last_tick;
+    UINT64 elapsed_100ns;
+    UINT64 partial;
+    UINT64 overrun;
 
-    return ticks == 0 ? 1 : ticks;
+    if (delta == 0) {
+        return 0;
+    }
+    rec->timer_last_tick = Now;
+
+    /* A zero trigger expires on the first timer tick after SetTimer(). */
+    if (rec->timer_remaining_100ns == 0) {
+        rec->timer_partial_ticks = 0;
+        if (rec->timer_type != TIMER_PERIODIC) {
+            rec->timer_active = 0;
+        }
+        return 1;
+    }
+
+    /* Carry sub-100ns ITC ticks across polls without scaling the deadline. */
+    elapsed_100ns = delta / FW_ITC_TICKS_PER_100NS;
+    partial = rec->timer_partial_ticks +
+              delta % FW_ITC_TICKS_PER_100NS;
+    if (partial >= FW_ITC_TICKS_PER_100NS) {
+        partial -= FW_ITC_TICKS_PER_100NS;
+        elapsed_100ns++;
+    }
+    rec->timer_partial_ticks = partial;
+    if (elapsed_100ns < rec->timer_remaining_100ns) {
+        rec->timer_remaining_100ns -= elapsed_100ns;
+        return 0;
+    }
+
+    overrun = elapsed_100ns - rec->timer_remaining_100ns;
+    if (rec->timer_type == TIMER_PERIODIC) {
+        if (rec->timer_period_100ns == 0) {
+            rec->timer_remaining_100ns = 0;
+            rec->timer_partial_ticks = 0;
+        } else {
+            /* Skip missed periods in O(1) while preserving timer phase. */
+            rec->timer_remaining_100ns = rec->timer_period_100ns -
+                overrun % rec->timer_period_100ns;
+        }
+    } else {
+        rec->timer_active = 0;
+        rec->timer_remaining_100ns = 0;
+        rec->timer_partial_ticks = 0;
+    }
+    return 1;
 }
 
-static BOOLEAN fw_event_timer_expired(FW_EVENT_RECORD *rec)
+static BOOLEAN fw_event_timer_expired_at(FW_EVENT_RECORD *rec, UINT64 Now)
 {
-    UINT64 now;
+    BOOLEAN already_signaled;
 
     if (rec == NULL || !rec->timer_active) {
         return 0;
     }
-    if (rec->signaled) {
+
+    already_signaled = rec->signaled;
+    if (!fw_event_timer_consume(rec, Now)) {
+        return already_signaled;
+    }
+    if (already_signaled) {
         return 1;
     }
-
-    now = fw_read_itc();
-    if (now < rec->due_tick) {
-        return 0;
-    }
-
     rec->signaled = 1;
-    if (rec->timer_type == TIMER_PERIODIC && rec->period_ticks != 0) {
-        do {
-            rec->due_tick += rec->period_ticks;
-        } while (rec->due_tick <= now);
-    } else {
-        rec->timer_active = 0;
-    }
     if ((rec->type & EVT_NOTIFY_SIGNAL) != 0) {
         fw_event_queue_notify(rec);
         fw_dispatch_event_notifications();
     }
     return 1;
+}
+
+static BOOLEAN fw_event_timer_expired(FW_EVENT_RECORD *rec)
+{
+    if (rec == NULL || !rec->timer_active) {
+        return 0;
+    }
+    return fw_event_timer_expired_at(rec, fw_read_itc());
 }
 
 static void fw_poll_timers(void)
@@ -8235,24 +8661,28 @@ static void fw_poll_timers(void)
 
 EFI_STATUS bs_set_timer(EFI_EVENT Event, UINTN Type, UINT64 TriggerTime)
 {
-    FW_EVENT_RECORD *rec = (FW_EVENT_RECORD *)Event;
+    FW_EVENT_RECORD *rec = fw_event_record_from_handle(Event);
 
-    if (rec == NULL || rec->signature != FW_EVENT_SIGNATURE ||
-        (rec->type & EVT_TIMER) == 0 || Type > TIMER_RELATIVE) {
+    if (rec == NULL || (rec->type & EVT_TIMER) == 0 ||
+        Type > TIMER_RELATIVE) {
         return EFI_INVALID_PARAMETER;
     }
     if (Type == TIMER_CANCEL) {
         rec->timer_active = 0;
         rec->timer_type = 0;
-        rec->due_tick = 0;
-        rec->period_ticks = 0;
+        rec->timer_last_tick = 0;
+        rec->timer_remaining_100ns = 0;
+        rec->timer_partial_ticks = 0;
+        rec->timer_period_100ns = 0;
         return EFI_SUCCESS;
     }
     rec->timer_active = 1;
     rec->timer_type = Type;
-    rec->signaled = 0;
-    rec->period_ticks = fw_timer_100ns_to_ticks(TriggerTime);
-    rec->due_tick = fw_read_itc() + rec->period_ticks;
+    rec->timer_last_tick = fw_read_itc();
+    rec->timer_remaining_100ns = TriggerTime;
+    rec->timer_partial_ticks = 0;
+    rec->timer_period_100ns =
+        Type == TIMER_PERIODIC ? TriggerTime : 0;
     return EFI_SUCCESS;
 }
 
@@ -8284,8 +8714,9 @@ EFI_STATUS bs_wait_for_event(UINTN NumberOfEvents, EFI_EVENT *Event, UINTN *Inde
         return EFI_UNSUPPORTED;
     }
     for (i = 0; i < NumberOfEvents; i++) {
-        FW_EVENT_RECORD *rec = (FW_EVENT_RECORD *)Event[i];
-        if (rec == NULL || rec->signature != FW_EVENT_SIGNATURE) {
+        FW_EVENT_RECORD *rec = fw_event_record_from_handle(Event[i]);
+        if (rec == NULL) {
+            *Index = i;
             return EFI_INVALID_PARAMETER;
         }
         if ((rec->type & EVT_NOTIFY_SIGNAL) != 0) {
@@ -8296,7 +8727,12 @@ EFI_STATUS bs_wait_for_event(UINTN NumberOfEvents, EFI_EVENT *Event, UINTN *Inde
 
     while (1) {
         for (i = 0; i < NumberOfEvents; i++) {
-            FW_EVENT_RECORD *rec = (FW_EVENT_RECORD *)Event[i];
+            FW_EVENT_RECORD *rec = fw_event_record_from_handle(Event[i]);
+
+            if (rec == NULL) {
+                *Index = i;
+                return EFI_INVALID_PARAMETER;
+            }
             if (fw_event_ready(Event[i])) {
                 *Index = i;
                 fw_event_consume(rec);
@@ -8318,7 +8754,8 @@ EFI_STATUS bs_wait_for_event(UINTN NumberOfEvents, EFI_EVENT *Event, UINTN *Inde
 
 static void fw_signal_event_record(FW_EVENT_RECORD *rec)
 {
-    if (rec == NULL || rec->signature != FW_EVENT_SIGNATURE) {
+    if (rec == NULL || rec->signature != FW_EVENT_SIGNATURE ||
+        rec->signaled) {
         return;
     }
     rec->signaled = 1;
@@ -8342,14 +8779,16 @@ static void fw_signal_event_group(const UINT8 *Group)
     fw_dispatch_event_notifications();
 }
 
-static void fw_signal_event_type(UINT32 Type)
+static void fw_signal_event_group_and_type(const UINT8 *Group, UINT32 Type)
 {
     UINTN i;
 
     for (i = 0; i < FW_EVENT_MAX; i++) {
         FW_EVENT_RECORD *rec = &mEventRecords[i];
 
-        if (rec->signature == FW_EVENT_SIGNATURE && rec->type == Type) {
+        if (rec->signature == FW_EVENT_SIGNATURE &&
+            (rec->type == Type ||
+             (rec->has_group && fw_guid_equal(rec->group, Group)))) {
             fw_signal_event_record(rec);
         }
     }
@@ -8366,19 +8805,21 @@ static void __attribute__((noinline)) fw_cancel_all_timers(void)
         if (rec->signature == FW_EVENT_SIGNATURE) {
             rec->timer_active = 0;
             rec->timer_type = 0;
-            rec->due_tick = 0;
-            rec->period_ticks = 0;
+            rec->timer_last_tick = 0;
+            rec->timer_remaining_100ns = 0;
+            rec->timer_partial_ticks = 0;
+            rec->timer_period_100ns = 0;
         }
     }
 }
 
 EFI_STATUS bs_signal_event(EFI_EVENT Event)
 {
-    FW_EVENT_RECORD *rec = (FW_EVENT_RECORD *)Event;
+    FW_EVENT_RECORD *rec = fw_event_record_from_handle(Event);
     BOOLEAN signaled_group = 0;
     UINTN i;
 
-    if (rec == NULL || rec->signature != FW_EVENT_SIGNATURE) {
+    if (rec == NULL) {
         return EFI_INVALID_PARAMETER;
     }
     if (rec->has_group) {
@@ -8415,21 +8856,37 @@ static void fw_close_protocol_notify_for_event(FW_EVENT_RECORD *Event)
     }
 }
 
+static void fw_remove_event_notifications(FW_EVENT_RECORD *Event)
+{
+    UINTN i;
+
+    for (i = 0; i < FW_EVENT_NOTIFY_MAX; i++) {
+        FW_EVENT_NOTIFY_RECORD *rec = &mEventNotifyQueue[i];
+
+        if (rec->in_use && rec->event == Event) {
+            fw_set_mem(rec, sizeof(*rec), 0);
+        }
+    }
+}
+
 EFI_STATUS bs_close_event(EFI_EVENT Event)
 {
-    FW_EVENT_RECORD *rec = (FW_EVENT_RECORD *)Event;
+    FW_EVENT_RECORD *rec = fw_event_record_from_handle(Event);
 
-    if (rec == NULL || rec->signature != FW_EVENT_SIGNATURE) {
+    if (rec == NULL) {
         return EFI_INVALID_PARAMETER;
     }
+    fw_remove_event_notifications(rec);
     fw_close_protocol_notify_for_event(rec);
     rec->signature = 0;
     rec->type = 0;
     rec->signaled = 0;
     rec->timer_active = 0;
     rec->timer_type = 0;
-    rec->due_tick = 0;
-    rec->period_ticks = 0;
+    rec->timer_last_tick = 0;
+    rec->timer_remaining_100ns = 0;
+    rec->timer_partial_ticks = 0;
+    rec->timer_period_100ns = 0;
     rec->notify_tpl = 0;
     rec->notify_function = NULL;
     rec->notify_context = NULL;
@@ -8440,9 +8897,9 @@ EFI_STATUS bs_close_event(EFI_EVENT Event)
 
 EFI_STATUS bs_check_event(EFI_EVENT Event)
 {
-    FW_EVENT_RECORD *rec = (FW_EVENT_RECORD *)Event;
+    FW_EVENT_RECORD *rec = fw_event_record_from_handle(Event);
 
-    if (rec == NULL || rec->signature != FW_EVENT_SIGNATURE) {
+    if (rec == NULL) {
         return EFI_INVALID_PARAMETER;
     }
     if ((rec->type & EVT_NOTIFY_SIGNAL) != 0) {
@@ -8466,13 +8923,10 @@ EFI_STATUS bs_check_event(EFI_EVENT Event)
 EFI_STATUS bs_register_protocol_notify(void *Protocol, EFI_EVENT Event,
                                        VOID **Registration)
 {
-    FW_EVENT_RECORD *event = (FW_EVENT_RECORD *)Event;
+    FW_EVENT_RECORD *event = fw_event_record_from_handle(Event);
     UINTN i;
 
-    if (Protocol == NULL || Event == NULL || Registration == NULL) {
-        return EFI_INVALID_PARAMETER;
-    }
-    if (event->signature != FW_EVENT_SIGNATURE) {
+    if (Protocol == NULL || event == NULL || Registration == NULL) {
         return EFI_INVALID_PARAMETER;
     }
 
@@ -8618,7 +9072,7 @@ EFI_STATUS bs_set_watchdog_timer(UINTN Timeout, UINT64 WatchdogCode,
     (void)WatchdogCode;
     (void)DataSize;
     (void)WatchdogData;
-    return EFI_SUCCESS;
+    return EFI_UNSUPPORTED;
 }
 
 EFI_STATUS bs_connect_controller(EFI_HANDLE ControllerHandle,
@@ -9750,6 +10204,7 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
     rec->started = 1;
     sal_loader_handoff = mSalLoaderHandoffPending;
     mSalLoaderHandoffPending = 0;
+    graphics_begin_loader_handoff(sal_loader_handoff);
 
     if (__builtin_setjmp(frame->jump) != 0) {
         frame = start_image_top_frame();
@@ -9783,33 +10238,102 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
     return (EFI_STATUS)status;
 }
 
-EFI_STATUS bs_exit_boot_services(EFI_HANDLE ImageHandle, UINTN MapKey)
+static void efi_exit_boot_services_update_system_table(void)
 {
-    (void)ImageHandle;
+    mSystemTable.ConsoleInHandle = NULL;
+    mSystemTable.ConIn = NULL;
+    mSystemTable.ConsoleOutHandle = NULL;
+    mSystemTable.ConOut = NULL;
+    mSystemTable.StandardErrorHandle = NULL;
+    mSystemTable.StdErr = NULL;
+    mSystemTable.BootServices = NULL;
+    efi_update_table_crc32(&mSystemTable.Hdr);
+}
+
+static BOOLEAN __attribute__((noinline))
+uefi_exit_boot_services_system_table_selftest(void)
+{
+    EFI_SYSTEM_TABLE saved_table = mSystemTable;
+    EFI_RUNTIME_SERVICES *runtime_services = mSystemTable.RuntimeServices;
+    VOID *configuration_table = mSystemTable.ConfigurationTable;
+    UINTN configuration_table_entries = mSystemTable.NumberOfTableEntries;
+    BOOLEAN ok;
+
+    if (mSystemTable.ConsoleInHandle == NULL || mSystemTable.ConIn == NULL ||
+        mSystemTable.ConsoleOutHandle == NULL || mSystemTable.ConOut == NULL ||
+        mSystemTable.StandardErrorHandle == NULL ||
+        mSystemTable.StdErr == NULL ||
+        mSystemTable.BootServices == NULL || !efi_system_table_crc32_valid()) {
+        return 0;
+    }
+
+    efi_exit_boot_services_update_system_table();
+    ok = mSystemTable.ConsoleInHandle == NULL && mSystemTable.ConIn == NULL &&
+         mSystemTable.ConsoleOutHandle == NULL && mSystemTable.ConOut == NULL &&
+         mSystemTable.StandardErrorHandle == NULL &&
+         mSystemTable.StdErr == NULL &&
+         mSystemTable.BootServices == NULL &&
+         mSystemTable.RuntimeServices == runtime_services &&
+         mSystemTable.ConfigurationTable == configuration_table &&
+         mSystemTable.NumberOfTableEntries == configuration_table_entries &&
+         efi_system_table_crc32_valid();
+
+    mSystemTable = saved_table;
+    return ok && efi_system_table_crc32_valid();
+}
+
+static EFI_STATUS fw_prepare_exit_boot_services(UINTN MapKey)
+{
     if (MapKey != mMapKey ||
         !efi_memory_map_has_ia64_descriptor_alignment()) {
         return EFI_INVALID_PARAMETER;
     }
-    fw_signal_event_group(gEfiEventGroupBeforeExitBootServicesGuid);
-    fw_cancel_all_timers();
-    fw_signal_event_group(gEfiEventGroupExitBootServicesGuid);
-    fw_signal_event_type(EVT_SIGNAL_EXIT_BOOT_SERVICES);
-    if (!mGraphicsClientActive) {
-        /*
-         * The VGA linear framebuffer and the legacy planes share VRAM.
-         * Clear former GOP pixels before loading the text font; clearing the
-         * linear framebuffer afterwards would erase that font from its VGA
-         * plane and make valid text cells render as black glyphs.
-         */
-        graphics_clear_framebuffer();
-        graphics_select_text_mode();
-        text_clear_legacy_cells();
+    if (!mBeforeExitBootServicesSignaled) {
+        mBeforeExitBootServicesSignaled = 1;
+        fw_signal_event_group(gEfiEventGroupBeforeExitBootServicesGuid);
     }
+    /*
+     * UEFI requires timer services to be deactivated immediately after the
+     * BEFORE_EXIT_BOOT_SERVICES handlers run.  A handler is allowed to change
+     * the memory map, so this is deliberately before the second MapKey check:
+     * the first failed attempt may leave boot services partially shut down.
+     */
+    fw_cancel_all_timers();
+    if (MapKey != mMapKey ||
+        !efi_memory_map_has_ia64_descriptor_alignment()) {
+        return EFI_INVALID_PARAMETER;
+    }
+    return EFI_SUCCESS;
+}
+
+static void fw_signal_exit_boot_services_events(void)
+{
+    if (mExitBootServicesEventsSignaled) {
+        return;
+    }
+    mExitBootServicesEventsSignaled = 1;
+    fw_signal_event_group_and_type(
+        gEfiEventGroupExitBootServicesGuid,
+        EVT_SIGNAL_EXIT_BOOT_SERVICES);
+}
+
+EFI_STATUS bs_exit_boot_services(EFI_HANDLE ImageHandle, UINTN MapKey)
+{
+    EFI_STATUS st;
+
+    (void)ImageHandle;
+    st = fw_prepare_exit_boot_services(MapKey);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
+    fw_signal_exit_boot_services_events();
+    graphics_prepare_os_handoff(fw_handoff_vga_console_primary());
     /*
      * The loader owns RR/TR state by this point and may have installed RID=1
      * region-7 TR mappings before ExitBootServices().  Resetting to the
      * firmware SAL RR values here would make those TRs unreachable.
      */
+    efi_exit_boot_services_update_system_table();
     mBootServicesExited = 1;
     return EFI_SUCCESS;
 }
@@ -9905,6 +10429,11 @@ typedef struct {
     BOOLEAN SetsToZero;
 } EFI_TIME_CAPABILITIES;
 
+#define EFI_TIME_ADJUST_DAYLIGHT 0x01U
+#define EFI_TIME_IN_DAYLIGHT     0x02U
+#define EFI_TIME_DAYLIGHT_MASK   \
+    (EFI_TIME_ADJUST_DAYLIGHT | EFI_TIME_IN_DAYLIGHT)
+
 #define FW_RTC_STATE_MAGIC 0x54464f3436545249ULL /* "IRT64OFT" */
 #define FW_RTC_STATE_VERSION 1U
 
@@ -9956,7 +10485,8 @@ static BOOLEAN efi_time_valid(const EFI_TIME *Time)
     if (Time->Year < 1900 || Time->Year > 9999 ||
         Time->Month == 0 || Time->Month > 12 ||
         Time->Hour > 23 || Time->Minute > 59 || Time->Second > 59 ||
-        Time->Nanosecond >= FW_NANOSECONDS_PER_SECOND) {
+        Time->Nanosecond >= FW_NANOSECONDS_PER_SECOND ||
+        (Time->Daylight & ~EFI_TIME_DAYLIGHT_MASK) != 0) {
         return 0;
     }
 
@@ -10067,6 +10597,7 @@ static BOOLEAN fw_rtc_state_valid(const FW_RTC_STATE *State)
            State->Version == FW_RTC_STATE_VERSION &&
            State->Reserved == 0 && State->Pad == 0 &&
            State->Nanosecond < FW_NANOSECONDS_PER_SECOND &&
+           (State->Daylight & ~EFI_TIME_DAYLIGHT_MASK) == 0 &&
            (State->TimeZone == 2047 ||
             (State->TimeZone >= -1440 && State->TimeZone <= 1440));
 }
@@ -10250,10 +10781,12 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
         .Second = 58,
         .Nanosecond = 123000000,
         .TimeZone = 0,
-        .Daylight = 0,
+        .Daylight = EFI_TIME_DAYLIGHT_MASK,
     };
     EFI_TIME invalid = custom;
+    EFI_TIME invalid_daylight = custom;
     EFI_TIME alarm;
+    EFI_TIME saved_alarm;
     BOOLEAN enabled;
     BOOLEAN pending;
 
@@ -10271,8 +10804,11 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
     saved_state = *fw_rtc_state();
     mRtcSelftestActive = 1;
     invalid.Month = 13;
+    invalid_daylight.Daylight = (UINT8)~EFI_TIME_DAYLIGHT_MASK;
     if (rs_set_time(NULL) != EFI_INVALID_PARAMETER ||
         rs_set_time(&invalid) != EFI_INVALID_PARAMETER ||
+        rs_set_time(&invalid_daylight) != EFI_INVALID_PARAMETER ||
+        fw_rtc_state()->Daylight != saved_state.Daylight ||
         rs_set_time(&custom) != EFI_SUCCESS ||
         rs_get_time(&now, NULL) != EFI_SUCCESS ||
         now.Year != custom.Year ||
@@ -10281,7 +10817,8 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
         now.Hour != custom.Hour ||
         now.Minute != custom.Minute ||
         now.Second < custom.Second ||
-        now.Nanosecond != custom.Nanosecond) {
+        now.Nanosecond != custom.Nanosecond ||
+        now.Daylight != custom.Daylight) {
         *fw_rtc_state() = saved_state;
         mRtcSelftestActive = 0;
         return 0;
@@ -10290,6 +10827,16 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
     mRtcSelftestActive = 0;
     if (rs_get_wakeup_time(&enabled, &pending, &alarm) != EFI_SUCCESS ||
         enabled || pending || !efi_time_valid(&alarm)) {
+        return 0;
+    }
+    saved_alarm = alarm;
+    if (rs_set_wakeup_time(1, &invalid_daylight) != EFI_INVALID_PARAMETER ||
+        rs_get_wakeup_time(&enabled, &pending, &alarm) != EFI_SUCCESS ||
+        enabled || pending || efi_time_compare(&alarm, &saved_alarm) != 0 ||
+        alarm.TimeZone != saved_alarm.TimeZone ||
+        alarm.Daylight != saved_alarm.Daylight) {
+        mWakeupTime = saved_alarm;
+        rs_disable_wakeup_time();
         return 0;
     }
     return rs_set_wakeup_time(0, NULL) == EFI_SUCCESS &&
@@ -10404,6 +10951,9 @@ static void efi_coalesce_memory_map(void)
 static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
                                      UINT64 End, UINT64 Attribute)
 {
+    EFI_MEMORY_DESCRIPTOR saved_map[MEMORY_MAP_MAX];
+    UINTN saved_entries;
+    UINTN saved_key;
     UINT64 current = Start & ~0xfffULL;
     UINT64 aligned_end;
     BOOLEAN changed = 0;
@@ -10418,6 +10968,11 @@ static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
         return 0;
     }
 
+    saved_entries = mMemoryMapEntries;
+    saved_key = mMapKey;
+    fw_copy_mem(saved_map, mMemoryMap,
+                saved_entries * sizeof(mMemoryMap[0]));
+
     while (current < aligned_end) {
         BOOLEAN advanced = 0;
         UINTN i;
@@ -10427,14 +10982,14 @@ static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
             EFI_MEMORY_TYPE type = Type;
             UINT64 desc_start = desc->PhysicalStart;
             UINT64 desc_end = desc_start + (desc->NumberOfPages << 12);
-            UINT64 mark_start = current > desc_start ? current : desc_start;
             UINT64 mark_end = aligned_end < desc_end ? aligned_end : desc_end;
             EFI_MEMORY_DESCRIPTOR marked = *desc;
             EFI_MEMORY_DESCRIPTOR after = *desc;
             BOOLEAN has_before;
             BOOLEAN has_after;
 
-            if (mark_start >= mark_end) {
+            /* Every byte in the requested range must already be described. */
+            if (current < desc_start || current >= desc_end) {
                 continue;
             }
 
@@ -10444,13 +10999,13 @@ static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
                 break;
             }
 
-            has_before = mark_start > desc_start;
+            has_before = current > desc_start;
             has_after = mark_end < desc_end;
 
             marked.Type = type;
-            marked.PhysicalStart = mark_start;
+            marked.PhysicalStart = current;
             marked.VirtualStart = 0;
-            marked.NumberOfPages = (mark_end - mark_start) >> 12;
+            marked.NumberOfPages = (mark_end - current) >> 12;
             marked.Attribute = Attribute;
 
             after.PhysicalStart = mark_end;
@@ -10458,16 +11013,16 @@ static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
             after.NumberOfPages = (desc_end - mark_end) >> 12;
 
             if (has_before) {
-                desc->NumberOfPages = (mark_start - desc_start) >> 12;
+                desc->NumberOfPages = (current - desc_start) >> 12;
                 if (has_after) {
                     if (mMemoryMapEntries + 2U > MEMORY_MAP_MAX) {
-                        return 0;
+                        goto rollback;
                     }
                     efi_insert_memory_descriptor(i + 1U, marked);
                     efi_insert_memory_descriptor(i + 2U, after);
                 } else {
                     if (mMemoryMapEntries + 1U > MEMORY_MAP_MAX) {
-                        return 0;
+                        goto rollback;
                     }
                     efi_insert_memory_descriptor(i + 1U, marked);
                 }
@@ -10475,7 +11030,7 @@ static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
                 *desc = marked;
                 if (has_after) {
                     if (mMemoryMapEntries + 1U > MEMORY_MAP_MAX) {
-                        return 0;
+                        goto rollback;
                     }
                     efi_insert_memory_descriptor(i + 1U, after);
                 }
@@ -10487,11 +11042,7 @@ static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
         }
 
         if (!advanced) {
-            if (changed) {
-                efi_coalesce_memory_map();
-                mMapKey++;
-            }
-            return 0;
+            goto rollback;
         }
     }
 
@@ -10500,6 +11051,13 @@ static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
         mMapKey++;
     }
     return 1;
+
+rollback:
+    fw_copy_mem(mMemoryMap, saved_map,
+                saved_entries * sizeof(mMemoryMap[0]));
+    mMemoryMapEntries = saved_entries;
+    mMapKey = saved_key;
+    return 0;
 }
 
 static BOOLEAN efi_memory_map_has_descriptor(EFI_MEMORY_TYPE Type,
@@ -10636,6 +11194,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     static EFI_MEMORY_DESCRIPTOR saved_map[MEMORY_MAP_MAX];
     static EFI_MEMORY_DESCRIPTOR probe_map[MEMORY_MAP_MAX];
     static EFI_PAGE_ALLOCATION_RECORD saved_pages[PAGE_ALLOCATION_MAX];
+    static EFI_PAGE_ALLOCATION_RECORD failed_pages[PAGE_ALLOCATION_MAX];
     static EFI_POOL_ALLOCATION_RECORD saved_pool[POOL_ALLOCATION_MAX];
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
     UINTN runtime_code_start = (UINTN)&__runtime_code_start;
@@ -10649,10 +11208,20 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     UINTN saved_key = mMapKey;
     EFI_PHYSICAL_ADDRESS saved_next_page_addr = mNextPageAddr;
     EFI_PHYSICAL_ADDRESS expected_pool_address;
+    EFI_PHYSICAL_ADDRESS failed_address;
+    EFI_PHYSICAL_ADDRESS failed_next_page_addr;
+    EFI_PHYSICAL_ADDRESS conventional_any;
+    EFI_PHYSICAL_ADDRESS conventional_duplicate;
+    EFI_PHYSICAL_ADDRESS conventional_max_one;
+    EFI_PHYSICAL_ADDRESS conventional_max_two;
     EFI_PHYSICAL_ADDRESS loader_address;
     EFI_PHYSICAL_ADDRESS runtime_address;
+    EFI_PHYSICAL_ADDRESS allocation_next_page_addr;
     VOID *pool = NULL;
+    VOID *conventional_pool_one = NULL;
+    VOID *conventional_pool_two = NULL;
     UINT64 pool_start = 0;
+    UINTN allocation_key;
     UINTN probe_map_size;
     UINTN probe_key;
     UINTN descriptor_size;
@@ -10664,6 +11233,39 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     fw_copy_mem(saved_map, mMemoryMap, sizeof(saved_map));
     fw_copy_mem(saved_pages, mPageAllocations, sizeof(saved_pages));
     fw_copy_mem(saved_pool, mPoolAllocations, sizeof(saved_pool));
+
+    probe_map_size = 0;
+    descriptor_size = 0;
+    descriptor_version = 0;
+    st = bs_get_memory_map(&probe_map_size, NULL, NULL,
+                           &descriptor_size, &descriptor_version);
+    if (st != EFI_BUFFER_TOO_SMALL || probe_map_size == 0 ||
+        descriptor_size != sizeof(EFI_MEMORY_DESCRIPTOR) ||
+        descriptor_version != EFI_MEMORY_DESCRIPTOR_VERSION) {
+        ok = 0;
+        goto out;
+    }
+
+    probe_map_size = saved_entries * sizeof(EFI_MEMORY_DESCRIPTOR);
+    descriptor_size = 0;
+    descriptor_version = 0;
+    st = bs_get_memory_map(&probe_map_size, probe_map, NULL,
+                           &descriptor_size, &descriptor_version);
+    if (st != EFI_INVALID_PARAMETER) {
+        ok = 0;
+        goto out;
+    }
+
+    probe_map_size = sizeof(probe_map);
+    probe_key = ~(UINTN)0 - 0x4321U;
+    descriptor_size = 0;
+    descriptor_version = 0;
+    st = bs_get_memory_map(&probe_map_size, NULL, &probe_key,
+                           &descriptor_size, &descriptor_version);
+    if (st != EFI_INVALID_PARAMETER) {
+        ok = 0;
+        goto out;
+    }
 
     probe_map_size = 0;
     probe_key = ~(UINTN)0 - 0x1234U;
@@ -10680,7 +11282,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    probe_map_size = sizeof(probe_map);
+    probe_map_size = saved_entries * sizeof(EFI_MEMORY_DESCRIPTOR);
     probe_key = 0;
     descriptor_size = 0;
     descriptor_version = 0;
@@ -10935,6 +11537,245 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
             EfiConventionalMemory, pool_start,
             pool_start + IA64_EFI_MEMORY_ALIGN, EFI_MEMORY_WB)) {
         ok = 0;
+        goto out;
+    }
+
+    /*
+     * EfiConventionalMemory is a legal allocation type even though marking
+     * it leaves the visible descriptor type unchanged.  Allocation records
+     * must therefore keep page and pool requests from reusing the range.
+     */
+    allocation_next_page_addr = mNextPageAddr;
+    conventional_max_one = ~0ULL;
+    allocation_key = mMapKey;
+    if (bs_allocate_pages(AllocateMaxAddress, EfiConventionalMemory, 1,
+                          &conventional_max_one) != EFI_SUCCESS ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+    conventional_max_two = ~0ULL;
+    allocation_key = mMapKey;
+    if (bs_allocate_pages(AllocateMaxAddress, EfiConventionalMemory, 1,
+                          &conventional_max_two) != EFI_SUCCESS ||
+        conventional_max_two == conventional_max_one ||
+        ranges_overlap(conventional_max_one, EFI_PAGE_SIZE,
+                       conventional_max_two, EFI_PAGE_SIZE) ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+
+    conventional_duplicate = conventional_max_one;
+    allocation_key = mMapKey;
+    if (bs_allocate_pages(AllocateAddress, EfiConventionalMemory, 1,
+                          &conventional_duplicate) != EFI_NOT_FOUND ||
+        conventional_duplicate != conventional_max_one ||
+        mMapKey != allocation_key) {
+        ok = 0;
+        goto out;
+    }
+
+    allocation_key = mMapKey;
+    if (bs_allocate_pool(EfiConventionalMemory, 17,
+                         &conventional_pool_one) != EFI_SUCCESS ||
+        conventional_pool_one == NULL ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+    allocation_key = mMapKey;
+    if (bs_allocate_pool(EfiConventionalMemory, 17,
+                         &conventional_pool_two) != EFI_SUCCESS ||
+        conventional_pool_two == NULL ||
+        conventional_pool_two == conventional_pool_one ||
+        ranges_overlap((UINTN)conventional_pool_one, EFI_PAGE_SIZE,
+                       (UINTN)conventional_pool_two, EFI_PAGE_SIZE) ||
+        ranges_overlap((UINTN)conventional_pool_one, EFI_PAGE_SIZE,
+                       conventional_max_one, EFI_PAGE_SIZE) ||
+        ranges_overlap((UINTN)conventional_pool_one, EFI_PAGE_SIZE,
+                       conventional_max_two, EFI_PAGE_SIZE) ||
+        ranges_overlap((UINTN)conventional_pool_two, EFI_PAGE_SIZE,
+                       conventional_max_one, EFI_PAGE_SIZE) ||
+        ranges_overlap((UINTN)conventional_pool_two, EFI_PAGE_SIZE,
+                       conventional_max_two, EFI_PAGE_SIZE) ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+
+    conventional_duplicate = (UINTN)conventional_pool_one;
+    allocation_key = mMapKey;
+    if (bs_allocate_pages(AllocateAddress, EfiConventionalMemory, 1,
+                          &conventional_duplicate) != EFI_NOT_FOUND ||
+        conventional_duplicate != (UINTN)conventional_pool_one ||
+        mMapKey != allocation_key) {
+        ok = 0;
+        goto out;
+    }
+
+    /* Exercise forward search and wrap while high ranges block it. */
+    mNextPageAddr = conventional_max_two;
+    conventional_any = 0xfeedfacefeedfaceULL;
+    allocation_key = mMapKey;
+    if (bs_allocate_pages(AllocateAnyPages, EfiConventionalMemory, 1,
+                          &conventional_any) != EFI_SUCCESS ||
+        conventional_any == conventional_max_one ||
+        conventional_any == conventional_max_two ||
+        ranges_overlap(conventional_any, EFI_PAGE_SIZE,
+                       (UINTN)conventional_pool_one, EFI_PAGE_SIZE) ||
+        ranges_overlap(conventional_any, EFI_PAGE_SIZE,
+                       (UINTN)conventional_pool_two, EFI_PAGE_SIZE) ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+
+    allocation_key = mMapKey;
+    if (bs_free_pages(conventional_any, 1) != EFI_SUCCESS ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+    allocation_key = mMapKey;
+    if (bs_free_pool(conventional_pool_two) != EFI_SUCCESS ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+    conventional_pool_two = NULL;
+    allocation_key = mMapKey;
+    if (bs_free_pool(conventional_pool_one) != EFI_SUCCESS ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+    conventional_pool_one = NULL;
+    allocation_key = mMapKey;
+    if (bs_free_pages(conventional_max_two, 1) != EFI_SUCCESS ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+    allocation_key = mMapKey;
+    if (bs_free_pages(conventional_max_one, 1) != EFI_SUCCESS ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+
+    /* A freed conventional allocation must become available again. */
+    conventional_duplicate = conventional_max_one;
+    allocation_key = mMapKey;
+    if (bs_allocate_pages(AllocateAddress, EfiConventionalMemory, 1,
+                          &conventional_duplicate) != EFI_SUCCESS ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+    allocation_key = mMapKey;
+    if (bs_free_pages(conventional_duplicate, 1) != EFI_SUCCESS ||
+        mMapKey != allocation_key + 1U) {
+        ok = 0;
+        goto out;
+    }
+    mNextPageAddr = allocation_next_page_addr;
+
+    /* A range with an undescribed gap must fail without skipping the gap. */
+    mMemoryMap[0].Type = EfiConventionalMemory;
+    mMemoryMap[0].PhysicalStart = 0x1001000ULL;
+    mMemoryMap[0].VirtualStart = 0;
+    mMemoryMap[0].NumberOfPages = 1;
+    mMemoryMap[0].Attribute = EFI_MEMORY_WB;
+    mMemoryMapEntries = 1;
+    mMapKey = saved_key;
+    if (efi_mark_memory_range(EfiLoaderData,
+                              mMemoryMap[0].PhysicalStart - EFI_PAGE_SIZE,
+                              mMemoryMap[0].PhysicalStart + EFI_PAGE_SIZE,
+                              EFI_MEMORY_WB) ||
+        mMemoryMapEntries != 1 ||
+        mMemoryMap[0].Type != EfiConventionalMemory ||
+        mMemoryMap[0].PhysicalStart != 0x1001000ULL ||
+        mMemoryMap[0].NumberOfPages != 1 ||
+        mMapKey != saved_key) {
+        ok = 0;
+        goto out;
+    }
+
+    /* A failed descriptor split must leave the memory map and key intact. */
+    for (i = 0; i < MEMORY_MAP_MAX; i++) {
+        mMemoryMap[i].Type = EfiReservedMemoryType;
+        mMemoryMap[i].PhysicalStart = 0x1000000ULL + (UINT64)i * 0x10000ULL;
+        mMemoryMap[i].VirtualStart = 0;
+        mMemoryMap[i].NumberOfPages = 1;
+        mMemoryMap[i].Attribute = EFI_MEMORY_WB;
+    }
+    mMemoryMap[0].Type = EfiConventionalMemory;
+    mMemoryMap[0].NumberOfPages = 1;
+    mMemoryMap[1].Type = EfiConventionalMemory;
+    mMemoryMap[1].PhysicalStart =
+        mMemoryMap[0].PhysicalStart + EFI_PAGE_SIZE;
+    mMemoryMap[1].NumberOfPages = 4;
+    mMemoryMapEntries = MEMORY_MAP_MAX;
+    mMapKey = saved_key;
+    if (efi_mark_memory_range(EfiLoaderData,
+                              mMemoryMap[0].PhysicalStart,
+                              mMemoryMap[0].PhysicalStart +
+                              3U * EFI_PAGE_SIZE,
+                              EFI_MEMORY_WB) ||
+        mMemoryMapEntries != MEMORY_MAP_MAX ||
+        mMemoryMap[0].Type != EfiConventionalMemory ||
+        mMemoryMap[0].NumberOfPages != 1 ||
+        mMemoryMap[1].Type != EfiConventionalMemory ||
+        mMemoryMap[1].PhysicalStart !=
+            mMemoryMap[0].PhysicalStart + EFI_PAGE_SIZE ||
+        mMemoryMap[1].NumberOfPages != 4 ||
+        mMapKey != saved_key) {
+        ok = 0;
+        goto out;
+    }
+
+    /* AllocatePages failure must not advance its cursor or record a page. */
+    for (i = 0; i < MEMORY_MAP_MAX; i++) {
+        mMemoryMap[i].Type = EfiReservedMemoryType;
+        mMemoryMap[i].PhysicalStart = 0x2000000ULL +
+                                      (UINT64)i * 0x10000ULL;
+        mMemoryMap[i].VirtualStart = 0;
+        mMemoryMap[i].NumberOfPages = 1;
+        mMemoryMap[i].Attribute = EFI_MEMORY_WB;
+    }
+    mMemoryMap[0].Type = EfiConventionalMemory;
+    mMemoryMap[0].NumberOfPages = 4;
+    mMemoryMapEntries = MEMORY_MAP_MAX;
+    mMapKey = saved_key;
+    mNextPageAddr = mMemoryMap[0].PhysicalStart + EFI_PAGE_SIZE;
+    failed_next_page_addr = mNextPageAddr;
+    failed_address = 0xfeedfacefeedfaceULL;
+    fw_set_mem(mPageAllocations, sizeof(mPageAllocations), 0);
+    fw_copy_mem(failed_pages, mPageAllocations, sizeof(failed_pages));
+    fw_copy_mem(probe_map, mMemoryMap, sizeof(probe_map));
+
+    st = bs_allocate_pages(AllocateAnyPages, EfiLoaderData, 1,
+                           &failed_address);
+    if (st != EFI_OUT_OF_RESOURCES ||
+        failed_address != 0xfeedfacefeedfaceULL ||
+        mMemoryMapEntries != MEMORY_MAP_MAX || mMapKey != saved_key ||
+        mNextPageAddr != failed_next_page_addr) {
+        ok = 0;
+        goto out;
+    }
+    for (i = 0; i < sizeof(probe_map); i++) {
+        if (((UINT8 *)mMemoryMap)[i] != ((UINT8 *)probe_map)[i]) {
+            ok = 0;
+            goto out;
+        }
+    }
+    for (i = 0; i < sizeof(failed_pages); i++) {
+        if (((UINT8 *)mPageAllocations)[i] !=
+            ((UINT8 *)failed_pages)[i]) {
+            ok = 0;
+            goto out;
+        }
     }
 
 out:
@@ -11135,6 +11976,8 @@ static void efi_init_boot_services(void)
 {
     mCurrentTpl = TPL_APPLICATION;
     mEventNotifyOrder = 0;
+    mBeforeExitBootServicesSignaled = 0;
+    mExitBootServicesEventsSignaled = 0;
     mBootServices.Hdr.Signature = EFI_BOOT_SERVICES_SIGNATURE;
     mBootServices.Hdr.Revision = EFI_BOOT_SERVICES_REVISION;
     mBootServices.Hdr.HeaderSize = sizeof(mBootServices);
@@ -12759,6 +13602,18 @@ static void uefi_event_services_selftest_callback(EFI_EVENT Event,
     }
 }
 
+static void uefi_event_services_selftest_map_change(EFI_EVENT Event,
+                                                     VOID *Context)
+{
+    UINTN *count = (UINTN *)Context;
+
+    (void)Event;
+    if (count != NULL) {
+        *count = *count + 1U;
+    }
+    mMapKey++;
+}
+
 static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
 {
     static const UINT8 test_group[16] = {
@@ -12775,6 +13630,7 @@ static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
     st = bs_create_event(0, 0, NULL, NULL, &event);
     if (st != EFI_SUCCESS ||
         bs_check_event(event) != EFI_NOT_READY ||
+        bs_set_timer(event, TIMER_RELATIVE, 1) != EFI_INVALID_PARAMETER ||
         bs_signal_event(event) != EFI_SUCCESS ||
         bs_check_event(event) != EFI_SUCCESS ||
         bs_check_event(event) != EFI_NOT_READY) {
@@ -12808,6 +13664,293 @@ static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
         }
     }
 
+    event = NULL;
+    st = bs_create_event(0x00000001U, 0, NULL, NULL, &event);
+    if (st != EFI_INVALID_PARAMETER) {
+        ok = 0;
+        if (event != NULL) {
+            (void)bs_close_event(event);
+            event = NULL;
+        }
+    }
+
+    notify_count = 0;
+    st = bs_create_event(EVT_RUNTIME | EVT_RUNTIME_CONTEXT |
+                         EVT_NOTIFY_SIGNAL,
+                         TPL_CALLBACK,
+                         uefi_event_services_selftest_callback,
+                         &notify_count, &event);
+    if (st != EFI_SUCCESS ||
+        bs_signal_event(event) != EFI_SUCCESS || notify_count != 1) {
+        ok = 0;
+    }
+    if (event != NULL) {
+        (void)bs_close_event(event);
+        event = NULL;
+    }
+
+    {
+        EFI_EVENT invalid_event = (EFI_EVENT)(UINTN)1;
+        EFI_EVENT invalid_events[1] = { invalid_event };
+        UINTN index = ~(UINTN)0;
+
+        if (bs_set_timer(invalid_event, TIMER_RELATIVE, 1) !=
+                EFI_INVALID_PARAMETER ||
+            bs_signal_event(invalid_event) != EFI_INVALID_PARAMETER ||
+            bs_close_event(invalid_event) != EFI_INVALID_PARAMETER ||
+            bs_check_event(invalid_event) != EFI_INVALID_PARAMETER ||
+            bs_wait_for_event(1, invalid_events, &index) !=
+                EFI_INVALID_PARAMETER ||
+            index != 0) {
+            ok = 0;
+        }
+    }
+
+    {
+        FW_EVENT_RECORD *timer_rec;
+
+        event = NULL;
+        st = bs_create_event(EVT_TIMER, 0, NULL, NULL, &event);
+        timer_rec = fw_event_record_from_handle(event);
+        if (st != EFI_SUCCESS || timer_rec == NULL) {
+            ok = 0;
+        }
+        if (timer_rec != NULL) {
+            if (bs_set_timer(event, TIMER_RELATIVE + 1U, 0) !=
+                    EFI_INVALID_PARAMETER ||
+                bs_set_timer(event, TIMER_PERIODIC, 0) != EFI_SUCCESS ||
+                !timer_rec->timer_active ||
+                timer_rec->timer_type != TIMER_PERIODIC ||
+                timer_rec->timer_remaining_100ns != 0 ||
+                timer_rec->timer_period_100ns != 0 ||
+                timer_rec->timer_partial_ticks != 0) {
+                ok = 0;
+            }
+            timer_rec->timer_last_tick = 100;
+            if (fw_event_timer_consume(timer_rec, 100) ||
+                !fw_event_timer_consume(timer_rec, 101) ||
+                !timer_rec->timer_active ||
+                timer_rec->timer_remaining_100ns != 0 ||
+                timer_rec->timer_last_tick != 101 ||
+                bs_set_timer(event, TIMER_CANCEL, 0) != EFI_SUCCESS ||
+                timer_rec->timer_active) {
+                ok = 0;
+            }
+
+            if (bs_signal_event(event) != EFI_SUCCESS ||
+                bs_set_timer(event, TIMER_RELATIVE, ~(UINT64)0) !=
+                    EFI_SUCCESS ||
+                !timer_rec->signaled ||
+                timer_rec->timer_remaining_100ns != ~(UINT64)0 ||
+                timer_rec->timer_partial_ticks != 0 ||
+                timer_rec->timer_period_100ns != 0) {
+                ok = 0;
+            }
+            timer_rec->timer_last_tick = 100;
+            if (fw_event_timer_consume(
+                    timer_rec, 100 + FW_ITC_TICKS_PER_100NS) ||
+                timer_rec->timer_remaining_100ns != ~(UINT64)0 - 1U ||
+                timer_rec->timer_partial_ticks != 0 ||
+                !timer_rec->timer_active || !timer_rec->signaled) {
+                ok = 0;
+            }
+            if (bs_set_timer(event, TIMER_CANCEL, 0) != EFI_SUCCESS ||
+                !timer_rec->signaled) {
+                ok = 0;
+            }
+            fw_event_consume(timer_rec);
+
+            if (bs_set_timer(event, TIMER_PERIODIC, ~(UINT64)0) !=
+                    EFI_SUCCESS ||
+                timer_rec->timer_period_100ns != ~(UINT64)0) {
+                ok = 0;
+            }
+            timer_rec->timer_last_tick = 100;
+            if (fw_event_timer_consume(
+                    timer_rec, 100 + FW_ITC_TICKS_PER_100NS) ||
+                timer_rec->timer_remaining_100ns != ~(UINT64)0 - 1U ||
+                timer_rec->timer_period_100ns != ~(UINT64)0 ||
+                !timer_rec->timer_active ||
+                bs_set_timer(event, TIMER_CANCEL, 0) != EFI_SUCCESS) {
+                ok = 0;
+            }
+
+            timer_rec->timer_active = 1;
+            timer_rec->timer_type = TIMER_RELATIVE;
+            timer_rec->timer_last_tick = ~(UINT64)0 - 9U;
+            timer_rec->timer_remaining_100ns = 1;
+            timer_rec->timer_partial_ticks = 0;
+            timer_rec->timer_period_100ns = 0;
+            if (!fw_event_timer_consume(timer_rec, 10) ||
+                timer_rec->timer_active ||
+                timer_rec->timer_remaining_100ns != 0) {
+                ok = 0;
+            }
+
+            timer_rec->timer_active = 1;
+            timer_rec->timer_type = TIMER_RELATIVE;
+            timer_rec->timer_last_tick = 100;
+            timer_rec->timer_remaining_100ns = 1;
+            timer_rec->timer_partial_ticks = 0;
+            timer_rec->timer_period_100ns = 0;
+            timer_rec->signaled = 1;
+            if (!fw_event_timer_expired_at(
+                    timer_rec, 100 + FW_ITC_TICKS_PER_100NS) ||
+                timer_rec->timer_active || !timer_rec->signaled) {
+                ok = 0;
+            }
+            fw_event_consume(timer_rec);
+
+            timer_rec->timer_active = 1;
+            timer_rec->timer_type = TIMER_RELATIVE;
+            timer_rec->timer_last_tick = 100;
+            timer_rec->timer_remaining_100ns = 1;
+            timer_rec->timer_partial_ticks =
+                FW_ITC_TICKS_PER_100NS - 1U;
+            if (!fw_event_timer_consume(timer_rec, 101) ||
+                timer_rec->timer_active ||
+                timer_rec->timer_partial_ticks != 0) {
+                ok = 0;
+            }
+
+            timer_rec->timer_active = 1;
+            timer_rec->timer_type = TIMER_PERIODIC;
+            timer_rec->timer_last_tick = 100;
+            timer_rec->timer_remaining_100ns = 1;
+            timer_rec->timer_partial_ticks = 0;
+            timer_rec->timer_period_100ns = 1;
+            if (!fw_event_timer_consume(
+                    timer_rec,
+                    100 + 1000000ULL * FW_ITC_TICKS_PER_100NS) ||
+                timer_rec->timer_remaining_100ns != 1 ||
+                timer_rec->timer_partial_ticks != 0 ||
+                !timer_rec->timer_active) {
+                ok = 0;
+            }
+
+            timer_rec->timer_active = 1;
+            timer_rec->timer_type = TIMER_PERIODIC;
+            timer_rec->timer_last_tick = 100;
+            timer_rec->timer_remaining_100ns = 3;
+            timer_rec->timer_partial_ticks = 0;
+            timer_rec->timer_period_100ns = 5;
+            if (!fw_event_timer_consume(
+                    timer_rec,
+                    100 + 15U * FW_ITC_TICKS_PER_100NS + 7U) ||
+                !timer_rec->timer_active ||
+                timer_rec->timer_remaining_100ns != 3 ||
+                timer_rec->timer_partial_ticks != 7 ||
+                !fw_event_timer_consume(
+                    timer_rec,
+                    100 + 18U * FW_ITC_TICKS_PER_100NS) ||
+                timer_rec->timer_remaining_100ns != 5 ||
+                timer_rec->timer_partial_ticks != 0) {
+                ok = 0;
+            }
+
+            if (bs_set_timer(event, TIMER_RELATIVE, 0) != EFI_SUCCESS ||
+                !timer_rec->timer_active ||
+                timer_rec->timer_remaining_100ns != 0) {
+                ok = 0;
+            }
+            timer_rec->timer_last_tick = 500;
+            if (fw_event_timer_consume(timer_rec, 500) ||
+                !timer_rec->timer_active ||
+                !fw_event_timer_consume(timer_rec, 501) ||
+                timer_rec->timer_active) {
+                ok = 0;
+            }
+        }
+        if (event != NULL) {
+            (void)bs_close_event(event);
+            event = NULL;
+        }
+    }
+
+    {
+        EFI_TPL old_tpl;
+
+        notify_count = 0;
+        event = NULL;
+        st = bs_create_event(EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                             uefi_event_services_selftest_callback,
+                             &notify_count, &event);
+        if (st == EFI_SUCCESS) {
+            old_tpl = bs_raise_tpl(TPL_NOTIFY);
+            if (old_tpl != TPL_APPLICATION ||
+                bs_signal_event(event) != EFI_SUCCESS ||
+                bs_signal_event(event) != EFI_SUCCESS ||
+                notify_count != 0) {
+                ok = 0;
+            }
+            bs_restore_tpl(old_tpl);
+            if (notify_count != 1 ||
+                bs_signal_event(event) != EFI_SUCCESS ||
+                notify_count != 2) {
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+        if (event != NULL) {
+            (void)bs_close_event(event);
+            event = NULL;
+        }
+    }
+
+    {
+        EFI_TPL old_tpl;
+
+        notify_count = 0;
+        event = NULL;
+        st = bs_create_event(EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                             uefi_event_services_selftest_callback,
+                             &notify_count, &event);
+        if (st == EFI_SUCCESS) {
+            old_tpl = bs_raise_tpl(TPL_NOTIFY);
+            if (bs_signal_event(event) != EFI_SUCCESS ||
+                bs_close_event(event) != EFI_SUCCESS) {
+                ok = 0;
+            } else {
+                event = NULL;
+            }
+            bs_restore_tpl(old_tpl);
+            if (notify_count != 0) {
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+        if (event != NULL) {
+            (void)bs_close_event(event);
+            event = NULL;
+        }
+    }
+
+    {
+        EFI_EVENT wait_events[1];
+        EFI_TPL old_tpl;
+        UINTN index = 0;
+
+        event = NULL;
+        st = bs_create_event(0, 0, NULL, NULL, &event);
+        if (st == EFI_SUCCESS) {
+            wait_events[0] = event;
+            old_tpl = bs_raise_tpl(TPL_CALLBACK);
+            st = bs_wait_for_event(1, wait_events, &index);
+            bs_restore_tpl(old_tpl);
+            if (st != EFI_UNSUPPORTED) {
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+        if (event != NULL) {
+            (void)bs_close_event(event);
+            event = NULL;
+        }
+    }
+
     {
         IA64_PLABEL temp_plabel =
             *(IA64_PLABEL *)fw_event_notify_address(
@@ -12833,12 +13976,23 @@ static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
     st = bs_create_event_ex(EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_CALLBACK,
                             uefi_event_services_selftest_callback,
                             &notify_count, NULL, &event);
-    if (st != EFI_SUCCESS) {
+    if (st != EFI_INVALID_PARAMETER) {
         ok = 0;
+        if (event != NULL) {
+            (void)bs_close_event(event);
+            event = NULL;
+        }
     }
-    if (event != NULL) {
-        (void)bs_close_event(event);
-        event = NULL;
+
+    st = bs_create_event_ex(EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE, TPL_CALLBACK,
+                            uefi_event_services_selftest_callback,
+                            &notify_count, NULL, &event);
+    if (st != EFI_INVALID_PARAMETER) {
+        ok = 0;
+        if (event != NULL) {
+            (void)bs_close_event(event);
+            event = NULL;
+        }
     }
 
     st = bs_create_event_ex(EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_CALLBACK,
@@ -12877,6 +14031,144 @@ static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
     }
     if (group_wait != NULL) {
         (void)bs_close_event(group_wait);
+    }
+
+    {
+        EFI_EVENT exit_group = NULL;
+        EFI_EVENT exit_legacy = NULL;
+        BOOLEAN saved_exit_signaled = mExitBootServicesEventsSignaled;
+
+        mExitBootServicesEventsSignaled = 0;
+        notify_count = 0;
+        st = bs_create_event_ex(EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                                uefi_event_services_selftest_callback,
+                                &notify_count,
+                                (void *)gEfiEventGroupExitBootServicesGuid,
+                                &exit_group);
+        if (st != EFI_SUCCESS) {
+            ok = 0;
+        }
+        st = bs_create_event(EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_CALLBACK,
+                             uefi_event_services_selftest_callback,
+                             &notify_count, &exit_legacy);
+        if (st != EFI_SUCCESS) {
+            ok = 0;
+        }
+        if (exit_group != NULL && exit_legacy != NULL) {
+            if (bs_signal_event(exit_group) != EFI_SUCCESS ||
+                notify_count != 2) {
+                ok = 0;
+            }
+            notify_count = 0;
+            fw_signal_exit_boot_services_events();
+            fw_signal_exit_boot_services_events();
+            if (notify_count != 2) {
+                ok = 0;
+            }
+        }
+        if (exit_group != NULL) {
+            (void)bs_close_event(exit_group);
+        }
+        if (exit_legacy != NULL) {
+            (void)bs_close_event(exit_legacy);
+        }
+        mExitBootServicesEventsSignaled = saved_exit_signaled;
+    }
+
+    {
+        EFI_EVENT before_event = NULL;
+        EFI_EVENT exit_event = NULL;
+        EFI_EVENT timer_event = NULL;
+        FW_EVENT_RECORD saved_timer_state[FW_EVENT_MAX];
+        FW_EVENT_RECORD *timer_rec = NULL;
+        BOOLEAN saved_before_signaled = mBeforeExitBootServicesSignaled;
+        BOOLEAN saved_exit_signaled = mExitBootServicesEventsSignaled;
+        UINTN saved_map_key = mMapKey;
+        UINTN exit_notify_count = 0;
+        UINTN first_map_key;
+        UINTN i;
+
+        fw_copy_mem(saved_timer_state, mEventRecords,
+                    sizeof(saved_timer_state));
+        mBeforeExitBootServicesSignaled = 0;
+        mExitBootServicesEventsSignaled = 0;
+        notify_count = 0;
+        st = bs_create_event(EVT_TIMER, 0, NULL, NULL, &timer_event);
+        timer_rec = fw_event_record_from_handle(timer_event);
+        if (st != EFI_SUCCESS || timer_rec == NULL ||
+            bs_set_timer(timer_event, TIMER_PERIODIC, 100000U) !=
+                EFI_SUCCESS ||
+            !timer_rec->timer_active) {
+            ok = 0;
+        }
+        st = bs_create_event(EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_CALLBACK,
+                             uefi_event_services_selftest_callback,
+                             &exit_notify_count, &exit_event);
+        if (st != EFI_SUCCESS) {
+            ok = 0;
+        }
+        st = bs_create_event_ex(
+            EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+            uefi_event_services_selftest_map_change, &notify_count,
+            (void *)gEfiEventGroupBeforeExitBootServicesGuid,
+            &before_event);
+        if (st == EFI_SUCCESS) {
+            first_map_key = mMapKey;
+            st = fw_prepare_exit_boot_services(first_map_key);
+            if (st != EFI_INVALID_PARAMETER || notify_count != 1 ||
+                !mBeforeExitBootServicesSignaled ||
+                exit_notify_count != 0 || timer_rec == NULL ||
+                timer_rec->timer_active || timer_rec->timer_type != 0 ||
+                timer_rec->timer_last_tick != 0 ||
+                timer_rec->timer_remaining_100ns != 0 ||
+                timer_rec->timer_partial_ticks != 0 ||
+                timer_rec->timer_period_100ns != 0) {
+                ok = 0;
+            }
+            st = fw_prepare_exit_boot_services(mMapKey);
+            if (st != EFI_SUCCESS || notify_count != 1 ||
+                exit_notify_count != 0 || timer_rec == NULL ||
+                timer_rec->timer_active) {
+                ok = 0;
+            }
+            fw_signal_exit_boot_services_events();
+            fw_signal_exit_boot_services_events();
+            if (exit_notify_count != 1) {
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+        if (before_event != NULL) {
+            (void)bs_close_event(before_event);
+        }
+        if (exit_event != NULL) {
+            (void)bs_close_event(exit_event);
+        }
+        if (timer_event != NULL) {
+            (void)bs_close_event(timer_event);
+        }
+        for (i = 0; i < FW_EVENT_MAX; i++) {
+            mEventRecords[i].timer_active =
+                saved_timer_state[i].timer_active;
+            mEventRecords[i].timer_type = saved_timer_state[i].timer_type;
+            mEventRecords[i].timer_last_tick =
+                saved_timer_state[i].timer_last_tick;
+            mEventRecords[i].timer_remaining_100ns =
+                saved_timer_state[i].timer_remaining_100ns;
+            mEventRecords[i].timer_partial_ticks =
+                saved_timer_state[i].timer_partial_ticks;
+            mEventRecords[i].timer_period_100ns =
+                saved_timer_state[i].timer_period_100ns;
+        }
+        mMapKey = saved_map_key;
+        mBeforeExitBootServicesSignaled = saved_before_signaled;
+        mExitBootServicesEventsSignaled = saved_exit_signaled;
+    }
+
+    if (bs_set_watchdog_timer(300, 0, 0, NULL) != EFI_UNSUPPORTED ||
+        mCurrentTpl != TPL_APPLICATION) {
+        ok = 0;
     }
 
     return ok;
@@ -13148,11 +14440,6 @@ typedef struct {
 #define IA64_BUNDLE_TEMPLATE_MASK      0x1FULL
 #define IA64_SLOT_MASK                 0x1FFFFFFFFFFULL
 
-static UINT64 pe_align_up(UINT64 value, UINT64 align)
-{
-    return (value + align - 1) & ~(align - 1);
-}
-
 static UINT64 pe_loaded_image_allocation_size(UINTN ImageSize,
                                               EFI_MEMORY_TYPE CodeType)
 {
@@ -13264,11 +14551,13 @@ static UINT64 pe_image_allocation_floor(BOOLEAN RuntimeImage)
 static BOOLEAN pe_image_base_available(UINT64 base, UINT64 size,
                                        BOOLEAN RuntimeImage)
 {
-    if (base < pe_image_allocation_floor(RuntimeImage)) {
+    if (base < pe_image_allocation_floor(RuntimeImage) ||
+        (base & (IA64_EFI_IMAGE_ALIGN - 1U)) != 0) {
         return 0;
     }
 
     return pe_image_base_is_conventional(base, size) &&
+           !efi_find_allocation_overlap(base, base + size, NULL, NULL) &&
            !pe_image_base_in_use(base, size);
 }
 
@@ -13276,9 +14565,16 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
                                    BOOLEAN RuntimeImage)
 {
     UINT64 base;
-    UINT64 aligned_size = pe_align_up(size, IA64_EFI_IMAGE_ALIGN);
+    UINT64 aligned_size;
     UINT64 floor = pe_image_allocation_floor(RuntimeImage);
-    UINTN i;
+    UINT64 cursor = 0;
+    BOOLEAN cursor_valid;
+    unsigned pass;
+
+    if (size == 0 ||
+        !efi_align_up_u64(size, IA64_EFI_IMAGE_ALIGN, &aligned_size)) {
+        return 0;
+    }
 
     if (preferred_base != 0 &&
         pe_image_base_available(preferred_base, aligned_size,
@@ -13286,43 +14582,66 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
         return preferred_base;
     }
 
-    for (i = 0; i < mMemoryMapEntries; i++) {
-        EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
-        UINT64 desc_start;
-        UINT64 desc_end;
+    cursor_valid = efi_align_up_u64(mNextPeImageBase,
+                                    IA64_EFI_IMAGE_ALIGN, &cursor);
+    for (pass = 0; pass < 2; pass++) {
+        UINTN i;
 
-        if (desc->Type != EfiConventionalMemory) {
-            continue;
-        }
+        for (i = 0; i < mMemoryMapEntries; i++) {
+            EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
+            UINT64 desc_start;
+            UINT64 desc_end;
 
-        desc_start = pe_align_up(desc->PhysicalStart, IA64_EFI_IMAGE_ALIGN);
-        desc_end = desc->PhysicalStart + (desc->NumberOfPages << 12);
-        if (desc_start < floor) {
-            desc_start = pe_align_up(floor, IA64_EFI_IMAGE_ALIGN);
-        }
-        if (desc_start < mNextPeImageBase) {
-            desc_start = pe_align_up(mNextPeImageBase,
-                                     IA64_EFI_IMAGE_ALIGN);
-        }
+            if (desc->Type != EfiConventionalMemory ||
+                !efi_align_up_u64(desc->PhysicalStart,
+                                  IA64_EFI_IMAGE_ALIGN, &desc_start)) {
+                continue;
+            }
 
-        for (base = desc_start;
-             base + aligned_size >= base && base + aligned_size <= desc_end;
-             base += aligned_size) {
-            base = pe_align_up(base, IA64_EFI_IMAGE_ALIGN);
-            if (!pe_image_base_in_use(base, aligned_size)) {
-                mNextPeImageBase = base + aligned_size;
-                return base;
+            desc_end = desc->PhysicalStart +
+                       (desc->NumberOfPages << 12);
+            if (desc_end <= desc->PhysicalStart) {
+                continue;
+            }
+            if (desc_start < floor) {
+                if (!efi_align_up_u64(floor, IA64_EFI_IMAGE_ALIGN,
+                                      &desc_start)) {
+                    continue;
+                }
+            }
+            if (pass == 0) {
+                if (!cursor_valid) {
+                    continue;
+                }
+                if (desc_start < cursor) {
+                    desc_start = cursor;
+                }
+            } else if (cursor_valid && desc_start >= cursor) {
+                continue;
+            }
+            if (desc_start >= desc_end ||
+                desc_end - desc_start < aligned_size) {
+                continue;
+            }
+
+            for (base = desc_start; base <= desc_end - aligned_size;) {
+                if (pass != 0 && cursor_valid && base >= cursor) {
+                    break;
+                }
+                if (pe_image_base_available(base, aligned_size,
+                                            RuntimeImage)) {
+                    mNextPeImageBase = base + aligned_size;
+                    return base;
+                }
+                if (base > ~0ULL - IA64_EFI_IMAGE_ALIGN) {
+                    break;
+                }
+                base += IA64_EFI_IMAGE_ALIGN;
             }
         }
     }
 
-    base = mNextPeImageBase < floor ? floor : mNextPeImageBase;
-    base = pe_align_up(base, IA64_EFI_IMAGE_ALIGN);
-    while (pe_image_base_in_use(base, aligned_size)) {
-        base += aligned_size;
-    }
-    mNextPeImageBase = base + aligned_size;
-    return base;
+    return 0;
 }
 
 static UINT64 pe_ia64_bundle_slot(UINT64 low, UINT64 high, UINTN slot)
@@ -18254,6 +19573,8 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
 {
     static EFI_MEMORY_DESCRIPTOR saved_map[MEMORY_MAP_MAX];
     static EFI_LOADED_IMAGE_RECORD saved_loaded[LOADED_IMAGE_MAX];
+    static EFI_PAGE_ALLOCATION_RECORD saved_pages[PAGE_ALLOCATION_MAX];
+    static EFI_POOL_ALLOCATION_RECORD saved_pool[POOL_ALLOCATION_MAX];
     UINTN saved_entries = mMemoryMapEntries;
     UINTN saved_key = mMapKey;
     UINT64 saved_next_pe_image_base = mNextPeImageBase;
@@ -18262,12 +19583,17 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
 
     fw_copy_mem(saved_map, mMemoryMap, sizeof(saved_map));
     fw_copy_mem(saved_loaded, mLoadedImages, sizeof(saved_loaded));
+    fw_copy_mem(saved_pages, mPageAllocations, sizeof(saved_pages));
+    fw_copy_mem(saved_pool, mPoolAllocations, sizeof(saved_pool));
     fw_set_mem(mMemoryMap, sizeof(mMemoryMap), 0);
     fw_set_mem(mLoadedImages, sizeof(mLoadedImages), 0);
+    fw_set_mem(mPageAllocations, sizeof(mPageAllocations), 0);
+    fw_set_mem(mPoolAllocations, sizeof(mPoolAllocations), 0);
     mMemoryMapEntries = 0;
     mMapKey = 0;
     efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
-                         FW_LOW_FREE_BASE, FW_LOW_IMAGE_END + 0x40000ULL,
+                         FW_LOW_FREE_BASE,
+                         IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x40000ULL,
                          EFI_MEMORY_WB);
 
     mNextPeImageBase = FW_LOW_FREE_BASE;
@@ -18276,6 +19602,26 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
         ok = 0;
         goto out;
     }
+
+    /* Conventional page and pool records remain invisible in the map. */
+    mPageAllocations[0].in_use = 1;
+    mPageAllocations[0].base = FW_LOW_IMAGE_BASE;
+    mPageAllocations[0].pages = IA64_EFI_IMAGE_ALIGN >> 12;
+    mPageAllocations[0].type = EfiConventionalMemory;
+    mPoolAllocations[0].in_use = 1;
+    mPoolAllocations[0].base = FW_LOW_IMAGE_BASE + IA64_EFI_IMAGE_ALIGN;
+    mPoolAllocations[0].pages = IA64_EFI_IMAGE_ALIGN >> 12;
+    mPoolAllocations[0].type = EfiConventionalMemory;
+    mNextPeImageBase = FW_LOW_IMAGE_BASE;
+    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0);
+    if (base != FW_LOW_IMAGE_BASE + 2U * IA64_EFI_IMAGE_ALIGN ||
+        mNextPeImageBase !=
+        FW_LOW_IMAGE_BASE + 3U * IA64_EFI_IMAGE_ALIGN) {
+        ok = 0;
+        goto out;
+    }
+    fw_set_mem(mPageAllocations, sizeof(mPageAllocations), 0);
+    fw_set_mem(mPoolAllocations, sizeof(mPoolAllocations), 0);
 
     mNextPeImageBase = FW_LOW_FREE_BASE;
     base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 1);
@@ -18296,11 +19642,21 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
         mNextPeImageBase !=
         IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x30000ULL) {
         ok = 0;
+        goto out;
+    }
+
+    mMemoryMapEntries = 0;
+    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
+    if (pe_choose_image_base(0, 0x10000, 0) != 0 ||
+        mNextPeImageBase != IA64_EFI_IMAGE_FALLBACK_BASE) {
+        ok = 0;
     }
 
 out:
     fw_copy_mem(mMemoryMap, saved_map, sizeof(saved_map));
     fw_copy_mem(mLoadedImages, saved_loaded, sizeof(saved_loaded));
+    fw_copy_mem(mPageAllocations, saved_pages, sizeof(saved_pages));
+    fw_copy_mem(mPoolAllocations, saved_pool, sizeof(saved_pool));
     mMemoryMapEntries = saved_entries;
     mMapKey = saved_key;
     mNextPeImageBase = saved_next_pe_image_base;
@@ -21801,7 +23157,13 @@ static const FW_PCI_ROOT_BRIDGE_RESOURCES mPciRootBridgeResources = {
 
 static BOOLEAN pci_width_valid(EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH Width)
 {
-    return Width < EfiPciWidthMaximum;
+    return (UINTN)Width < (UINTN)EfiPciWidthMaximum;
+}
+
+static BOOLEAN pci_poll_width_valid(
+    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH Width)
+{
+    return (UINTN)Width <= (UINTN)EfiPciWidthUint64;
 }
 
 static UINTN pci_width_size(EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH Width)
@@ -21924,6 +23286,125 @@ static EFI_STATUS pci_root_transfer(BOOLEAN IsWrite, BOOLEAN IsIo,
     return EFI_SUCCESS;
 }
 
+typedef struct {
+    UINT64 last_tick;
+    UINT64 remaining_100ns;
+    UINT64 partial_ticks;
+} FW_PCI_POLL_TIMER;
+
+typedef struct {
+    UINTN read_count;
+    UINT64 now;
+    UINT64 ticks_per_read;
+} FW_PCI_POLL_SELFTEST_CLOCK;
+
+static void pci_poll_timer_init(FW_PCI_POLL_TIMER *Timer, UINT64 Delay)
+{
+    Timer->last_tick = fw_read_itc();
+    Timer->remaining_100ns = Delay;
+    Timer->partial_ticks = 0;
+}
+
+static BOOLEAN __attribute__((noinline))
+pci_poll_timer_consume(FW_PCI_POLL_TIMER *Timer, UINT64 Now)
+{
+    UINT64 delta = Now - Timer->last_tick;
+    UINT64 elapsed_100ns = delta / FW_ITC_TICKS_PER_100NS;
+    UINT64 partial = Timer->partial_ticks +
+                     delta % FW_ITC_TICKS_PER_100NS;
+
+    Timer->last_tick = Now;
+    if (partial >= FW_ITC_TICKS_PER_100NS) {
+        partial -= FW_ITC_TICKS_PER_100NS;
+        elapsed_100ns++;
+    }
+    Timer->partial_ticks = partial;
+    if (elapsed_100ns >= Timer->remaining_100ns) {
+        Timer->remaining_100ns = 0;
+        return 1;
+    }
+    Timer->remaining_100ns -= elapsed_100ns;
+    return 0;
+}
+
+static BOOLEAN pci_poll_timer_expired(FW_PCI_POLL_TIMER *Timer)
+{
+    /* Unsigned subtraction in pci_poll_timer_consume() handles ITC wrap. */
+    return pci_poll_timer_consume(Timer, fw_read_itc());
+}
+
+static UINT64 pci_poll_width_mask(
+    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH Width)
+{
+    UINTN size = pci_width_size(Width);
+
+    return size == sizeof(UINT64) ? ~0ULL :
+           (1ULL << (size * 8U)) - 1U;
+}
+
+static inline EFI_STATUS __attribute__((always_inline))
+pci_poll_address_internal(BOOLEAN IsIo,
+                          EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH Width,
+                          UINT64 Address, UINT64 Mask, UINT64 Value,
+                          UINT64 Delay, UINT64 *Result,
+                          FW_PCI_POLL_SELFTEST_CLOCK *TestClock)
+{
+    FW_PCI_POLL_TIMER timer;
+
+    if (TestClock != NULL) {
+        TestClock->read_count = 0;
+    }
+    if (!pci_poll_width_valid(Width) || Result == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    Mask &= pci_poll_width_mask(Width);
+    if (Delay != 0) {
+        if (TestClock == NULL) {
+            pci_poll_timer_init(&timer, Delay);
+        } else {
+            timer.last_tick = TestClock->now;
+            timer.remaining_100ns = Delay;
+            timer.partial_ticks = 0;
+        }
+    }
+    for (;;) {
+        UINT64 data = 0;
+        EFI_STATUS st = pci_root_transfer(0, IsIo, Width, Address, 1,
+                                          &data);
+
+        if (st != EFI_SUCCESS) {
+            return st;
+        }
+        if (TestClock != NULL) {
+            TestClock->read_count++;
+        }
+        *Result = data;
+        if ((data & Mask) == Value || Delay == 0) {
+            return EFI_SUCCESS;
+        }
+        if (TestClock != NULL) {
+            TestClock->now += TestClock->ticks_per_read;
+        }
+        if ((TestClock == NULL && pci_poll_timer_expired(&timer)) ||
+            (TestClock != NULL &&
+             pci_poll_timer_consume(&timer, TestClock->now))) {
+            return EFI_TIMEOUT;
+        }
+    }
+}
+
+static EFI_STATUS __attribute__((noinline))
+pci_poll_address(BOOLEAN IsIo,
+                 EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH Width,
+                 UINT64 Address, UINT64 Mask, UINT64 Value,
+                 UINT64 Delay, UINT64 *Result)
+{
+    /* The always-inlined NULL clock removes selftest instrumentation here. */
+    return pci_poll_address_internal(IsIo, Width, Address, Mask, Value,
+                                     Delay, Result, NULL);
+}
+
 static UINT8 pci_config_read_byte(UINT64 Address)
 {
     UINT8 reg = (UINT8)(Address & 0xffU);
@@ -21995,22 +23476,8 @@ static EFI_STATUS pci_root_poll_mem(EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *This,
                                     UINT64 Address, UINT64 Mask, UINT64 Value,
                                     UINT64 Delay, UINT64 *Result)
 {
-    UINT64 value = 0;
-    EFI_STATUS st;
-
     (void)This;
-    if (Result == NULL) {
-        return EFI_INVALID_PARAMETER;
-    }
-    st = pci_root_transfer(0, 0, Width, Address, 1, &value);
-    *Result = value;
-    if (st != EFI_SUCCESS) {
-        return st;
-    }
-    if ((value & Mask) == Value || Delay == 0) {
-        return EFI_SUCCESS;
-    }
-    return EFI_TIMEOUT;
+    return pci_poll_address(0, Width, Address, Mask, Value, Delay, Result);
 }
 
 static EFI_STATUS pci_root_poll_io(EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *This,
@@ -22018,22 +23485,8 @@ static EFI_STATUS pci_root_poll_io(EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *This,
                                    UINT64 Address, UINT64 Mask, UINT64 Value,
                                    UINT64 Delay, UINT64 *Result)
 {
-    UINT64 value = 0;
-    EFI_STATUS st;
-
     (void)This;
-    if (Result == NULL) {
-        return EFI_INVALID_PARAMETER;
-    }
-    st = pci_root_transfer(0, 1, Width, Address, 1, &value);
-    *Result = value;
-    if (st != EFI_SUCCESS) {
-        return st;
-    }
-    if ((value & Mask) == Value || Delay == 0) {
-        return EFI_SUCCESS;
-    }
-    return EFI_TIMEOUT;
+    return pci_poll_address(1, Width, Address, Mask, Value, Delay, Result);
 }
 
 static EFI_STATUS pci_root_mem_read(EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *This,
@@ -22091,18 +23544,28 @@ static EFI_STATUS pci_root_copy_mem(EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *This,
 {
     UINTN i;
     UINTN size;
+    UINT64 bytes;
     UINT64 src;
     UINT64 dst;
 
     (void)This;
-    if (!pci_width_valid(Width)) {
+    if (!pci_poll_width_valid(Width)) {
         return EFI_INVALID_PARAMETER;
     }
     size = pci_width_size(Width);
+    if (Count != 0 && (UINT64)Count > ~0ULL / size) {
+        return EFI_INVALID_PARAMETER;
+    }
+    bytes = (UINT64)Count << (UINTN)Width;
+    if (bytes != 0 &&
+        (SrcAddress > ~0ULL - (bytes - 1U) ||
+         DestAddress > ~0ULL - (bytes - 1U))) {
+        return EFI_INVALID_PARAMETER;
+    }
     src = pci_mem_cpu_addr(SrcAddress);
     dst = pci_mem_cpu_addr(DestAddress);
 
-    if (dst > src && dst < src + (UINT64)size * Count) {
+    if (dst > src && dst - src < bytes) {
         for (i = Count; i > 0; i--) {
             UINT64 value = pci_mmio_read(src + (UINT64)(i - 1) * size, size);
             pci_mmio_write(dst + (UINT64)(i - 1) * size, size, value);
@@ -22437,6 +23900,100 @@ static EFI_STATUS pci_io_bar_address(const FW_PCI_IO_DEVICE *Dev,
     return EFI_SUCCESS;
 }
 
+static EFI_STATUS pci_io_bar_info(const FW_PCI_IO_DEVICE *Dev,
+                                  UINT8 BarIndex, UINT32 *RawValue,
+                                  UINT64 *Base, UINT64 *Length,
+                                  BOOLEAN *IsIo, BOOLEAN *Is64);
+
+typedef struct {
+    BOOLEAN initialized;
+    EFI_STATUS status;
+    UINT64 length;
+    BOOLEAN is_io;
+} FW_PCI_BAR_ACCESS_INFO;
+
+static FW_PCI_BAR_ACCESS_INFO
+    mPciBarAccessInfo[FW_PCI_IO_DEVICE_COUNT][6];
+
+static EFI_STATUS pci_io_bar_access_info(const FW_PCI_IO_DEVICE *Dev,
+                                         UINT8 BarIndex, UINT64 *Length,
+                                         BOOLEAN *IsIo)
+{
+    UINTN device_index;
+    FW_PCI_BAR_ACCESS_INFO *info;
+
+    if (Dev == NULL || BarIndex >= 6 || Length == NULL || IsIo == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    device_index = (UINTN)(Dev - mPciIoDevices);
+    if (device_index >= FW_ARRAY_SIZE(mPciIoDevices)) {
+        return EFI_INVALID_PARAMETER;
+    }
+    info = &mPciBarAccessInfo[device_index][BarIndex];
+    if (!info->initialized) {
+        if (BarIndex == Dev->ExpectedBarIndex) {
+            info->status = EFI_SUCCESS;
+            info->length = Dev->ExpectedBarLength;
+            info->is_io = (Dev->ExpectedBarValue & 1U) != 0;
+        } else {
+            UINT32 raw;
+            UINT64 base;
+            BOOLEAN is_64;
+
+            info->status = pci_io_bar_info(Dev, BarIndex, &raw, &base,
+                                           &info->length, &info->is_io,
+                                           &is_64);
+            (void)raw;
+            (void)base;
+            (void)is_64;
+        }
+        info->initialized = 1;
+    }
+    if (info->status != EFI_SUCCESS) {
+        return info->status;
+    }
+    *Length = info->length;
+    *IsIo = info->is_io;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS pci_io_resolve_bar_access(const FW_PCI_IO_DEVICE *Dev,
+                                            UINT8 BarIndex, BOOLEAN IsIo,
+                                            EFI_PCI_IO_PROTOCOL_WIDTH Width,
+                                            UINT64 Offset, UINTN Count,
+                                            UINT64 *Address)
+{
+    UINT64 length;
+    UINT64 access_count;
+    UINT64 size;
+    BOOLEAN bar_is_io;
+    EFI_STATUS st;
+
+    if (BarIndex >= 6) {
+        return EFI_UNSUPPORTED;
+    }
+    st = pci_io_bar_access_info(Dev, BarIndex, &length, &bar_is_io);
+    if (st != EFI_SUCCESS || bar_is_io != IsIo) {
+        return EFI_UNSUPPORTED;
+    }
+
+    size = pci_width_size(Width);
+    access_count = (Width >= EfiPciWidthFifoUint8 &&
+                    Width <= EfiPciWidthFifoUint64 && Count != 0) ?
+                   1 : (UINT64)Count;
+    if (access_count == 0) {
+        if (Offset > length) {
+            return EFI_UNSUPPORTED;
+        }
+    } else if (Offset >= length ||
+               access_count > (length - Offset) / size) {
+        return EFI_UNSUPPORTED;
+    }
+
+    st = pci_io_bar_address(Dev, BarIndex, IsIo, Offset, Address);
+    return st == EFI_SUCCESS ? EFI_SUCCESS : EFI_UNSUPPORTED;
+}
+
 static EFI_STATUS pci_io_transfer(BOOLEAN IsWrite, BOOLEAN IsIo,
                                   EFI_PCI_IO_PROTOCOL *This,
                                   EFI_PCI_IO_PROTOCOL_WIDTH Width,
@@ -22450,7 +24007,15 @@ static EFI_STATUS pci_io_transfer(BOOLEAN IsWrite, BOOLEAN IsIo,
     if (dev == NULL) {
         return EFI_INVALID_PARAMETER;
     }
-    st = pci_io_bar_address(dev, BarIndex, IsIo, Offset, &address);
+    if (!pci_width_valid(Width) || Buffer == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (BarIndex == EFI_PCI_IO_PASS_THROUGH_BAR) {
+        st = pci_io_bar_address(dev, BarIndex, IsIo, Offset, &address);
+    } else {
+        st = pci_io_resolve_bar_access(dev, BarIndex, IsIo, Width, Offset,
+                                       Count, &address);
+    }
     if (st != EFI_SUCCESS) {
         return st;
     }
@@ -22494,19 +24059,27 @@ static EFI_STATUS pci_io_poll(BOOLEAN IsIo, EFI_PCI_IO_PROTOCOL *This,
                               UINT8 BarIndex, UINT64 Offset, UINT64 Mask,
                               UINT64 Value, UINT64 Delay, UINT64 *Result)
 {
-    UINT64 data = 0;
+    const FW_PCI_IO_DEVICE *dev;
+    UINT64 address;
     EFI_STATUS st;
 
-    (void)Delay;
-    if (Result == NULL) {
+    if (!pci_poll_width_valid(Width) || Result == NULL) {
         return EFI_INVALID_PARAMETER;
     }
-    st = pci_io_transfer(0, IsIo, This, Width, BarIndex, Offset, 1, &data);
+    dev = fw_pci_io_device_from_protocol(This);
+    if (dev == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (BarIndex == EFI_PCI_IO_PASS_THROUGH_BAR) {
+        st = pci_io_bar_address(dev, BarIndex, IsIo, Offset, &address);
+    } else {
+        st = pci_io_resolve_bar_access(dev, BarIndex, IsIo, Width, Offset,
+                                       1, &address);
+    }
     if (st != EFI_SUCCESS) {
         return st;
     }
-    *Result = data;
-    return (data & Mask) == Value ? EFI_SUCCESS : EFI_TIMEOUT;
+    return pci_poll_address(IsIo, Width, address, Mask, Value, Delay, Result);
 }
 
 static EFI_STATUS pci_io_poll_mem(EFI_PCI_IO_PROTOCOL *This,
@@ -22543,11 +24116,24 @@ static EFI_STATUS pci_io_copy_mem(EFI_PCI_IO_PROTOCOL *This,
     if (dev == NULL) {
         return EFI_INVALID_PARAMETER;
     }
-    st = pci_io_bar_address(dev, DestBarIndex, 0, DestOffset, &dst);
+    if (!pci_poll_width_valid(Width)) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (DestBarIndex == EFI_PCI_IO_PASS_THROUGH_BAR) {
+        st = pci_io_bar_address(dev, DestBarIndex, 0, DestOffset, &dst);
+    } else {
+        st = pci_io_resolve_bar_access(dev, DestBarIndex, 0, Width,
+                                       DestOffset, Count, &dst);
+    }
     if (st != EFI_SUCCESS) {
         return st;
     }
-    st = pci_io_bar_address(dev, SrcBarIndex, 0, SrcOffset, &src);
+    if (SrcBarIndex == EFI_PCI_IO_PASS_THROUGH_BAR) {
+        st = pci_io_bar_address(dev, SrcBarIndex, 0, SrcOffset, &src);
+    } else {
+        st = pci_io_resolve_bar_access(dev, SrcBarIndex, 0, Width,
+                                       SrcOffset, Count, &src);
+    }
     if (st != EFI_SUCCESS) {
         return st;
     }
@@ -22950,6 +24536,343 @@ static EFI_PCI_IO_PROTOCOL mPciVgaIoProto = FW_PCI_IO_PROTOCOL_INIT;
 
 #undef FW_PCI_IO_PROTOCOL_INIT
 
+static BOOLEAN __attribute__((noinline)) pci_poll_timer_selftest(void)
+{
+    FW_PCI_POLL_TIMER timer;
+
+    timer.last_tick = ~0ULL - 9U;
+    timer.remaining_100ns = 1;
+    timer.partial_ticks = 0;
+    if (!pci_poll_timer_consume(&timer, 10) ||
+        timer.remaining_100ns != 0) {
+        return 0;
+    }
+
+    timer.last_tick = 100;
+    timer.remaining_100ns = ~0ULL;
+    timer.partial_ticks = 0;
+    if (pci_poll_timer_consume(&timer,
+                               100 + FW_ITC_TICKS_PER_100NS) ||
+        timer.remaining_100ns != ~0ULL - 1U ||
+        timer.partial_ticks != 0) {
+        return 0;
+    }
+
+    timer.last_tick = 100;
+    timer.remaining_100ns = 1;
+    timer.partial_ticks = FW_ITC_TICKS_PER_100NS - 1U;
+    return pci_poll_timer_consume(&timer, 101) &&
+           timer.remaining_100ns == 0 && timer.partial_ticks == 0;
+}
+
+static BOOLEAN __attribute__((noinline)) pci_root_poll_selftest(void)
+{
+    const UINT64 mem_address = VGA_FB_BASE;
+    const UINT64 io_address = ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET;
+    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH width;
+    FW_PCI_POLL_SELFTEST_CLOCK test_clock;
+    UINT64 expected = pci_mmio_read(mem_address, sizeof(UINT32));
+    UINT64 result;
+    UINT64 start;
+
+    if (!pci_poll_timer_selftest()) {
+        return 0;
+    }
+    for (width = EfiPciWidthUint8; width <= EfiPciWidthUint64;
+         width = (EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH)((UINTN)width + 1U)) {
+        result = ~0ULL;
+        if (pci_root_poll_mem(&mPciRootBridgeIoProto, width, mem_address,
+                              0, 0, ~0ULL, &result) != EFI_SUCCESS) {
+            return 0;
+        }
+    }
+
+    result = 0;
+    if (pci_root_poll_mem(&mPciRootBridgeIoProto, EfiPciWidthFifoUint8,
+                          mem_address, 0, 0, 0, &result) !=
+            EFI_INVALID_PARAMETER ||
+        pci_root_poll_io(&mPciRootBridgeIoProto, EfiPciWidthFillUint64,
+                         io_address, 0, 0, 0, &result) !=
+            EFI_INVALID_PARAMETER ||
+        pci_root_poll_mem(&mPciRootBridgeIoProto, EfiPciWidthUint32,
+                          mem_address, 0, 0, 0, NULL) !=
+            EFI_INVALID_PARAMETER ||
+        pci_root_poll_io(&mPciRootBridgeIoProto, EfiPciWidthUint32,
+                         io_address, 0, 0, 0, NULL) !=
+            EFI_INVALID_PARAMETER) {
+        return 0;
+    }
+    if (pci_root_copy_mem(&mPciRootBridgeIoProto, EfiPciWidthUint32,
+                          mem_address, mem_address, 1) != EFI_SUCCESS ||
+        pci_root_copy_mem(&mPciRootBridgeIoProto, EfiPciWidthFifoUint32,
+                          mem_address, mem_address, 1) !=
+            EFI_INVALID_PARAMETER ||
+        pci_root_copy_mem(&mPciRootBridgeIoProto, EfiPciWidthFillUint32,
+                          mem_address, mem_address, 1) !=
+            EFI_INVALID_PARAMETER ||
+        pci_root_copy_mem(&mPciRootBridgeIoProto, EfiPciWidthUint64,
+                          mem_address, ~0ULL - 3U, 1) !=
+            EFI_INVALID_PARAMETER) {
+        return 0;
+    }
+
+    result = ~expected;
+    if (pci_root_poll_mem(&mPciRootBridgeIoProto, EfiPciWidthUint32,
+                          mem_address, 0xffffffffU, expected, ~0ULL,
+                          &result) != EFI_SUCCESS ||
+        result != expected) {
+        return 0;
+    }
+    result = ~expected;
+    if (pci_root_poll_mem(&mPciRootBridgeIoProto, EfiPciWidthUint32,
+                          mem_address, 0, 1, 0, &result) != EFI_SUCCESS ||
+        result != expected) {
+        return 0;
+    }
+
+    start = fw_read_itc();
+    result = ~expected;
+    if (pci_root_poll_mem(&mPciRootBridgeIoProto, EfiPciWidthUint32,
+                          mem_address, 0, 1, 1, &result) != EFI_TIMEOUT ||
+        result != expected ||
+        fw_read_itc() - start < FW_ITC_TICKS_PER_100NS) {
+        return 0;
+    }
+
+    /* Synthetic elapsed ticks make the repeated-read timeout deterministic. */
+    test_clock.now = 100;
+    test_clock.ticks_per_read = FW_ITC_TICKS_PER_100NS / 4U;
+    result = ~expected;
+    if (pci_poll_address_internal(0, EfiPciWidthUint32, mem_address,
+                                  0, 1, 1, &result,
+                                  &test_clock) != EFI_TIMEOUT ||
+        test_clock.read_count <= 1 || result != expected ||
+        test_clock.now - 100 < FW_ITC_TICKS_PER_100NS) {
+        return 0;
+    }
+
+    result = ~0ULL;
+    if (pci_root_poll_io(&mPciRootBridgeIoProto, EfiPciWidthUint32,
+                         io_address, 0, 1, 0, &result) != EFI_SUCCESS ||
+        result == ~0ULL) {
+        return 0;
+    }
+    start = fw_read_itc();
+    result = ~0ULL;
+    return pci_root_poll_io(&mPciRootBridgeIoProto, EfiPciWidthUint32,
+                            io_address, 0, 1, 1, &result) == EFI_TIMEOUT &&
+           result != ~0ULL &&
+           fw_read_itc() - start >= FW_ITC_TICKS_PER_100NS;
+}
+
+static BOOLEAN __attribute__((noinline)) pci_io_transfer_selftest(void)
+{
+    const FW_PCI_IO_DEVICE *vga = &mPciIoDevices[5];
+    const FW_PCI_IO_DEVICE *uhci = &mPciIoDevices[3];
+    UINT32 data[2] = { 0, 0 };
+
+    /* A scalar transfer ending exactly at the BAR boundary is valid. */
+    if (pci_io_mem_read(vga->Protocol, EfiPciWidthUint32,
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data),
+                        FW_ARRAY_SIZE(data), data) != EFI_SUCCESS) {
+        return 0;
+    }
+
+    /* FIFO repeats one address; scalar and Fill widths advance it. */
+    if (pci_io_mem_read(vga->Protocol, EfiPciWidthFifoUint32,
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data[0]),
+                        FW_ARRAY_SIZE(data), data) != EFI_SUCCESS ||
+        pci_io_mem_read(vga->Protocol, EfiPciWidthUint32,
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data[0]),
+                        FW_ARRAY_SIZE(data), data) != EFI_UNSUPPORTED ||
+        pci_io_mem_read(vga->Protocol, EfiPciWidthFillUint32,
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data[0]),
+                        FW_ARRAY_SIZE(data), data) != EFI_UNSUPPORTED ||
+        pci_io_mem_write(vga->Protocol, EfiPciWidthUint32,
+                         vga->ExpectedBarIndex,
+                         vga->ExpectedBarLength - sizeof(data[0]),
+                         FW_ARRAY_SIZE(data), data) != EFI_UNSUPPORTED) {
+        return 0;
+    }
+
+    /* Reject range arithmetic overflow before touching the controller. */
+    if (pci_io_mem_read(vga->Protocol, EfiPciWidthUint64,
+                        vga->ExpectedBarIndex, 0, ~(UINTN)0,
+                        data) != EFI_UNSUPPORTED ||
+        pci_io_mem_read(vga->Protocol, EfiPciWidthUint64,
+                        vga->ExpectedBarIndex, ~0ULL - 3U, 1,
+                        data) != EFI_UNSUPPORTED ||
+        pci_io_mem_read(vga->Protocol,
+                        (EFI_PCI_IO_PROTOCOL_WIDTH)-1,
+                        vga->ExpectedBarIndex, 0, 1,
+                        data) != EFI_INVALID_PARAMETER ||
+        pci_io_mem_read(vga->Protocol, EfiPciWidthUint32, 6, 0, 1,
+                        data) != EFI_UNSUPPORTED) {
+        return 0;
+    }
+
+    if (pci_io_copy_mem(vga->Protocol, EfiPciWidthUint32,
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data[0]),
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data[0]),
+                        1) != EFI_SUCCESS ||
+        pci_io_copy_mem(vga->Protocol, EfiPciWidthUint32,
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data[0]) + 1U,
+                        vga->ExpectedBarIndex, 0, 1) != EFI_UNSUPPORTED ||
+        pci_io_copy_mem(vga->Protocol, EfiPciWidthUint32,
+                        vga->ExpectedBarIndex, 0,
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data[0]) + 1U,
+                        1) != EFI_UNSUPPORTED ||
+        pci_io_copy_mem(vga->Protocol, EfiPciWidthUint32,
+                        vga->ExpectedBarIndex,
+                        vga->ExpectedBarLength - sizeof(data[0]),
+                        vga->ExpectedBarIndex, 0, 2) != EFI_UNSUPPORTED ||
+        pci_io_copy_mem(vga->Protocol, EfiPciWidthFifoUint32,
+                        vga->ExpectedBarIndex, 0,
+                        vga->ExpectedBarIndex, 0, 1) !=
+            EFI_INVALID_PARAMETER ||
+        pci_io_copy_mem(vga->Protocol, EfiPciWidthFillUint32,
+                        vga->ExpectedBarIndex, 0,
+                        vga->ExpectedBarIndex, 0, 1) !=
+            EFI_INVALID_PARAMETER ||
+        pci_io_copy_mem(uhci->Protocol, EfiPciWidthUint32,
+                        uhci->ExpectedBarIndex, 0,
+                        uhci->ExpectedBarIndex, 0, 1) != EFI_UNSUPPORTED) {
+        return 0;
+    }
+
+    if (pci_io_mem_read(vga->Protocol, EfiPciWidthUint32,
+                        EFI_PCI_IO_PASS_THROUGH_BAR, VGA_FB_BASE,
+                        1, data) != EFI_SUCCESS) {
+        return 0;
+    }
+
+    /* Exercise the same exact-end and one-element-over rules for I/O BARs. */
+    return pci_io_io_read(uhci->Protocol, EfiPciWidthUint32,
+                          uhci->ExpectedBarIndex,
+                          uhci->ExpectedBarLength - sizeof(data[0]),
+                          1, data) == EFI_SUCCESS &&
+           pci_io_io_read(uhci->Protocol, EfiPciWidthUint32,
+                          uhci->ExpectedBarIndex,
+                          uhci->ExpectedBarLength - sizeof(data[0]),
+                          FW_ARRAY_SIZE(data), data) == EFI_UNSUPPORTED &&
+           pci_io_io_write(uhci->Protocol, EfiPciWidthUint32,
+                           uhci->ExpectedBarIndex,
+                           uhci->ExpectedBarLength - sizeof(data[0]),
+                           FW_ARRAY_SIZE(data), data) == EFI_UNSUPPORTED;
+}
+
+static BOOLEAN __attribute__((noinline)) pci_io_poll_selftest(void)
+{
+    const UINT64 mem_address = VGA_FB_BASE;
+    const UINT64 io_address = ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET;
+    EFI_PCI_IO_PROTOCOL *protocol = &mPciVgaIoProto;
+    EFI_PCI_IO_PROTOCOL_WIDTH width;
+    UINT64 expected = pci_mmio_read(mem_address, sizeof(UINT32));
+    UINT64 result;
+    UINT64 start;
+
+    if (!pci_io_transfer_selftest()) {
+        return 0;
+    }
+    for (width = EfiPciWidthUint8; width <= EfiPciWidthUint64;
+         width = (EFI_PCI_IO_PROTOCOL_WIDTH)((UINTN)width + 1U)) {
+        result = ~0ULL;
+        if (pci_io_poll_mem(protocol, width, EFI_PCI_IO_PASS_THROUGH_BAR,
+                            mem_address, 0, 0, ~0ULL, &result) !=
+                EFI_SUCCESS) {
+            return 0;
+        }
+    }
+
+    result = 0;
+    if (pci_io_poll_mem(protocol, EfiPciWidthFifoUint16,
+                        EFI_PCI_IO_PASS_THROUGH_BAR, mem_address,
+                        0, 0, 0, &result) != EFI_INVALID_PARAMETER ||
+        pci_io_poll_io(protocol, EfiPciWidthFillUint32,
+                       EFI_PCI_IO_PASS_THROUGH_BAR, io_address,
+                       0, 0, 0, &result) != EFI_INVALID_PARAMETER ||
+        pci_io_poll_mem(protocol, EfiPciWidthUint32,
+                        EFI_PCI_IO_PASS_THROUGH_BAR, mem_address,
+                        0, 0, 0, NULL) != EFI_INVALID_PARAMETER ||
+        pci_io_poll_io(protocol, EfiPciWidthUint32,
+                       EFI_PCI_IO_PASS_THROUGH_BAR, io_address,
+                       0, 0, 0, NULL) != EFI_INVALID_PARAMETER) {
+        return 0;
+    }
+
+    result = 0;
+    if (pci_io_poll_mem(protocol, EfiPciWidthUint32, 6, 0,
+                        0, 0, 0, &result) != EFI_UNSUPPORTED ||
+        pci_io_poll_mem(protocol, EfiPciWidthUint32, 0,
+                        mPciIoDevices[5].ExpectedBarLength,
+                        0, 0, 0, &result) != EFI_UNSUPPORTED ||
+        pci_io_poll_mem(protocol, EfiPciWidthUint32, 0,
+                        mPciIoDevices[5].ExpectedBarLength - 1U,
+                        0, 0, 0, &result) != EFI_UNSUPPORTED ||
+        pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32, 4,
+                       mPciIoDevices[3].ExpectedBarLength,
+                       0, 0, 0, &result) != EFI_UNSUPPORTED) {
+        return 0;
+    }
+
+    result = ~expected;
+    if (pci_io_poll_mem(protocol, EfiPciWidthUint32,
+                        mPciIoDevices[5].ExpectedBarIndex, 0,
+                        0xffffffffU, expected, 0, &result) != EFI_SUCCESS ||
+        result != expected) {
+        return 0;
+    }
+    result = ~0ULL;
+    if (pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32,
+                       mPciIoDevices[3].ExpectedBarIndex, 0,
+                       0, 0, 0, &result) != EFI_SUCCESS ||
+        result == ~0ULL) {
+        return 0;
+    }
+
+    result = ~expected;
+    if (pci_io_poll_mem(protocol, EfiPciWidthUint32,
+                        EFI_PCI_IO_PASS_THROUGH_BAR, mem_address,
+                        0xffffffffU, expected, ~0ULL, &result) !=
+            EFI_SUCCESS ||
+        result != expected) {
+        return 0;
+    }
+    result = ~0ULL;
+    if (pci_io_poll_io(protocol, EfiPciWidthUint32,
+                       EFI_PCI_IO_PASS_THROUGH_BAR, io_address,
+                       0, 1, 0, &result) != EFI_SUCCESS ||
+        result == ~0ULL) {
+        return 0;
+    }
+
+    start = fw_read_itc();
+    result = ~expected;
+    if (pci_io_poll_mem(protocol, EfiPciWidthUint32,
+                        EFI_PCI_IO_PASS_THROUGH_BAR, mem_address,
+                        0, 1, 1, &result) != EFI_TIMEOUT ||
+        result != expected ||
+        fw_read_itc() - start < FW_ITC_TICKS_PER_100NS) {
+        return 0;
+    }
+
+    start = fw_read_itc();
+    result = ~0ULL;
+    return pci_io_poll_io(protocol, EfiPciWidthUint32,
+                          EFI_PCI_IO_PASS_THROUGH_BAR, io_address,
+                          0, 1, 1, &result) == EFI_TIMEOUT &&
+           result != ~0ULL &&
+           fw_read_itc() - start >= FW_ITC_TICKS_PER_100NS;
+}
+
 static BOOLEAN __attribute__((noinline)) pci_root_bridge_io_selftest(void)
 {
     UINT32 ide_id = 0;
@@ -22985,13 +24908,15 @@ static BOOLEAN __attribute__((noinline)) pci_root_bridge_io_selftest(void)
     }
 
     res = (FW_PCI_ROOT_BRIDGE_RESOURCES *)resources;
-    return res->Bus.ResourceType == 2 &&
-           res->Bus.AddressLength == 256 &&
-           res->Io.ResourceType == 1 &&
-           res->Io.AddressTranslationOffset == PCI_IO_TRANSLATION_OFFSET &&
-           res->Mem.ResourceType == 0 &&
-           res->Mem.AddressTranslationOffset == PCI_MMIO_TRANSLATION_OFFSET &&
-           res->End.Descriptor == 0x79;
+    if (res->Bus.ResourceType != 2 || res->Bus.AddressLength != 256 ||
+        res->Io.ResourceType != 1 ||
+        res->Io.AddressTranslationOffset != PCI_IO_TRANSLATION_OFFSET ||
+        res->Mem.ResourceType != 0 ||
+        res->Mem.AddressTranslationOffset != PCI_MMIO_TRANSLATION_OFFSET ||
+        res->End.Descriptor != 0x79) {
+        return 0;
+    }
+    return pci_root_poll_selftest();
 }
 
 static BOOLEAN __attribute__((noinline)) pci_io_protocol_selftest(void)
@@ -23065,6 +24990,16 @@ static BOOLEAN __attribute__((noinline)) pci_io_protocol_selftest(void)
                                                 dev->Function,
                                                 PCI_COMMAND_OFFSET, 2);
         command_attrs = dev->Attributes & FW_PCI_COMMAND_ATTRIBUTES;
+        /*
+         * OHCI fetches its HCCA once per frame while it is operational.
+         * Dropping PCI bus mastering underneath that periodic DMA is not a
+         * valid way to self-test Attributes(): the controller reports an
+         * unrecoverable error and stops.  The other controllers exercise the
+         * common bus-master enable/disable path without continuous DMA.
+         */
+        if (dev->Protocol == &mPciOhciIoProto) {
+            command_attrs &= ~EFI_PCI_ATTRIBUTE_BUS_MASTER;
+        }
         if (command_attrs != 0) {
             if (pci_io_attributes(dev->Protocol,
                                   EfiPciIoAttributeOperationDisable,
@@ -23143,7 +25078,7 @@ static BOOLEAN __attribute__((noinline)) pci_io_protocol_selftest(void)
         }
     }
 
-    return 1;
+    return pci_io_poll_selftest();
 }
 
 #define FPSWA_STATUS_UNHANDLED ((UINT64)-1)
@@ -24568,8 +26503,9 @@ EFI_STATUS rs_set_virtual_address_map(
 
     mVirtualAddressMapEntries = runtime_index;
     mVirtualAddressMapInProgress = 1;
-    fw_signal_event_group(gEfiEventGroupVirtualAddressChangeGuid);
-    fw_signal_event_type(EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE);
+    fw_signal_event_group_and_type(
+        gEfiEventGroupVirtualAddressChangeGuid,
+        EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE);
     if (pe_relocate_runtime_images() != EFI_SUCCESS) {
         mVirtualAddressMapInProgress = 0;
         mVirtualAddressMapEntries = 0;
@@ -24617,6 +26553,9 @@ EFI_STATUS rs_convert_pointer(UINTN DebugDisposition, VOID **Address)
     UINTN value;
     EFI_STATUS st;
 
+    if ((DebugDisposition & ~(UINTN)EFI_OPTIONAL_PTR) != 0) {
+        return EFI_INVALID_PARAMETER;
+    }
     if (Address == NULL) {
         return EFI_INVALID_PARAMETER;
     }
@@ -24631,6 +26570,38 @@ EFI_STATUS rs_convert_pointer(UINTN DebugDisposition, VOID **Address)
         *Address = (VOID *)value;
     }
     return st;
+}
+
+static BOOLEAN __attribute__((noinline))
+uefi_convert_pointer_selftest(void)
+{
+    VOID *address = (VOID *)(UINTN)0x1000U;
+    VOID *original = address;
+
+    if (rs_convert_pointer(2U, &address) != EFI_INVALID_PARAMETER ||
+        address != original) {
+        return 0;
+    }
+    address = NULL;
+    if (rs_convert_pointer(EFI_OPTIONAL_PTR | 2U, &address) !=
+            EFI_INVALID_PARAMETER ||
+        address != NULL) {
+        return 0;
+    }
+    address = original;
+    if (rs_convert_pointer(~(UINTN)EFI_OPTIONAL_PTR, &address) !=
+            EFI_INVALID_PARAMETER ||
+        address != original) {
+        return 0;
+    }
+    if (rs_convert_pointer(EFI_OPTIONAL_PTR, &address) != EFI_NOT_FOUND ||
+        address != original) {
+        return 0;
+    }
+    address = NULL;
+    return rs_convert_pointer(EFI_OPTIONAL_PTR, &address) == EFI_SUCCESS &&
+           address == NULL &&
+           rs_convert_pointer(0, &address) == EFI_INVALID_PARAMETER;
 }
 
 static EFI_STATUS rs_convert_required_uintn(UINTN *Address)
@@ -26308,6 +28279,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts(uefi_configuration_table_selftest() ?
               "InstallConfigurationTable CRC verified\r\n" :
               "verification failed\r\n");
+    uart_puts("ExitBootServices:     ");
+    uart_puts(uefi_exit_boot_services_system_table_selftest() ?
+              "System Table handoff verified\r\n" :
+              "verification failed\r\n");
     uart_puts("Console Out:          Serial 16550 + VGA text\r\n");
     uart_puts("Console Out Test:     ");
     uart_puts(uefi_conout_selftest() ? "text output contracts verified\r\n" :
@@ -26347,6 +28322,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("GOP SetMode Test:     ");
     uart_puts(graphics_gop_set_mode_selftest() ?
               "BGRx framebuffer cleared\r\n" :
+              "verification failed\r\n");
+    uart_puts("Graphics Handoff:    ");
+    uart_puts(graphics_handoff_selftest() ?
+              "GOP preserve + PCDP VGA text fallback verified\r\n" :
               "verification failed\r\n");
     uart_puts("EFI Image Handoff:    ");
     uart_puts(efi_entry_handoff_selftest() ?
@@ -26414,6 +28393,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "published (TPM not present, SHA-1 HashAll)\r\n" :
               "verification failed\r\n");
     uart_puts("SetVirtualAddressMap/ConvertPointer: enabled\r\n");
+    uart_puts("ConvertPointer Test:  ");
+    uart_puts(uefi_convert_pointer_selftest() ?
+              "reserved DebugDisposition bits rejected\r\n" :
+              "verification failed\r\n");
     uart_puts("NVRAM Variables:      enabled\r\n");
     nvram_variable_selftest_ok = runtime_variable_selftest();
     uart_puts("NVRAM Variable Test:  ");
@@ -26437,10 +28420,12 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "verification failed\r\n");
     uart_puts("PCI Root Bridge I/O:  published\r\n");
     uart_puts("PCI Root Bridge Test: ");
-    uart_puts(pci_root_bridge_io_selftest() ? "config/resources verified\r\n" :
+    uart_puts(pci_root_bridge_io_selftest() ?
+              "config/resources/polling verified\r\n" :
               "verification failed\r\n");
     uart_puts("PCI I/O Protocol:    ");
-    uart_puts(pci_io_protocol_selftest() ? "controllers verified\r\n" :
+    uart_puts(pci_io_protocol_selftest() ?
+              "controllers/polling verified\r\n" :
               "verification failed\r\n");
     uart_puts("SAL PCI Config:       ");
     uart_puts(sal_pci_config_selftest() ? "read/write verified\r\n" :

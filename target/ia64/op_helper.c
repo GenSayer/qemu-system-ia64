@@ -3865,20 +3865,20 @@ void helper_br_call_rse(CPUIA64State *env, uint32_t b_reg,
     uint32_t sol = env->cfm_sol;
     uint32_t outputs = old_sof > sol ? old_sof - sol : 0;
     bool move_outputs = env->cfm_rrb_gr == 0;
-    uint32_t i;
-
 
     ia64_rse_sync_frame_out(env);
     ia64_rse_preserve_frame(env, sol);
-    if (move_outputs && outputs != 0) {
+    if (move_outputs && outputs != 0 && sol != 0) {
         memmove(&env->gr[IA64_STACKED_GR_BASE],
                 &env->gr[IA64_STACKED_GR_BASE + sol],
                 outputs * sizeof(env->gr[0]));
-        for (i = 0; i < outputs; i++) {
-            ia64_gr_nat_set(
-                env, IA64_STACKED_GR_BASE + i,
-                ia64_gr_nat_get(env, IA64_STACKED_GR_BASE + sol + i));
-        }
+        /*
+         * The output frame moves toward lower logical registers.  Copy its
+         * NaT bits in the same forward direction: each source chunk is read
+         * before the overlapping lower destination chunk is written.
+         */
+        ia64_copy_bit_range(env->nat, IA64_STACKED_GR_BASE,
+                            env->nat, IA64_STACKED_GR_BASE + sol, outputs);
     }
     env->cfm_sof = outputs;
     env->cfm_sol = 0;

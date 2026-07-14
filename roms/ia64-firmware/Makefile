@@ -8,9 +8,11 @@ AS      = $(CROSS)as
 LD      = $(CROSS)ld
 OBJCOPY = $(CROSS)objcopy
 PYTHON  ?= python3
+LIBGCC  := $(shell $(CC) -print-libgcc-file-name)
 
 CFLAGS  = -O2 -fno-builtin -ffreestanding -nostdinc -nostdlib \
-          -mno-sdata -fno-stack-protector -fno-common \
+          -G 0 -mno-sdata -fno-stack-protector -fno-common \
+          -fno-optimize-sibling-calls -fno-pic \
           -Wall -Wextra -Wno-unused-parameter
 
 ASFLAGS =
@@ -28,7 +30,7 @@ firmware.o: firmware.c linker-symbols.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 ia64-firmware.elf: $(OBJS)
-	$(LD) $(LDFLAGS) -o $@ $(OBJS)
+	$(LD) $(LDFLAGS) -o $@ $(OBJS) $(LIBGCC)
 
 ia64-firmware.bin: ia64-firmware.elf
 	$(OBJCOPY) -O binary $< $@
