@@ -133,8 +133,19 @@ static uint64_t ia64_vpc_rtc_read(void *opaque, hwaddr addr, unsigned size)
     return mktimegm(&tm);
 }
 
+static void ia64_vpc_rtc_write(void *opaque, hwaddr addr, uint64_t value,
+                               unsigned size)
+{
+    /* The platform RTC is a read-only seconds-since-epoch register. */
+    (void)opaque;
+    (void)addr;
+    (void)value;
+    (void)size;
+}
+
 static const MemoryRegionOps ia64_vpc_rtc_ops = {
     .read = ia64_vpc_rtc_read,
+    .write = ia64_vpc_rtc_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 8,

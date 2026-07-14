@@ -215,219 +215,99 @@ if 'ia64-softmmu' in target_dirs
        timeout: 30,
        suite: ['unit', 'ia64'])
 
-  test('test-ia64-standard-goldens',
-       python,
-       args: [
-         files('test-ia64-standard-goldens.py'),
-         meson.project_source_root(),
-       ],
+  ia64_fpreg_test = executable(
+    'test-ia64-fpreg',
+    [
+      'test-ia64-fpreg.c',
+      meson.project_source_root() / 'target/ia64/fpreg.c',
+      meson.project_source_root() / 'fpu/softfloat.c',
+    ],
+    c_args: [
+      '-DCOMPILING_PER_TARGET',
+      '-DCONFIG_TARGET="ia64-softmmu-config-target.h"',
+      '-DCONFIG_DEVICES="ia64-softmmu-config-devices.h"',
+    ],
+    dependencies: [qemuutil],
+    include_directories: include_directories('../..'))
+
+  test('test-ia64-fpreg', ia64_fpreg_test,
        protocol: 'tap',
        timeout: 30,
        suite: ['unit', 'ia64'])
 
-  test('test-ia64-standard-execution',
+  test('test-ia64-fpmodel',
        python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-standard-execution.py'),
-         meson.project_source_root(),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 600,
+       args: [files('ia64/test_fpmodel.py')],
+       timeout: 30,
        suite: ['unit', 'ia64'])
 
-  test('test-ia64-qemu-tcg',
-       python,
-       depends: emulators['qemu-system-ia64'],
-       args: [
-         files('test-ia64-qemu-tcg.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-       ],
-       protocol: 'tap',
-       timeout: 90,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-qemu-tcg-2',
-       python,
-       depends: emulators['qemu-system-ia64'],
-       args: [
-         files('test-ia64-qemu-tcg-2.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-       ],
-       protocol: 'tap',
-       timeout: 600,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-smoke',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-smoke.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 20,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-device-inventory',
-       python,
-       depends: emulators['qemu-system-ia64'],
-       args: [
-         files('test-ia64-device-inventory.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-       ],
-       protocol: 'tap',
-       timeout: 20,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-nvram',
-       python,
-       depends: emulators['qemu-system-ia64'],
-       args: [
-         files('test-ia64-nvram.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-       ],
-       protocol: 'tap',
-       timeout: 20,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-uefi-services',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-uefi-services.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 25,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-no-fake-tcg',
+  test('test-ia64-firmware-layout',
        python,
        depends: ia64_firmware_bin,
        args: [
-         files('test-ia64-fw-no-fake-tcg.py'),
+         files('test-ia64-firmware-layout.py'),
          meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 25,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-platform-tables',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-platform-tables.py'),
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 25,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-boot-path',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-boot-path.py'),
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 25,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-ata-block',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-ata-block.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 20,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-storage',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-storage.py'),
-         meson.project_source_root(),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 130,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-usb-keyboard',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-usb-keyboard.py'),
-         meson.project_source_root(),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 45,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-cdrom-boot-path',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-cdrom-boot-path.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 20,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-fw-udf-cdrom',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-fw-udf-cdrom.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       protocol: 'tap',
-       timeout: 20,
-       suite: ['unit', 'ia64'])
-
-  test('test-ia64-os-boot-smoke',
-       python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
-       args: [
-         files('test-ia64-os-boot-smoke.py'),
-         meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
+         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.elf',
        ],
        protocol: 'tap',
        timeout: 30,
        suite: ['unit', 'ia64'])
 
-  test('test-ia64-fw-icount',
+  foreach group : [
+    'core',
+    'memory-nat',
+    'fp',
+    'rse',
+    'mmu',
+    'interrupt',
+    'pal',
+  ]
+    test('test-ia64-tcg-' + group,
+         python,
+         depends: emulators['qemu-system-ia64'],
+         args: [
+           files('ia64/test_tcg_group.py'),
+           meson.project_build_root() / 'qemu-system-ia64',
+           '--group', group,
+         ],
+         protocol: 'tap',
+         timeout: 180,
+         suite: ['unit', 'ia64'])
+  endforeach
+
+  test('test-ia64-cli',
        python,
-       depends: [emulators['qemu-system-ia64'], ia64_firmware_bin],
+       depends: emulators['qemu-system-ia64'],
        args: [
-         files('test-ia64-os-boot-smoke.py'),
+         files('ia64/test_cli.py'),
          meson.project_build_root() / 'qemu-system-ia64',
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
-       ],
-       env: [
-         'IA64_BOOT_SMOKE_EXTRA_ARGS=-icount shift=3',
-         'IA64_BOOT_SMOKE_MEMORY=128M',
-         'IA64_BOOT_SMOKE_SECONDS=15',
-         'IA64_BOOT_SMOKE_SIGNATURES=Firmware ready. Attempting disk boot...',
        ],
        protocol: 'tap',
+       timeout: 30,
+       suite: ['unit', 'ia64'])
+
+  test('test-ia64-gdbstub',
+       python,
+       depends: emulators['qemu-system-ia64'],
+       args: [
+         files('ia64/test_gdbstub.py'),
+         meson.project_build_root() / 'qemu-system-ia64',
+       ],
+       protocol: 'tap',
+       timeout: 30,
+       is_parallel: false,
+       suite: ['unit', 'ia64'])
+
+  test('test-ia64-state-parser',
+       python,
+       args: [files('ia64/test_state.py')],
+       protocol: 'tap',
+       timeout: 30,
+       suite: ['unit', 'ia64'])
+
+  test('test-ia64-qmp-client',
+       python,
+       args: [files('ia64/test_qmp.py')],
        timeout: 30,
        suite: ['unit', 'ia64'])
 endif

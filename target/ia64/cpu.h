@@ -549,7 +549,9 @@ typedef struct CPUArchState {
     uint64_t fault_ip;
     uint64_t fault_imm;
     uint64_t fault_tmpl;
+    /* Pending exception and the last non-NONE exception, respectively. */
     uint32_t exception;
+    uint32_t fault_exception;
     uint32_t fault_slot;
 
     /* Control Registers */

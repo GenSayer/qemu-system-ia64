@@ -69,6 +69,8 @@ typedef __SIZE_TYPE__    size_t;
 #define VGA_FB_BASE                   ((UINT64)PCI_VGA_FB_BAR)
 #define VGA_MMIO_BASE                 ((UINT64)PCI_VGA_MMIO_BAR)
 #define ACPI_RECLAIM_BASE 0x0000000000800000ULL
+#define ACPI_RECLAIM_TABLE_BASE \
+    (ACPI_RECLAIM_BASE + IA64_EFI_MEMORY_ALIGN)
 #define ACPI_RECLAIM_END 0x0000000000820000ULL
 #define IOSAPIC_BASE     0x0000000080110000ULL
 #define IOSAPIC_SIZE     0x0000000000002000ULL
@@ -479,6 +481,15 @@ typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
 /* --- EFI Simple Text Input Ex Protocol ------------------------------------ */
 
 #define EFI_SHIFT_STATE_VALID    0x80000000U
+#define EFI_RIGHT_SHIFT_PRESSED  0x00000001U
+#define EFI_LEFT_SHIFT_PRESSED   0x00000002U
+#define EFI_RIGHT_CONTROL_PRESSED 0x00000004U
+#define EFI_LEFT_CONTROL_PRESSED 0x00000008U
+#define EFI_RIGHT_ALT_PRESSED    0x00000010U
+#define EFI_LEFT_ALT_PRESSED     0x00000020U
+#define EFI_RIGHT_LOGO_PRESSED   0x00000040U
+#define EFI_LEFT_LOGO_PRESSED    0x00000080U
+#define EFI_MENU_KEY_PRESSED     0x00000100U
 #define EFI_TOGGLE_STATE_VALID   0x80U
 #define EFI_KEY_STATE_EXPOSED    0x40U
 #define EFI_SCROLL_LOCK_ACTIVE   0x01U
@@ -2299,9 +2310,12 @@ static BOOLEAN                mGraphicsHandoffClaimed;
 static FW_CONIN_KEY_NOTIFY_RECORD mConInKeyNotifyRecords[FW_CONIN_KEY_NOTIFY_MAX];
 static BOOLEAN                mConInBufferedKeyValid;
 static EFI_INPUT_KEY          mConInBufferedKey;
+static EFI_KEY_STATE          mConInBufferedKeyState;
+static EFI_KEY_STATE          mConInCurrentKeyState;
 static BOOLEAN                mPs2Break;
 static BOOLEAN                mPs2Extended;
 static BOOLEAN                mPs2Shift;
+static UINT32                 mPs2ModifierState;
 static BOOLEAN                mPs2Translated;
 static BOOLEAN                mUsbKeyboardTried;
 static BOOLEAN                mUsbKeyboardReady;
@@ -3846,10 +3860,21 @@ static BOOLEAN acpi_assign_reclaim_tables(void)
 {
     UINTN cursor = ACPI_RECLAIM_BASE;
 
-    mAcpiRsdp = (ACPI_RSDP *)acpi_align_up(cursor, 16);
-    cursor = (UINTN)mAcpiRsdp + sizeof(*mAcpiRsdp);
     mAcpiFacs = (ACPI_FACS *)acpi_align_up(cursor, 64);
     cursor = (UINTN)mAcpiFacs + sizeof(*mAcpiFacs);
+    if (cursor > ACPI_RECLAIM_TABLE_BASE) {
+        acpi_use_static_tables();
+        return 0;
+    }
+
+    /*
+     * FACS is writable firmware/OS handshake state and must survive ACPI
+     * S1-S3.  Give it a dedicated IA-64-sized EfiACPIMemoryNVS descriptor;
+     * all reclaimable boot-time ACPI tables start at the next 8 KiB boundary.
+     */
+    cursor = ACPI_RECLAIM_TABLE_BASE;
+    mAcpiRsdp = (ACPI_RSDP *)acpi_align_up(cursor, 16);
+    cursor = (UINTN)mAcpiRsdp + sizeof(*mAcpiRsdp);
     mAcpiDsdt = (ACPI_DSDT *)acpi_align_up(cursor, 8);
     cursor = (UINTN)mAcpiDsdt + sizeof(*mAcpiDsdt);
     mAcpiSsdt = (ACPI_SSDT *)acpi_align_up(cursor, 8);
@@ -4368,6 +4393,10 @@ static void ps2_init_controller(void)
 {
     UINT8 mode;
 
+    mPs2Break = 0;
+    mPs2Extended = 0;
+    mPs2Shift = 0;
+    mPs2ModifierState = 0;
     if (!fw_handoff_i8042_enabled()) {
         return;
     }
@@ -4388,9 +4417,6 @@ static void ps2_init_controller(void)
         return;
     }
     mPs2Translated = (mode & PS2_MODE_KCC) != 0;
-    mPs2Break = 0;
-    mPs2Extended = 0;
-    mPs2Shift = 0;
     (void)ps2_write_command(PS2_CMD_KBD_ENABLE);
     (void)ps2_keyboard_enable_scanning();
 }
@@ -5330,6 +5356,58 @@ static BOOLEAN __attribute__((noinline, used)) ps2_shift_scan_code(UINT8 code)
     return code == 0x12 || code == 0x59;
 }
 
+static UINT32 ps2_modifier_state_bit(UINT8 code, BOOLEAN extended)
+{
+    if (mPs2Translated) {
+        if (!extended) {
+            switch (code) {
+            case 0x2a: return EFI_LEFT_SHIFT_PRESSED;
+            case 0x36: return EFI_RIGHT_SHIFT_PRESSED;
+            case 0x1d: return EFI_LEFT_CONTROL_PRESSED;
+            case 0x38: return EFI_LEFT_ALT_PRESSED;
+            default: return 0;
+            }
+        }
+        switch (code) {
+        case 0x1d: return EFI_RIGHT_CONTROL_PRESSED;
+        case 0x38: return EFI_RIGHT_ALT_PRESSED;
+        case 0x5b: return EFI_LEFT_LOGO_PRESSED;
+        case 0x5c: return EFI_RIGHT_LOGO_PRESSED;
+        case 0x5d: return EFI_MENU_KEY_PRESSED;
+        default: return 0;
+        }
+    }
+
+    if (!extended) {
+        switch (code) {
+        case 0x12: return EFI_LEFT_SHIFT_PRESSED;
+        case 0x59: return EFI_RIGHT_SHIFT_PRESSED;
+        case 0x14: return EFI_LEFT_CONTROL_PRESSED;
+        case 0x11: return EFI_LEFT_ALT_PRESSED;
+        default: return 0;
+        }
+    }
+    switch (code) {
+    case 0x14: return EFI_RIGHT_CONTROL_PRESSED;
+    case 0x11: return EFI_RIGHT_ALT_PRESSED;
+    case 0x1f: return EFI_LEFT_LOGO_PRESSED;
+    case 0x27: return EFI_RIGHT_LOGO_PRESSED;
+    case 0x2f: return EFI_MENU_KEY_PRESSED;
+    default: return 0;
+    }
+}
+
+static void ps2_update_modifier_state(UINT32 bit, BOOLEAN pressed)
+{
+    if (pressed) {
+        mPs2ModifierState |= bit;
+    } else {
+        mPs2ModifierState &= ~bit;
+    }
+    mPs2Shift = (mPs2ModifierState &
+                  (EFI_LEFT_SHIFT_PRESSED | EFI_RIGHT_SHIFT_PRESSED)) != 0;
+}
+
 static CHAR16 ps2_set2_to_char(UINT8 code)
 {
     switch (code) {
@@ -5474,9 +5552,12 @@ static EFI_STATUS ps2_read_key(EFI_INPUT_KEY *Key)
         }
 
         if (mPs2Translated && (code & 0x80) != 0) {
+            UINT32 modifier;
+
             code &= 0x7f;
-            if (ps2_shift_scan_code(code)) {
-                mPs2Shift = 0;
+            modifier = ps2_modifier_state_bit(code, mPs2Extended);
+            if (modifier != 0) {
+                ps2_update_modifier_state(modifier, 0);
             }
             mPs2Break = 0;
             mPs2Extended = 0;
@@ -5484,18 +5565,26 @@ static EFI_STATUS ps2_read_key(EFI_INPUT_KEY *Key)
         }
 
         if (mPs2Break) {
-            if (ps2_shift_scan_code(code)) {
-                mPs2Shift = 0;
+            UINT32 modifier =
+                ps2_modifier_state_bit(code, mPs2Extended);
+
+            if (modifier != 0) {
+                ps2_update_modifier_state(modifier, 0);
             }
             mPs2Break = 0;
             mPs2Extended = 0;
             continue;
         }
 
-        if (ps2_shift_scan_code(code)) {
-            mPs2Shift = 1;
-            mPs2Extended = 0;
-            continue;
+        {
+            UINT32 modifier =
+                ps2_modifier_state_bit(code, mPs2Extended);
+
+            if (modifier != 0) {
+                ps2_update_modifier_state(modifier, 1);
+                mPs2Extended = 0;
+                continue;
+            }
         }
 
         Key->ScanCode = 0;
@@ -5522,6 +5611,10 @@ static EFI_STATUS ps2_read_key(EFI_INPUT_KEY *Key)
         }
         mPs2Extended = 0;
         if (Key->ScanCode != 0 || Key->UnicodeChar != 0) {
+            fw_set_mem(&mConInCurrentKeyState,
+                       sizeof(mConInCurrentKeyState), 0);
+            mConInCurrentKeyState.KeyShiftState =
+                EFI_SHIFT_STATE_VALID | mPs2ModifierState;
             return EFI_SUCCESS;
         }
     }
@@ -5925,6 +6018,36 @@ static BOOLEAN usb_keyboard_report_to_key(EFI_INPUT_KEY *Key)
             Key->UnicodeChar = usb_keyboard_usage_to_char(usage, shift);
         }
         if (Key->ScanCode != 0 || Key->UnicodeChar != 0) {
+            UINT8 modifiers = mUsbKeyboardReport[0];
+            UINT32 state = EFI_SHIFT_STATE_VALID;
+
+            if ((modifiers & (1U << 0)) != 0) {
+                state |= EFI_LEFT_CONTROL_PRESSED;
+            }
+            if ((modifiers & (1U << 1)) != 0) {
+                state |= EFI_LEFT_SHIFT_PRESSED;
+            }
+            if ((modifiers & (1U << 2)) != 0) {
+                state |= EFI_LEFT_ALT_PRESSED;
+            }
+            if ((modifiers & (1U << 3)) != 0) {
+                state |= EFI_LEFT_LOGO_PRESSED;
+            }
+            if ((modifiers & (1U << 4)) != 0) {
+                state |= EFI_RIGHT_CONTROL_PRESSED;
+            }
+            if ((modifiers & (1U << 5)) != 0) {
+                state |= EFI_RIGHT_SHIFT_PRESSED;
+            }
+            if ((modifiers & (1U << 6)) != 0) {
+                state |= EFI_RIGHT_ALT_PRESSED;
+            }
+            if ((modifiers & (1U << 7)) != 0) {
+                state |= EFI_RIGHT_LOGO_PRESSED;
+            }
+            fw_set_mem(&mConInCurrentKeyState,
+                       sizeof(mConInCurrentKeyState), 0);
+            mConInCurrentKeyState.KeyShiftState = state;
             return 1;
         }
     }
@@ -5984,6 +6107,8 @@ static BOOLEAN conin_uart_read_wait(UINT8 *ch)
 static EFI_STATUS conin_read_device_key(EFI_INPUT_KEY *Key)
 {
     UINT8 ch;
+
+    fw_set_mem(&mConInCurrentKeyState, sizeof(mConInCurrentKeyState), 0);
 
     if (uart_can_read()) {
         ch = uart_getc();
@@ -6060,6 +6185,7 @@ static EFI_STATUS conin_peek_key(EFI_INPUT_KEY *Key)
     EFI_STATUS st;
 
     if (mConInBufferedKeyValid) {
+        mConInCurrentKeyState = mConInBufferedKeyState;
         if (Key != NULL) {
             *Key = mConInBufferedKey;
         }
@@ -6071,6 +6197,7 @@ static EFI_STATUS conin_peek_key(EFI_INPUT_KEY *Key)
         return st;
     }
     mConInBufferedKeyValid = 1;
+    mConInBufferedKeyState = mConInCurrentKeyState;
     if (Key != NULL) {
         *Key = mConInBufferedKey;
     }
@@ -6087,6 +6214,7 @@ static void conin_fill_key_data(EFI_KEY_DATA *KeyData,
 {
     fw_set_mem(KeyData, sizeof(*KeyData), 0);
     KeyData->Key = *Key;
+    KeyData->KeyState = mConInCurrentKeyState;
 }
 
 static BOOLEAN conin_key_notify_matches(const EFI_KEY_DATA *Registered,
@@ -6150,6 +6278,8 @@ static EFI_STATUS conin_reset(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This,
     (void)This; (void)ExtendedVerification;
     mConInBufferedKeyValid = 0;
     fw_set_mem(&mConInBufferedKey, sizeof(mConInBufferedKey), 0);
+    fw_set_mem(&mConInBufferedKeyState, sizeof(mConInBufferedKeyState), 0);
+    fw_set_mem(&mConInCurrentKeyState, sizeof(mConInCurrentKeyState), 0);
     mUsbKeyboardTried = 0;
     mUsbKeyboardReady = 0;
     fw_set_mem(mUsbKeyboardPreviousReport,
@@ -6165,8 +6295,11 @@ static EFI_STATUS conin_read_key_raw(EFI_INPUT_KEY *Key)
     }
     if (mConInBufferedKeyValid) {
         *Key = mConInBufferedKey;
+        mConInCurrentKeyState = mConInBufferedKeyState;
         mConInBufferedKeyValid = 0;
         fw_set_mem(&mConInBufferedKey, sizeof(mConInBufferedKey), 0);
+        fw_set_mem(&mConInBufferedKeyState,
+                   sizeof(mConInBufferedKeyState), 0);
         return EFI_SUCCESS;
     }
 
@@ -11371,9 +11504,13 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        LEGACY_IO_BASE,
                                        LEGACY_IO_SPARSE_LIMIT,
                                        EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) ||
-        !efi_memory_map_has_descriptor(EfiACPIReclaimMemory,
-                                       ACPI_RECLAIM_BASE, ACPI_RECLAIM_END,
+        !efi_memory_map_has_descriptor(EfiACPIMemoryNVS,
+                                       ACPI_RECLAIM_BASE,
+                                       ACPI_RECLAIM_TABLE_BASE,
                                        EFI_MEMORY_WB) ||
+        !efi_memory_map_has_descriptor(EfiACPIReclaimMemory,
+                                       ACPI_RECLAIM_TABLE_BASE,
+                                       ACPI_RECLAIM_END, EFI_MEMORY_WB) ||
         !efi_memory_map_is_sorted() ||
         !efi_memory_map_has_ia64_descriptor_alignment() ||
         !efi_memory_map_covers_range(EfiRuntimeServicesCode,
@@ -11898,8 +12035,11 @@ static void efi_init_memory_map(void)
      */
     efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
                          FW_LOW_RECLAIM_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiACPIReclaimMemory, ACPI_RECLAIM_BASE,
-                         ACPI_RECLAIM_END, EFI_MEMORY_WB);
+    efi_add_memory_range(&index, EfiACPIMemoryNVS, ACPI_RECLAIM_BASE,
+                         ACPI_RECLAIM_TABLE_BASE, EFI_MEMORY_WB);
+    efi_add_memory_range(&index, EfiACPIReclaimMemory,
+                         ACPI_RECLAIM_TABLE_BASE, ACPI_RECLAIM_END,
+                         EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, ACPI_RECLAIM_END,
                          FW_LOW_FREE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,
@@ -13415,6 +13555,8 @@ static BOOLEAN __attribute__((noinline)) uefi_conin_buffer_selftest(void)
 {
     BOOLEAN saved_valid = mConInBufferedKeyValid;
     EFI_INPUT_KEY saved_key = mConInBufferedKey;
+    EFI_KEY_STATE saved_buffered_state = mConInBufferedKeyState;
+    EFI_KEY_STATE saved_current_state = mConInCurrentKeyState;
     EFI_INPUT_KEY peek;
     EFI_INPUT_KEY key;
     BOOLEAN ok = 1;
@@ -13422,6 +13564,9 @@ static BOOLEAN __attribute__((noinline)) uefi_conin_buffer_selftest(void)
     mConInBufferedKeyValid = 1;
     mConInBufferedKey.ScanCode = 0;
     mConInBufferedKey.UnicodeChar = 'X';
+    fw_set_mem(&mConInBufferedKeyState, sizeof(mConInBufferedKeyState), 0);
+    mConInBufferedKeyState.KeyShiftState =
+        EFI_SHIFT_STATE_VALID | EFI_LEFT_SHIFT_PRESSED;
 
     if (!conin_key_available() ||
         conin_peek_key(&peek) != EFI_SUCCESS ||
@@ -13431,12 +13576,16 @@ static BOOLEAN __attribute__((noinline)) uefi_conin_buffer_selftest(void)
         conin_read_key_raw(&key) != EFI_SUCCESS ||
         key.ScanCode != 0 ||
         key.UnicodeChar != 'X' ||
+        mConInCurrentKeyState.KeyShiftState !=
+            (EFI_SHIFT_STATE_VALID | EFI_LEFT_SHIFT_PRESSED) ||
         mConInBufferedKeyValid) {
         ok = 0;
     }
 
     mConInBufferedKeyValid = saved_valid;
     mConInBufferedKey = saved_key;
+    mConInBufferedKeyState = saved_buffered_state;
+    mConInCurrentKeyState = saved_current_state;
     return ok;
 }
 
@@ -13445,6 +13594,7 @@ static BOOLEAN __attribute__((noinline)) uefi_ps2_scancode_selftest(void)
     BOOLEAN saved_break = mPs2Break;
     BOOLEAN saved_extended = mPs2Extended;
     BOOLEAN saved_shift = mPs2Shift;
+    UINT32 saved_modifier_state = mPs2ModifierState;
     BOOLEAN saved_translated = mPs2Translated;
     BOOLEAN ok = 1;
 
@@ -13452,9 +13602,12 @@ static BOOLEAN __attribute__((noinline)) uefi_ps2_scancode_selftest(void)
     mPs2Extended = 0;
     mPs2Translated = 1;
     mPs2Shift = 0;
+    mPs2ModifierState = 0;
     if (ps2_shift_scan_code(0x12) ||
         !ps2_shift_scan_code(0x2a) ||
         !ps2_shift_scan_code(0x36) ||
+        ps2_modifier_state_bit(0x2a, 0) != EFI_LEFT_SHIFT_PRESSED ||
+        ps2_modifier_state_bit(0x36, 0) != EFI_RIGHT_SHIFT_PRESSED ||
         ps2_set1_to_char(0x12) != 'e' ||
         ps2_lookup_efi_scan(mPs2Set1EfiScanMap,
                             FW_ARRAY_SIZE(mPs2Set1EfiScanMap),
@@ -13468,9 +13621,12 @@ static BOOLEAN __attribute__((noinline)) uefi_ps2_scancode_selftest(void)
 
     mPs2Translated = 0;
     mPs2Shift = 0;
+    mPs2ModifierState = 0;
     if (!ps2_shift_scan_code(0x12) ||
         !ps2_shift_scan_code(0x59) ||
         ps2_shift_scan_code(0x2a) ||
+        ps2_modifier_state_bit(0x12, 0) != EFI_LEFT_SHIFT_PRESSED ||
+        ps2_modifier_state_bit(0x59, 0) != EFI_RIGHT_SHIFT_PRESSED ||
         ps2_set2_to_char(0x24) != 'e' ||
         ps2_lookup_efi_scan(mPs2Set2EfiScanMap,
                             FW_ARRAY_SIZE(mPs2Set2EfiScanMap),
@@ -13485,6 +13641,7 @@ static BOOLEAN __attribute__((noinline)) uefi_ps2_scancode_selftest(void)
     mPs2Break = saved_break;
     mPs2Extended = saved_extended;
     mPs2Shift = saved_shift;
+    mPs2ModifierState = saved_modifier_state;
     mPs2Translated = saved_translated;
     return ok;
 }
@@ -13493,6 +13650,7 @@ static BOOLEAN __attribute__((noinline)) uefi_usb_keyboard_selftest(void)
 {
     UINT8 saved_report[OHCI_USB_KEYBOARD_REPORT_SIZE];
     UINT8 saved_previous[OHCI_USB_KEYBOARD_REPORT_SIZE];
+    EFI_KEY_STATE saved_current_state = mConInCurrentKeyState;
     EFI_INPUT_KEY key;
     BOOLEAN ok = 1;
 
@@ -13505,7 +13663,8 @@ static BOOLEAN __attribute__((noinline)) uefi_usb_keyboard_selftest(void)
 
     mUsbKeyboardReport[2] = 0x04;
     if (!usb_keyboard_report_to_key(&key) ||
-        key.ScanCode != 0 || key.UnicodeChar != 'a') {
+        key.ScanCode != 0 || key.UnicodeChar != 'a' ||
+        mConInCurrentKeyState.KeyShiftState != EFI_SHIFT_STATE_VALID) {
         ok = 0;
     }
     fw_copy_mem(mUsbKeyboardPreviousReport, mUsbKeyboardReport,
@@ -13519,7 +13678,9 @@ static BOOLEAN __attribute__((noinline)) uefi_usb_keyboard_selftest(void)
     mUsbKeyboardReport[0] = 1U << 1;
     mUsbKeyboardReport[2] = 0x04;
     if (!usb_keyboard_report_to_key(&key) ||
-        key.ScanCode != 0 || key.UnicodeChar != 'A') {
+        key.ScanCode != 0 || key.UnicodeChar != 'A' ||
+        mConInCurrentKeyState.KeyShiftState !=
+            (EFI_SHIFT_STATE_VALID | EFI_LEFT_SHIFT_PRESSED)) {
         ok = 0;
     }
 
@@ -13533,6 +13694,7 @@ static BOOLEAN __attribute__((noinline)) uefi_usb_keyboard_selftest(void)
     fw_copy_mem(mUsbKeyboardReport, saved_report, sizeof(saved_report));
     fw_copy_mem(mUsbKeyboardPreviousReport, saved_previous,
                 sizeof(saved_previous));
+    mConInCurrentKeyState = saved_current_state;
     return ok;
 }
 

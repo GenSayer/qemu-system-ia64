@@ -1,0 +1,98 @@
+IA-64 testing
+===============
+
+The IA-64 tests are organized by the interface they observe.  A CSV inventory
+or the presence of a C symbol is not a test oracle: a test must execute the
+relevant behavior and compare an architectural or guest-visible result.
+
+Test layers
+-----------
+
+``tests/unit/``
+  Pure decoder, floating-point register-format, and firmware ABI layout tests.
+  These do not boot a guest.  ``test-ia64-fpreg`` checks the architected spill
+  representation rather than the host ``float64`` cache.
+
+``tests/unit/ia64/``
+  Hand-encoded TCG microprograms split into non-overlapping ``core``,
+  ``memory-nat``, ``fp``, ``rse``, ``mmu``, ``interrupt``, and ``pal`` groups.
+  The runner starts QEMU paused, resumes it with QMP, waits for an explicit
+  terminal IP or predicate, stops it, and parses ``IA64STATE`` records.  There
+  is no fixed startup delay.  GR NaT, FR spill pairs and NaTVal, predicates,
+  FPSR, UNAT, CCV, CFM, and rotation state can therefore be asserted directly.
+  The end-to-end GDB test starts QEMU with ``-s`` and checks the IA-64 raw
+  register layout, 128-bit FR transfer format, writable registers, and the
+  architecturally constant r0 and p0 registers over the remote protocol.
+
+``tests/qtest/``
+  Machine wiring tests.  They cover the IA-64 handoff block, RTC, persistent
+  NVRAM, PCI configuration space, sparse I/O, I/O SAPIC Remote IRR, and ATI
+  VGA pitch/stride without depending on firmware console prose.
+
+``tests/functional/ia64/``
+  Project-owned EFI applications booted from deterministic FAT, GPT, MBR,
+  El Torito, and UDF media.  Guest results use the stable protocol::
+
+    IA64TEST suite=<suite> case=<case> status=PASS
+    IA64TEST suite=<suite> case=<case> status=FAIL code=<hex> detail=<text>
+    IA64TEST suite=<suite> status=DONE passed=<n> failed=<n>
+
+  Success requires one result for every required case, ``failed=0``, a valid
+  ``DONE`` count, and a live QEMU process.  Merely keeping QEMU alive or finding
+  a firmware message is not success.
+
+Running the tests
+-----------------
+
+Configure an IA-64 system build and build QEMU and the firmware::
+
+  ./configure --target-list=ia64-softmmu
+  ninja -C build qemu-system-ia64 \
+      roms/ia64-firmware/ia64-firmware.bin
+
+Run all IA-64 unit and TCG tests::
+
+  build/pyvenv/bin/meson test -C build --suite ia64 --print-errorlogs
+
+Use this build-local Meson rather than an arbitrary host installation.  QEMU's
+configure process selects it to match the version that wrote the build data.
+Plain ``meson test`` in the source directory has no build data to read; either
+pass ``-C build`` as above or run ``./pyvenv/bin/meson test`` from ``build``.
+
+Run one microprogram, a substring selection, or a repeated case::
+
+  python3 tests/unit/ia64/test_tcg_group.py \
+      build/qemu-system-ia64 --group fp \
+      --test fma_preserves_extended_precision
+  python3 tests/unit/ia64/test_tcg_group.py \
+      build/qemu-system-ia64 --group mmu --match vhpt
+  python3 tests/unit/ia64/test_tcg_group.py \
+      build/qemu-system-ia64 --test addp4_decode --repeat 100
+
+Run machine tests and project-owned firmware tests::
+
+  build/pyvenv/bin/meson test -C build --suite qtest-ia64 --print-errorlogs
+  build/pyvenv/bin/meson test -C build --suite func-ia64 --print-errorlogs
+  build/pyvenv/bin/meson test -C build --suite func-ia64-thorough --print-errorlogs
+
+The EFI applications require ``ia64-linux-gnu-gcc``, ``ld``, and ``objcopy``.
+Meson builds each application once; functional tests consume those outputs and
+do not invoke a compiler for each scenario.
+
+Adding a TCG case
+-----------------
+
+Derive the encoding and expected behavior from the IA-64 architecture manual,
+not from the translator implementation.  Reuse the encoder in
+``tests/unit/ia64/encoding.py``, give the program an explicit terminal loop,
+and list its name in exactly one explicit ``cases_*.py`` group manifest.  The
+registry rejects missing, duplicate, or renamed entries.  Arithmetic tests
+should assert the destination FR spill pair and FPSR directly.  Do not append
+``getf`` or ``stf`` only to observe an arithmetic result; those instructions
+have their own transfer tests.  Likewise, assert the GR NaT bitmap and
+predicate mask instead of inserting ``tnat`` and predicated ``adds`` as an
+observer.
+
+The command below lists the registry without starting QEMU::
+
+  python3 tests/unit/ia64/test_tcg_group.py --list

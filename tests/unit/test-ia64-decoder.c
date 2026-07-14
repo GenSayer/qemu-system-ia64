@@ -20,6 +20,10 @@ typedef struct TestCase {
 
 static char failure[128];
 
+static const uint8_t reserved_templates[] = {
+    0x06, 0x07, 0x14, 0x15, 0x1a, 0x1b, 0x1e, 0x1f,
+};
+
 static const char *failf(const char *message)
 {
     snprintf(failure, sizeof(failure), "%s", message);
@@ -80,6 +84,22 @@ static const char *test_template_inventory(void)
 
     for (i = 0; i < 32; ++i) {
         const IA64TemplateInfo *info = ia64_template_info(i);
+        bool expected_reserved = false;
+        unsigned j;
+
+        for (j = 0; j < sizeof(reserved_templates); ++j) {
+            if (reserved_templates[j] == i) {
+                expected_reserved = true;
+                break;
+            }
+        }
+
+        if (info->defined == expected_reserved) {
+            snprintf(failure, sizeof(failure),
+                     "template 0x%02x: expected %s", i,
+                     expected_reserved ? "reserved" : "defined");
+            return failure;
+        }
 
         if (info->defined) {
             ++defined;

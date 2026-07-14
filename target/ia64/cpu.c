@@ -14,6 +14,7 @@
 #include "qemu/timer.h"
 #include "cpu.h"
 #include "decoder.h"
+#include "fpreg.h"
 #include "exec/cputlb.h"
 #include "exec/cpu-common.h"
 #include "exec/page-protection.h"
@@ -8685,23 +8686,20 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         }
         tmp = tcg_temp_new_i64();
         tcg_gen_setcond_i64(cond, tmp, src2, src3);
+        /* Parallel AND/OR compares apply the same result to both targets. */
         if (is_and) {
             if (insn->p1 != 0) {
                 tcg_gen_and_i64(cpu_pr[insn->p1], cpu_pr[insn->p1], tmp);
             }
             if (insn->p2 != 0) {
-                TCGv_i64 not_tmp = tcg_temp_new_i64();
-                tcg_gen_xori_i64(not_tmp, tmp, 1);
-                tcg_gen_and_i64(cpu_pr[insn->p2], cpu_pr[insn->p2], not_tmp);
+                tcg_gen_and_i64(cpu_pr[insn->p2], cpu_pr[insn->p2], tmp);
             }
         } else if (is_or) {
             if (insn->p1 != 0) {
                 tcg_gen_or_i64(cpu_pr[insn->p1], cpu_pr[insn->p1], tmp);
             }
             if (insn->p2 != 0) {
-                TCGv_i64 not_tmp = tcg_temp_new_i64();
-                tcg_gen_xori_i64(not_tmp, tmp, 1);
-                tcg_gen_or_i64(cpu_pr[insn->p2], cpu_pr[insn->p2], not_tmp);
+                tcg_gen_or_i64(cpu_pr[insn->p2], cpu_pr[insn->p2], tmp);
             }
         } else if (is_or_andcm) {
             if (insn->p1 != 0) {
@@ -12345,6 +12343,7 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     if (excp == IA64_EXCP_NONE) {
         return;
     }
+    cpu->env.fault_exception = excp;
 
     if (!(cpu->env.psr & IA64_PSR_IC) &&
         !ia64_exception_is_translation_fault(excp) &&
@@ -12572,6 +12571,70 @@ static void ia64_dump_tlb(FILE *f, const char *name, const IA64TlbEntry *tlb,
     }
 }
 
+static void ia64_dump_machine_state(CPUState *cs, FILE *f, int flags)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    CPUIA64State *env = &cpu->env;
+    uint64_t pr_mask = 1;
+    unsigned i;
+
+    for (i = 1; i < IA64_PR_COUNT; i++) {
+        pr_mask |= (env->pr[i] != 0) ? 1ULL << i : 0;
+    }
+
+    qemu_fprintf(f, "IA64STATE META ip=%016" PRIx64
+                 " psr=%016" PRIx64 " halted=%u\n",
+                 env->ip, env->psr, cs->halted ? 1 : 0);
+    qemu_fprintf(f, "IA64STATE EXCEPTION code=%016" PRIx64
+                 " fault_code=%016" PRIx64
+                 " fault_ip=%016" PRIx64 " fault_imm=%016" PRIx64 "\n",
+                 (uint64_t)env->exception,
+                 (uint64_t)env->fault_exception,
+                 env->fault_ip, env->fault_imm);
+    qemu_fprintf(f, "IA64STATE GRNAT lo=%016" PRIx64
+                 " hi=%016" PRIx64 "\n", env->nat[0], env->nat[1]);
+
+    for (i = 0; i < IA64_GR_COUNT; i++) {
+        qemu_fprintf(f, "IA64STATE GR index=%03x value=%016" PRIx64
+                     " nat=%u\n", i, i == 0 ? 0 : env->gr[i],
+                     (unsigned)((env->nat[i / 64] >> (i % 64)) & 1));
+    }
+    for (i = 0; i < IA64_BR_COUNT; i++) {
+        qemu_fprintf(f, "IA64STATE BR index=%03x value=%016" PRIx64 "\n",
+                     i, env->br[i]);
+    }
+
+    qemu_fprintf(f, "IA64STATE PR value=%016" PRIx64 "\n", pr_mask);
+    qemu_fprintf(f, "IA64STATE AR ccv=%016" PRIx64
+                 " unat=%016" PRIx64 " fpsr=%016" PRIx64
+                 " csd=%016" PRIx64 " ssd=%016" PRIx64
+                 " rsc=%016" PRIx64 " rnat=%016" PRIx64
+                 " pfs=%016" PRIx64 "\n",
+                 env->ar_ccv, env->ar_unat, env->ar_fpsr,
+                 env->ar_csd, env->ar_ssd, env->ar_rsc,
+                 env->ar_rnat, env->ar_pfs);
+    qemu_fprintf(f, "IA64STATE CFM sof=%016" PRIx64
+                 " sol=%016" PRIx64 " sor=%016" PRIx64
+                 " rrb_gr=%016" PRIx64 " rrb_fr=%016" PRIx64
+                 " rrb_pr=%016" PRIx64 "\n",
+                 (uint64_t)env->cfm_sof, (uint64_t)env->cfm_sol,
+                 (uint64_t)env->cfm_sor, (uint64_t)env->cfm_rrb_gr,
+                 (uint64_t)env->cfm_rrb_fr, (uint64_t)env->cfm_rrb_pr);
+
+    if (flags & CPU_DUMP_FPU) {
+        for (i = 0; i < IA64_FR_COUNT; i++) {
+            uint64_t low;
+            uint64_t high;
+
+            ia64_fpreg_to_spill(env, i, &low, &high);
+            qemu_fprintf(f, "IA64STATE FR index=%03x low=%016" PRIx64
+                         " high=%016" PRIx64 " nat=%u\n",
+                         i, low, high,
+                         ia64_fpreg_is_nat(env, i) ? 1 : 0);
+        }
+    }
+}
+
 static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -12659,6 +12722,99 @@ static void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  cpu->env.ar_rnat, cpu->env.ar_rsc);
     ia64_dump_tlb(f, "ITLB", cpu->env.tlb_inst, cpu->env.tlb_inst_count);
     ia64_dump_tlb(f, "DTLB", cpu->env.tlb_data, cpu->env.tlb_data_count);
+    ia64_dump_machine_state(cs, f, flags);
+}
+
+/*
+ * Keep this layout in sync with GDB's regformats/reg-ia64.dat.  IA-64 GDB
+ * predates target-description XML and expects this 462-register raw layout.
+ * In particular, floating-point registers occupy 128 bits on the wire even
+ * though only 82 bits are architecturally significant.
+ */
+enum {
+    IA64_GDB_GR0_REGNUM = 0,
+    IA64_GDB_FR0_REGNUM = 128,
+    IA64_GDB_PR0_REGNUM = 256,
+    IA64_GDB_BR0_REGNUM = 320,
+    IA64_GDB_VFP_REGNUM = 328,
+    IA64_GDB_VRAP_REGNUM = 329,
+    IA64_GDB_PR_REGNUM = 330,
+    IA64_GDB_IP_REGNUM = 331,
+    IA64_GDB_PSR_REGNUM = 332,
+    IA64_GDB_CFM_REGNUM = 333,
+    IA64_GDB_AR0_REGNUM = 334,
+    IA64_GDB_NUM_CORE_REGS = 462,
+};
+
+static uint64_t ia64_gdb_read_pr(const CPUIA64State *env)
+{
+    uint64_t value = 1;
+
+    for (unsigned logical = 1; logical < IA64_PR_COUNT; logical++) {
+        unsigned physical = logical;
+
+        if (logical >= 16) {
+            physical = 16 + ((logical - 16 + env->cfm_rrb_pr) % 48);
+        }
+        value |= (uint64_t)(env->pr[logical] != 0) << physical;
+    }
+    return value;
+}
+
+static void ia64_gdb_write_pr(CPUIA64State *env, uint64_t value)
+{
+    for (unsigned logical = 1; logical < IA64_PR_COUNT; logical++) {
+        unsigned physical = logical;
+
+        if (logical >= 16) {
+            physical = 16 + ((logical - 16 + env->cfm_rrb_pr) % 48);
+        }
+        env->pr[logical] = (value >> physical) & 1;
+    }
+    env->pr[0] = 1;
+}
+
+static uint64_t ia64_gdb_read_cfm(const CPUIA64State *env)
+{
+    return env->cfm_sof
+        | ((uint64_t)env->cfm_sol << IA64_CFM_SOL_SHIFT)
+        | ((uint64_t)env->cfm_sor << IA64_CFM_SOR_SHIFT)
+        | ((uint64_t)env->cfm_rrb_gr << IA64_CFM_RRB_GR_SHIFT)
+        | ((uint64_t)env->cfm_rrb_fr << IA64_CFM_RRB_FR_SHIFT)
+        | ((uint64_t)env->cfm_rrb_pr << IA64_CFM_RRB_PR_SHIFT);
+}
+
+static void ia64_gdb_write_cfm(CPUIA64State *env, uint64_t value)
+{
+    unsigned sof = value & IA64_CFM_SOF_MASK;
+    unsigned sol = (value & IA64_CFM_SOL_MASK) >> IA64_CFM_SOL_SHIFT;
+    unsigned sor = (value & IA64_CFM_SOR_MASK) >> IA64_CFM_SOR_SHIFT;
+    unsigned rrb_gr = (value & IA64_CFM_RRB_GR_MASK) >>
+                      IA64_CFM_RRB_GR_SHIFT;
+    unsigned rrb_fr = (value & IA64_CFM_RRB_FR_MASK) >>
+                      IA64_CFM_RRB_FR_SHIFT;
+    unsigned rrb_pr = (value & IA64_CFM_RRB_PR_MASK) >>
+                      IA64_CFM_RRB_PR_SHIFT;
+    uint64_t physical_pr;
+
+    /*
+     * Changing the frame shape or RRB.GR also changes the RSE partitions and
+     * its logical stacked-register view.  There is no fault-reporting channel
+     * in the GDB callback, so reject such writes instead of leaving an
+     * internally inconsistent RSE.  RRB.FR and RRB.PR have complete rebasing
+     * setters and can safely be changed independently.
+     */
+    if (sof != env->cfm_sof || sol != env->cfm_sol ||
+        sor != env->cfm_sor || rrb_gr != env->cfm_rrb_gr ||
+        rrb_fr >= 96 || rrb_pr >= 48) {
+        return;
+    }
+
+    physical_pr = ia64_gdb_read_pr(env);
+    ia64_set_cfm_rrb_fr(env, rrb_fr);
+    env->cfm_rrb_pr = rrb_pr;
+    /* env->pr[] is a logical view; preserve the raw physical PR file. */
+    ia64_gdb_write_pr(env, physical_pr);
 }
 
 static int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *buf, int reg)
@@ -12667,42 +12823,34 @@ static int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *buf, int reg)
     CPUIA64State *env = &cpu->env;
     uint64_t val = 0;
 
-    if (reg < IA64_GR_COUNT) {
-        val = env->gr[reg];
-    } else if (reg < 128 + IA64_FR_COUNT) {
-        uint32_t freg = reg - 128;
-        if (freg == 1) {
-            val = IA64_FR_ONE;
-        } else if (freg != 0) {
-            val = env->fr[freg];
-        }
-    } else if (reg < 256 + IA64_BR_COUNT) {
-        val = env->br[reg - 256];
-    } else if (reg < 264 + IA64_PR_COUNT) {
-        val = env->pr[reg - 264];
+    if (reg >= IA64_GDB_GR0_REGNUM && reg < IA64_GDB_FR0_REGNUM) {
+        val = reg == 0 ? 0 : env->gr[reg];
+    } else if (reg < IA64_GDB_PR0_REGNUM) {
+        uint64_t low, high;
+
+        ia64_fpreg_to_spill(env, reg - IA64_GDB_FR0_REGNUM, &low, &high);
+        return gdb_get_reg128(buf, high, low);
+    } else if (reg < IA64_GDB_BR0_REGNUM) {
+        val = (ia64_gdb_read_pr(env) >>
+               (reg - IA64_GDB_PR0_REGNUM)) & 1;
+    } else if (reg < IA64_GDB_VFP_REGNUM) {
+        val = env->br[reg - IA64_GDB_BR0_REGNUM];
+    } else if (reg == IA64_GDB_VFP_REGNUM ||
+               reg == IA64_GDB_VRAP_REGNUM) {
+        /* GDB computes these virtual registers itself. */
+    } else if (reg == IA64_GDB_PR_REGNUM) {
+        val = ia64_gdb_read_pr(env);
+    } else if (reg == IA64_GDB_IP_REGNUM) {
+        val = env->ip;
+    } else if (reg == IA64_GDB_PSR_REGNUM) {
+        val = env->psr;
+    } else if (reg == IA64_GDB_CFM_REGNUM) {
+        val = ia64_gdb_read_cfm(env);
+    } else if (reg >= IA64_GDB_AR0_REGNUM &&
+               reg < IA64_GDB_NUM_CORE_REGS) {
+        val = helper_read_ar(env, reg - IA64_GDB_AR0_REGNUM);
     } else {
-        switch (reg) {
-        case 328:
-            val = env->ip;
-            break;
-        case 329:
-            val = env->psr;
-            break;
-        case 330:
-            val = env->cfm_sof | ((uint64_t)env->cfm_sol << 7)
-                | ((uint64_t)env->cfm_sor << 14)
-                | ((uint64_t)env->cfm_rrb_gr << 18)
-                | ((uint64_t)env->cfm_rrb_fr << 25)
-                | ((uint64_t)env->cfm_rrb_pr << 32);
-            break;
-        default:
-            if (reg >= 340 && reg < 340 + IA64_AR_COUNT) {
-                val = env->ar[reg - 340];
-            } else if (reg >= 468 && reg < 468 + IA64_CR_COUNT) {
-                val = env->cr[reg - 468];
-            }
-            break;
-        }
+        return 0;
     }
 
     return gdb_get_reg64(buf, val);
@@ -12714,48 +12862,57 @@ static int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *buf, int reg)
     CPUIA64State *env = &cpu->env;
     uint64_t val = ldq_p(buf);
 
-    if (reg < IA64_GR_COUNT) {
-        env->gr[reg] = val;
-        ia64_rse_mark_gr_dirty(env, reg);
-    } else if (reg < 128 + IA64_FR_COUNT) {
-        uint32_t freg = reg - 128;
-        if (freg > 1) {
-            env->fr[freg] = val;
-            env->fr_ext_valid[freg / 64] &= ~(1ULL << (freg % 64));
-            if (freg >= 32) {
-                env->rotating_fr_live = true;
+    if (reg >= IA64_GDB_GR0_REGNUM && reg < IA64_GDB_FR0_REGNUM) {
+        if (reg != 0) {
+            env->gr[reg] = val;
+            ia64_rse_mark_gr_dirty(env, reg);
+            helper_invalidate_alat_reg(env, reg);
+        }
+    } else if (reg < IA64_GDB_PR0_REGNUM) {
+        unsigned freg = reg - IA64_GDB_FR0_REGNUM;
+
+        ia64_fpreg_from_spill(env, freg, val, ldq_p(buf + 8));
+        helper_invalidate_alat_fp_reg(env, freg);
+        return 16;
+    } else if (reg < IA64_GDB_BR0_REGNUM) {
+        unsigned predicate = reg - IA64_GDB_PR0_REGNUM;
+        uint64_t physical_pr = ia64_gdb_read_pr(env);
+
+        if (predicate != 0) {
+            if (val) {
+                physical_pr |= 1ULL << predicate;
+            } else {
+                physical_pr &= ~(1ULL << predicate);
             }
         }
-    } else if (reg < 256 + IA64_BR_COUNT) {
-        env->br[reg - 256] = val;
-    } else if (reg < 264 + IA64_PR_COUNT) {
-        env->pr[reg - 264] = val != 0;
+        ia64_gdb_write_pr(env, physical_pr);
+    } else if (reg < IA64_GDB_VFP_REGNUM) {
+        env->br[reg - IA64_GDB_BR0_REGNUM] = val;
+    } else if (reg == IA64_GDB_VFP_REGNUM ||
+               reg == IA64_GDB_VRAP_REGNUM) {
+        /* Read-only virtual registers. */
+    } else if (reg == IA64_GDB_PR_REGNUM) {
+        ia64_gdb_write_pr(env, val);
+    } else if (reg == IA64_GDB_IP_REGNUM) {
+        env->ip = val;
+    } else if (reg == IA64_GDB_PSR_REGNUM) {
+        helper_mov_psr_write(env, val, 0);
+    } else if (reg == IA64_GDB_CFM_REGNUM) {
+        ia64_gdb_write_cfm(env, val);
+    } else if (reg >= IA64_GDB_AR0_REGNUM &&
+               reg < IA64_GDB_NUM_CORE_REGS) {
+        unsigned ar = reg - IA64_GDB_AR0_REGNUM;
+
+        if (ar != 17 && (ar != 18 || val != env->ar_bspstore)) {
+            /*
+             * AR.BSP is derived and read-only.  Reapplying the current
+             * BSPSTORE would needlessly invalidate the RSE clean partition,
+             * which makes a GDB g/G register echo non-idempotent.
+             */
+            helper_write_ar(env, ar, val);
+        }
     } else {
-        switch (reg) {
-        case 328:
-            env->ip = val;
-            break;
-        case 329:
-            env->psr = val;
-            break;
-        case 330: {
-            uint64_t cfm = val;
-            env->cfm_sof = cfm & 0x7f;
-            env->cfm_sol = (cfm >> 7) & 0x7f;
-            env->cfm_sor = (cfm >> 14) & 0x0f;
-            env->cfm_rrb_gr = (cfm >> 18) & 0x7f;
-            ia64_set_cfm_rrb_fr(env, (cfm >> 25) & 0x7f);
-            env->cfm_rrb_pr = (cfm >> 32) & 0x3f;
-            break;
-        }
-        default:
-            if (reg >= 340 && reg < 340 + IA64_AR_COUNT) {
-                env->ar[reg - 340] = val;
-            } else if (reg >= 468 && reg < 468 + IA64_CR_COUNT) {
-                env->cr[reg - 468] = val;
-            }
-            break;
-        }
+        return 0;
     }
 
     return 8;
@@ -13260,6 +13417,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->sysemu_ops = &ia64_sysemu_ops;
     cc->gdb_read_register = ia64_cpu_gdb_read_register;
     cc->gdb_write_register = ia64_cpu_gdb_write_register;
+    cc->gdb_num_core_regs = IA64_GDB_NUM_CORE_REGS;
     cc->tcg_ops = &ia64_tcg_ops;
 }
 

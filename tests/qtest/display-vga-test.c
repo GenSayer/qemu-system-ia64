@@ -13,14 +13,34 @@
 #define VBE_DISPI_IOPORT_INDEX 0x1ce
 #define VBE_DISPI_IOPORT_DATA  0x1cf
 #define VBE_DISPI_INDEX_ID     0
+#define VBE_DISPI_INDEX_XRES   1
+#define VBE_DISPI_INDEX_YRES   2
+#define VBE_DISPI_INDEX_BPP    3
 #define VBE_DISPI_INDEX_ENABLE 4
+#define VBE_DISPI_INDEX_VIRT_WIDTH 6
 #define VBE_DISPI_ID5          0xb0c5
 #define VBE_DISPI_ENABLED      0x01
 #define VBE_DISPI_LFB_ENABLED  0x40
+#define VBE_DISPI_NOCLEARMEM   0x80
 #define IA64_LEGACY_IO_BASE    0x000000800010000000ULL
+#define IA64_ATI_FB_BASE       0x00000000c4000000ULL
+#define IA64_ATI_MMIO_BASE     0x00000000c8000000ULL
+#define ATI_CRTC_GEN_CNTL      0x0050
+#define ATI_CRTC_H_TOTAL_DISP  0x0200
+#define ATI_CRTC_V_TOTAL_DISP  0x0208
+#define ATI_CRTC_OFFSET        0x0224
+#define ATI_CRTC_PITCH         0x022c
+#define ATI_CRTC_EXT_DISP_EN   0x01000000
+#define ATI_CRTC_EN            0x02000000
+#define ATI_CRTC_PIX_WIDTH_32  0x00000600
 #define VGA_SEQ_INDEX          0x3c4
 #define VGA_SEQ_DATA           0x3c5
 #define VGA_SEQ_RESET          0
+#define VGA_CRTC_INDEX         0x3b4
+#define VGA_CRTC_DATA          0x3b5
+#define VGA_CRTC_OFFSET        0x13
+#define VGA_ATTR_INDEX         0x3c0
+#define VGA_INPUT_STATUS1      0x3ba
 
 static const char *machine_args(void)
 {
@@ -71,24 +91,155 @@ static void vbe_legacy_data_port(void)
     qtest_quit(qts);
 }
 
-static void ati_legacy_mode_switch(void)
+static uint16_t ati_vbe_read(QTestState *qts, uint16_t index)
 {
-    QTestState *qts;
-    uint64_t index = IA64_LEGACY_IO_BASE + VBE_DISPI_IOPORT_INDEX;
-    uint64_t data = index + 2;
+    uint64_t index_port = IA64_LEGACY_IO_BASE + VBE_DISPI_IOPORT_INDEX;
 
-    qts = qtest_init("-machine ia64-vpc");
-    qtest_writew(qts, index, VBE_DISPI_INDEX_ENABLE);
-    qtest_writew(qts, data, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
-    g_assert_cmphex(qtest_readw(qts, data), ==,
-                    VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+    qtest_writew(qts, index_port, index);
+    return qtest_readw(qts, index_port + 2);
+}
+
+static char *ppm_next_token(const uint8_t **cursor, const uint8_t *end)
+{
+    const uint8_t *start;
+
+    while (*cursor < end) {
+        if (g_ascii_isspace(**cursor)) {
+            (*cursor)++;
+            continue;
+        }
+        if (**cursor == '#') {
+            while (*cursor < end && **cursor != '\n') {
+                (*cursor)++;
+            }
+            continue;
+        }
+        break;
+    }
+    g_assert_cmpuint(end - *cursor, >, 0);
+    start = *cursor;
+    while (*cursor < end && !g_ascii_isspace(**cursor) && **cursor != '#') {
+        (*cursor)++;
+    }
+    g_assert_cmpuint(*cursor - start, >, 0);
+    return g_strndup((const char *)start, *cursor - start);
+}
+
+static void assert_ppm_stride(const char *filename, unsigned width,
+                              unsigned height)
+{
+    g_autofree char *contents = NULL;
+    g_autofree char *magic = NULL;
+    g_autofree char *width_token = NULL;
+    g_autofree char *height_token = NULL;
+    g_autofree char *max_token = NULL;
+    g_autoptr(GError) error = NULL;
+    const uint8_t *cursor;
+    const uint8_t *end;
+    const uint8_t *row0;
+    const uint8_t *row1;
+    gsize length;
+
+    g_assert_true(g_file_get_contents(filename, &contents, &length, &error));
+    g_assert_no_error(error);
+    cursor = (const uint8_t *)contents;
+    end = cursor + length;
+    magic = ppm_next_token(&cursor, end);
+    width_token = ppm_next_token(&cursor, end);
+    height_token = ppm_next_token(&cursor, end);
+    max_token = ppm_next_token(&cursor, end);
+    g_assert_cmpstr(magic, ==, "P6");
+    g_assert_cmpuint(g_ascii_strtoull(width_token, NULL, 10), ==, width);
+    g_assert_cmpuint(g_ascii_strtoull(height_token, NULL, 10), ==, height);
+    g_assert_cmpuint(g_ascii_strtoull(max_token, NULL, 10), ==, 255);
+
+    g_assert_true(cursor < end && g_ascii_isspace(*cursor));
+    if (*cursor++ == '\r' && cursor < end && *cursor == '\n') {
+        cursor++;
+    }
+    g_assert_cmpuint(end - cursor, >=, (gsize)width * height * 3);
+    row0 = cursor;
+    row1 = cursor + width * 3;
+
+    /* Both markers are visible only if row 1 starts at the virtual pitch. */
+    g_assert_cmpmem(row0, 3, row1, 3);
+    g_assert_cmpint(memcmp(row0, row0 + 3, 3), !=, 0);
+}
+
+static void ati_stride(void)
+{
+    const unsigned width = 640;
+    const unsigned height = 480;
+    const unsigned bpp = 32;
+    const unsigned virtual_width = 704;
+    const uint64_t pitch = virtual_width * (bpp / 8);
+    const uint32_t marker = 0x00123456;
+    const uint32_t padding_decoy = 0x00654321;
+    QTestState *qts;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *ppm = NULL;
+    g_autoptr(GError) error = NULL;
+
+    qts = qtest_init("-machine ia64-vpc -m 256M -S");
+    /*
+     * Program the ATI CRTC, not the generic VBE ports.  ati_vga_switch_mode()
+     * must translate the Rage128 pitch (eight-pixel units) into the VBE
+     * virtual width used by the common scanout path.
+     */
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_CRTC_H_TOTAL_DISP,
+                 ((width / 8) - 1) << 16);
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_CRTC_V_TOTAL_DISP,
+                 (height - 1) << 16);
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_CRTC_OFFSET, 0);
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_CRTC_PITCH,
+                 virtual_width / 8);
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_CRTC_GEN_CNTL,
+                 ATI_CRTC_EXT_DISP_EN | ATI_CRTC_EN |
+                 ATI_CRTC_PIX_WIDTH_32);
+
+    g_assert_cmphex(ati_vbe_read(qts, VBE_DISPI_INDEX_ENABLE), ==,
+                    VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED |
+                    VBE_DISPI_NOCLEARMEM);
+    g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_XRES), ==, width);
+    g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_YRES), ==, height);
+    g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, bpp);
+    g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_VIRT_WIDTH), ==,
+                     virtual_width);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_CRTC_INDEX,
+                 VGA_CRTC_OFFSET);
+    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_CRTC_DATA), ==,
+                    (pitch / 8) & 0xff);
+
+    /* Leave attribute-controller blanking, as a real VBE client does. */
+    qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_INPUT_STATUS1);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_ATTR_INDEX, 0x20);
+
+    qtest_writel(qts, IA64_ATI_FB_BASE, marker);
+    qtest_writel(qts, IA64_ATI_FB_BASE + width * (bpp / 8), padding_decoy);
+    qtest_writel(qts, IA64_ATI_FB_BASE + pitch, marker);
+
+    tmpdir = g_dir_make_tmp("ia64-ati-stride-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    ppm = g_build_filename(tmpdir, "stride.ppm", NULL);
+    qtest_qmp_assert_success(qts,
+                             "{'execute':'screendump','arguments':"
+                             " {'filename':%s}}", ppm);
+    assert_ppm_stride(ppm, width, height);
 
     qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_INDEX, VGA_SEQ_RESET);
     qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_DATA, 1);
+    g_assert_cmphex(ati_vbe_read(qts, VBE_DISPI_INDEX_ENABLE), ==, 0);
+    g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_VIRT_WIDTH), ==,
+                     virtual_width);
 
-    qtest_writew(qts, index, VBE_DISPI_INDEX_ENABLE);
-    g_assert_cmphex(qtest_readw(qts, data), ==, 0);
+    qtest_system_reset(qts);
+    g_assert_cmphex(ati_vbe_read(qts, VBE_DISPI_INDEX_ENABLE), ==, 0);
+    g_assert_cmphex(ati_vbe_read(qts, VBE_DISPI_INDEX_VIRT_WIDTH), ==, 0);
     qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(ppm), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
 int main(int argc, char **argv)
@@ -120,8 +271,7 @@ int main(int argc, char **argv)
     }
     if (g_str_equal(qtest_get_arch(), "ia64") &&
         qtest_has_device("ati-vga")) {
-        qtest_add_func("/display/pci/ati-legacy-mode-switch",
-                       ati_legacy_mode_switch);
+        qtest_add_func("/display/pci/ati-stride", ati_stride);
     }
 
     return g_test_run();

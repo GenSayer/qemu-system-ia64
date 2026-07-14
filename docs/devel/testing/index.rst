@@ -10,7 +10,7 @@ testing infrastructure.
    main
    qtest
    functional
-   ia64-standard-tests
+   ia64
    acpi-bits
    ci
    fuzzing

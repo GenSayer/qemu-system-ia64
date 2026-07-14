@@ -69,13 +69,24 @@ current working directory.
 
 ## Tests
 
-Useful smoke checks after building:
+Run the behavior-oriented IA-64 unit, TCG, and machine tests after building:
 
 ```sh
-ninja -C build test-ia64-decoder
-python3 tests/unit/test-ia64-device-inventory.py ./build/qemu-system-ia64
-python3 tests/unit/test-ia64-fw-smoke.py ./build/roms/ia64-firmware/ia64-firmware.bin
+build/pyvenv/bin/meson test -C build --suite ia64 --print-errorlogs
+build/pyvenv/bin/meson test -C build --suite qtest-ia64 --print-errorlogs
+build/pyvenv/bin/meson test -C build --suite func-ia64 --print-errorlogs
+build/pyvenv/bin/meson test -C build --suite func-ia64-thorough --print-errorlogs
 ```
+
+Use the build-local Meson shown above.  It is the same version selected by
+QEMU's configure process; a host `meson` of another version may be unable to
+read `build/meson-private/build.dat`.  Plain `meson test` from the source
+directory is not valid because the Meson build data lives under `build`.
+
+The functional suite builds project-owned EFI applications and boots them from
+synthetic media.  See
+[`docs/devel/testing/ia64.rst`](docs/devel/testing/ia64.rst) for focused runs
+and test-authoring rules.
 
 ## Status
 

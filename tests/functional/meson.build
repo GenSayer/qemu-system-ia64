@@ -15,6 +15,7 @@ subdir('alpha')
 subdir('arm')
 subdir('avr')
 subdir('hppa')
+subdir('ia64')
 subdir('i386')
 subdir('loongarch64')
 subdir('m68k')
@@ -58,6 +59,8 @@ foreach speed : ['quick', 'thorough']
     endif
 
     test_deps = [roms, keymap_targets]
+    test_deps += get_variable(
+      'test_' + target_base + '_' + sysmode + '_deps', [])
 
     if speed == 'quick'
       suites = ['func-quick', 'func-' + target_base]

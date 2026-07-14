@@ -5,6 +5,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "cpu.h"
+#include "fpreg.h"
 #include "exec/helper-proto.h"
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
@@ -31,19 +32,10 @@
 #define IA64_PTE_MA_NATPAGE 7
 #define IA64_PTE_RESERVED_MASK ((1ULL << 1) | (3ULL << 50))
 #define IA64_ITIR_RESERVED_MASK (3ULL | (0xffffffffULL << 32))
-#define IA64_FP_REG_INTEGER_EXP 0x1003e
-#define IA64_FP_REG_NATVAL_EXP  0x1fffe
-#define IA64_FP_REG_SPECIAL_EXP 0x1ffff
 #define IA64_FP_WRE_BIAS        0x0ffff
 #define IA64_FP_WRE_EXP_MASK    0x1ffff
 #define IA64_FP_SINGLE_BIAS     127
-#define IA64_FP_SINGLE_EXP_BASE 0x0ff80
-#define IA64_FP_SINGLE_FRAC_MASK ((1ULL << 23) - 1)
 #define IA64_FP_SINGLE_MANT_WIDTH 24
-#define IA64_FP_DOUBLE_EXP_BASE 0x0fc00
-#define IA64_FP_DOUBLE_FRAC_MASK ((1ULL << 52) - 1)
-#define IA64_FP_SIGNIFICAND_INTEGER_BIT (1ULL << 63)
-#define IA64_FP_SPILL_EXP_SIGN_MASK 0x3ffffULL
 #define IA64_FP_ISR_SWA 0x8ULL
 #define IA64_ROTATING_FR_BASE  32
 #define IA64_ROTATING_FR_COUNT (IA64_FR_COUNT - IA64_ROTATING_FR_BASE)
@@ -54,106 +46,29 @@
 #define IA64_CPUID_VERSION_ITANIUM2  0x000000001f010504ULL
 #define IA64_CPUID_FEATURES          ((1ULL << 0) | (1ULL << 32) | (1ULL << 33))
 
-static inline void ia64_fr_ext_clear(CPUIA64State *env, uint32_t reg)
-{
-    if (reg > 1) {
-        env->fr_ext_valid[reg / 64] &= ~(1ULL << (reg % 64));
-    }
-}
-
-static inline void ia64_fr_int_origin_clear(CPUIA64State *env, uint32_t reg)
-{
-    if (reg > 1) {
-        env->fr_int_origin[reg / 64] &= ~(1ULL << (reg % 64));
-    }
-}
-
-static inline void ia64_fr_mark_written(CPUIA64State *env, uint32_t reg)
-{
-    if (reg > 1) {
-        env->psr |= reg >= 32 ? IA64_PSR_MFH : IA64_PSR_MFL;
-        if (reg >= IA64_ROTATING_FR_BASE) {
-            env->rotating_fr_live = true;
-        }
-    }
-}
-
 static inline void ia64_fr_write(CPUIA64State *env, uint32_t reg,
                                  uint64_t value)
 {
-    if (reg > 1) {
-        env->fr[reg] = value;
-        env->fr_nat[reg / 64] &= ~(1ULL << (reg % 64));
-        env->fr_sig[reg / 64] &= ~(1ULL << (reg % 64));
-        ia64_fr_ext_clear(env, reg);
-        ia64_fr_int_origin_clear(env, reg);
-        ia64_fr_mark_written(env, reg);
-    }
+    ia64_fpreg_from_binary64(env, reg, value);
 }
 
 static inline void ia64_fr_write_sig(CPUIA64State *env, uint32_t reg,
                                      uint64_t value)
 {
-    if (reg > 1) {
-        env->fr[reg] = value;
-        env->fr_nat[reg / 64] &= ~(1ULL << (reg % 64));
-        env->fr_sig[reg / 64] |= 1ULL << (reg % 64);
-        ia64_fr_ext_clear(env, reg);
-        env->fr_int_value[reg] = value;
-        env->fr_int_origin[reg / 64] |= 1ULL << (reg % 64);
-        ia64_fr_mark_written(env, reg);
-    }
+    ia64_fpreg_from_spill(env, reg, value, IA64_FP_REG_INTEGER_EXP);
 }
 
 static void ia64_fr_write_ext(CPUIA64State *env, uint32_t reg, bool sign,
                               uint32_t exp, uint64_t mant)
 {
-    uint16_t ext_exp;
-    float_status status;
-
-    if (reg <= 1) {
-        return;
-    }
-
-    if (exp == IA64_FP_REG_SPECIAL_EXP) {
-        ext_exp = 0x7fff;
-    } else if (exp == 0) {
-        ext_exp = 0;
-    } else if (exp > 0xc000 && exp - 0xc000 < 0x7fff) {
-        ext_exp = exp - 0xc000;
-    } else {
-        ext_exp = exp < 0xc000 ? 0 : 0x7fff;
-    }
-
-    status = env->fp_status;
-    env->fr[reg] = floatx80_to_float64(
-        make_floatx80(((uint16_t)sign << 15) | ext_exp, mant), &status);
-    env->fr_nat[reg / 64] &= ~(1ULL << (reg % 64));
-    env->fr_sig[reg / 64] &= ~(1ULL << (reg % 64));
-    ia64_fr_int_origin_clear(env, reg);
-    env->fr_ext_mant[reg] = mant;
-    env->fr_ext_exp[reg] = exp;
-    if (sign) {
-        env->fr_ext_sign[reg / 64] |= 1ULL << (reg % 64);
-    } else {
-        env->fr_ext_sign[reg / 64] &= ~(1ULL << (reg % 64));
-    }
-    env->fr_ext_valid[reg / 64] |= 1ULL << (reg % 64);
-    ia64_fr_mark_written(env, reg);
+    ia64_fpreg_from_spill(env, reg, mant,
+                          (exp & 0x1ffff) | ((uint64_t)sign << 17));
 }
 
 static bool ia64_fr_ext_get(const CPUIA64State *env, uint32_t reg,
                             bool *sign, uint32_t *exp, uint64_t *mant)
 {
-    if (reg <= 1 ||
-        !((env->fr_ext_valid[reg / 64] >> (reg % 64)) & 1)) {
-        return false;
-    }
-
-    *sign = (env->fr_ext_sign[reg / 64] >> (reg % 64)) & 1;
-    *exp = env->fr_ext_exp[reg];
-    *mant = env->fr_ext_mant[reg];
-    return true;
+    return ia64_fpreg_get_extended(env, reg, sign, exp, mant);
 }
 
 static bool ia64_fr_int_origin_get(const CPUIA64State *env, uint32_t reg)
@@ -162,9 +77,20 @@ static bool ia64_fr_int_origin_get(const CPUIA64State *env, uint32_t reg)
            ((env->fr_int_origin[reg / 64] >> (reg % 64)) & 1);
 }
 
-static bool ia64_fr_nat_get(const CPUIA64State *env, uint32_t reg);
-static bool ia64_fr_sig_get(const CPUIA64State *env, uint32_t reg);
-static void ia64_fr_write_nat(CPUIA64State *env, uint32_t reg);
+static inline bool ia64_fr_nat_get(const CPUIA64State *env, uint32_t reg)
+{
+    return ia64_fpreg_is_nat(env, reg);
+}
+
+static inline bool ia64_fr_sig_get(const CPUIA64State *env, uint32_t reg)
+{
+    return ia64_fpreg_is_integer(env, reg);
+}
+
+static inline void ia64_fr_write_nat(CPUIA64State *env, uint32_t reg)
+{
+    ia64_fpreg_from_spill(env, reg, 0, IA64_FP_REG_NATVAL_EXP);
+}
 static void ia64_raise_fp_fault(CPUIA64State *env, uint64_t isr);
 static uint64_t ia64_fp_active_traps(CPUIA64State *env, uint32_t sf);
 static uint64_t ia64_fp_soft_flags_to_ia64(int soft);
@@ -321,144 +247,6 @@ static void ia64_pr_write(CPUIA64State *env, uint32_t reg, bool value)
     env->pr[0] = 1;
 }
 
-static bool ia64_fr_nat_get(const CPUIA64State *env, uint32_t reg)
-{
-    if (reg <= 1) {
-        return false;
-    }
-    return (env->fr_nat[reg / 64] >> (reg % 64)) & 1;
-}
-
-static bool ia64_fr_sig_get(const CPUIA64State *env, uint32_t reg)
-{
-    if (reg <= 1) {
-        return false;
-    }
-    return (env->fr_sig[reg / 64] >> (reg % 64)) & 1;
-}
-
-static void ia64_float64_to_register_format(uint64_t value, uint64_t *sig,
-                                            uint32_t *exp, bool *sign)
-{
-    uint64_t frac = value & IA64_FP_DOUBLE_FRAC_MASK;
-    uint32_t double_exp = (value >> 52) & 0x7ff;
-
-    *sign = (value >> 63) & 1;
-    if (double_exp == 0) {
-        if (frac == 0) {
-            *exp = 0;
-            *sig = 0;
-        } else {
-            *exp = IA64_FP_DOUBLE_EXP_BASE + 1;
-            *sig = frac << 11;
-        }
-    } else if (double_exp == 0x7ff) {
-        *exp = IA64_FP_REG_SPECIAL_EXP;
-        *sig = IA64_FP_SIGNIFICAND_INTEGER_BIT | (frac << 11);
-    } else {
-        *exp = IA64_FP_DOUBLE_EXP_BASE + double_exp;
-        *sig = IA64_FP_SIGNIFICAND_INTEGER_BIT | (frac << 11);
-    }
-}
-
-static void ia64_float32_to_register_format(uint32_t value, uint64_t *sig,
-                                            uint32_t *exp, bool *sign)
-{
-    uint32_t frac = value & IA64_FP_SINGLE_FRAC_MASK;
-    uint32_t single_exp = (value >> 23) & 0xff;
-
-    *sign = value >> 31;
-    if (single_exp == 0) {
-        if (frac == 0) {
-            *exp = 0;
-            *sig = 0;
-        } else {
-            *exp = IA64_FP_SINGLE_EXP_BASE + 1;
-            *sig = (uint64_t)frac << 40;
-        }
-    } else if (single_exp == 0xff) {
-        *exp = IA64_FP_REG_SPECIAL_EXP;
-        *sig = IA64_FP_SIGNIFICAND_INTEGER_BIT | ((uint64_t)frac << 40);
-    } else {
-        *exp = IA64_FP_SINGLE_EXP_BASE + single_exp;
-        *sig = IA64_FP_SIGNIFICAND_INTEGER_BIT | ((uint64_t)frac << 40);
-    }
-}
-
-static uint32_t ia64_register_format_to_float32(uint64_t sig, uint32_t exp,
-                                                bool sign)
-{
-    uint32_t value = (uint32_t)sign << 31;
-
-    if (sig & IA64_FP_SIGNIFICAND_INTEGER_BIT) {
-        value |= (((exp >> 9) & 0x80) | (exp & 0x7f)) << 23;
-    }
-    value |= (sig >> 40) & IA64_FP_SINGLE_FRAC_MASK;
-    return value;
-}
-
-static uint64_t ia64_register_format_to_float64(uint64_t sig, uint32_t exp,
-                                                bool sign)
-{
-    uint64_t value = (uint64_t)sign << 63;
-
-    if (sig & IA64_FP_SIGNIFICAND_INTEGER_BIT) {
-        value |= (uint64_t)(((exp >> 6) & 0x400) | (exp & 0x3ff)) << 52;
-    }
-    value |= (sig >> 11) & IA64_FP_DOUBLE_FRAC_MASK;
-    return value;
-}
-
-static void ia64_fr_spill_words(const CPUIA64State *env, uint32_t reg,
-                                uint64_t *low, uint64_t *high)
-{
-    uint32_t exp;
-    bool sign;
-
-    if (ia64_fr_nat_get(env, reg)) {
-        *low = 0;
-        exp = IA64_FP_REG_NATVAL_EXP;
-        sign = false;
-    } else if (ia64_fr_ext_get(env, reg, &sign, &exp, low)) {
-        /* Exact register-format value was retained by ldf.fill/ldfe. */
-    } else if (ia64_fr_sig_get(env, reg)) {
-        *low = env->fr[reg];
-        exp = IA64_FP_REG_INTEGER_EXP;
-        sign = false;
-    } else {
-        ia64_float64_to_register_format(reg == 0 ? 0 :
-                                        reg == 1 ? IA64_FR_ONE : env->fr[reg],
-                                        low, &exp, &sign);
-    }
-
-    *high = (exp & 0xffff) |
-            (((uint64_t)exp >> 16) << 16) |
-            ((uint64_t)sign << 17);
-}
-
-static void ia64_fr_fill_spill_words(CPUIA64State *env, uint32_t reg,
-                                     uint64_t low, uint64_t high)
-{
-    uint32_t exp;
-    bool sign;
-
-    if (reg <= 1) {
-        return;
-    }
-
-    high &= IA64_FP_SPILL_EXP_SIGN_MASK;
-    exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
-    sign = (high >> 17) & 1;
-
-    if (!sign && exp == IA64_FP_REG_NATVAL_EXP && low == 0) {
-        ia64_fr_write_nat(env, reg);
-    } else if (!sign && exp == IA64_FP_REG_INTEGER_EXP) {
-        ia64_fr_write_sig(env, reg, low);
-    } else {
-        ia64_fr_write_ext(env, reg, sign, exp, low);
-    }
-}
-
 static bool ia64_fr_nat_any2(const CPUIA64State *env, uint32_t reg1,
                              uint32_t reg2)
 {
@@ -470,32 +258,6 @@ static bool ia64_fr_nat_any3(const CPUIA64State *env, uint32_t reg1,
 {
     return ia64_fr_nat_any2(env, reg1, reg2) ||
            ia64_fr_nat_get(env, reg3);
-}
-
-static void ia64_fr_nat_set(CPUIA64State *env, uint32_t reg, bool nat)
-{
-    if (reg <= 1) {
-        return;
-    }
-
-    if (nat) {
-        env->fr_nat[reg / 64] |= 1ULL << (reg % 64);
-        env->fr_sig[reg / 64] &= ~(1ULL << (reg % 64));
-    } else {
-        env->fr_nat[reg / 64] &= ~(1ULL << (reg % 64));
-    }
-}
-
-static void ia64_fr_write_nat(CPUIA64State *env, uint32_t reg)
-{
-    if (reg > 1) {
-        env->fr[reg] = 0;
-        ia64_fr_nat_set(env, reg, true);
-        env->fr_sig[reg / 64] &= ~(1ULL << (reg % 64));
-        ia64_fr_ext_clear(env, reg);
-        ia64_fr_int_origin_clear(env, reg);
-        ia64_fr_mark_written(env, reg);
-    }
 }
 
 static bool ia64_fr_write_nat_if_any2(CPUIA64State *env, uint32_t dst,
@@ -1603,6 +1365,7 @@ void helper_raise_exception(CPUIA64State *env, uint32_t exception,
     env->fault_ip = fault_ip;
     env->fault_imm = fault_imm;
     env->fault_slot = fault_slot;
+    env->fault_exception = exception;
     env->exception = exception;
     cs->exception_index = exception;
     cpu_loop_exit(cs);
@@ -4758,7 +4521,7 @@ static IA64FPRegisterFormat ia64_fr_register_format(CPUIA64State *env,
     uint64_t high;
     IA64FPRegisterFormat fmt;
 
-    ia64_fr_spill_words(env, reg, &low, &high);
+    ia64_fpreg_to_spill(env, reg, &low, &high);
     fmt.sign = (high >> 17) & 1;
     fmt.exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
     fmt.mant = low;
@@ -5148,7 +4911,7 @@ void helper_fclass(CPUIA64State *env, uint32_t p1, uint32_t p2,
     bool type_match;
     bool member;
 
-    ia64_fr_spill_words(env, f2, &mant, &high);
+    ia64_fpreg_to_spill(env, f2, &mant, &high);
     exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
     is_neg = (high >> 17) & 1;
     is_zero = !is_nat && mant == 0 && exp != IA64_FP_REG_SPECIAL_EXP;
@@ -5212,11 +4975,11 @@ void helper_fmerge_ns(CPUIA64State *env, uint32_t r1,
         return;
     }
 
-    ia64_fr_spill_words(env, r2, &low2, &high2);
-    ia64_fr_spill_words(env, r3, &low3, &high3);
-    ia64_fr_fill_spill_words(env, r1, low3,
-                             (high3 & ~(1ULL << 17)) |
-                             ((~high2) & (1ULL << 17)));
+    ia64_fpreg_to_spill(env, r2, &low2, &high2);
+    ia64_fpreg_to_spill(env, r3, &low3, &high3);
+    ia64_fpreg_from_spill(env, r1, low3,
+                          (high3 & ~(1ULL << 17)) |
+                          ((~high2) & (1ULL << 17)));
 }
 
 void helper_fmerge_s(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3)
@@ -5231,11 +4994,11 @@ void helper_fmerge_s(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3)
         return;
     }
 
-    ia64_fr_spill_words(env, r2, &low2, &high2);
-    ia64_fr_spill_words(env, r3, &low3, &high3);
-    ia64_fr_fill_spill_words(env, r1, low3,
-                             (high3 & ~(1ULL << 17)) |
-                             (high2 & (1ULL << 17)));
+    ia64_fpreg_to_spill(env, r2, &low2, &high2);
+    ia64_fpreg_to_spill(env, r3, &low3, &high3);
+    ia64_fpreg_from_spill(env, r1, low3,
+                          (high3 & ~(1ULL << 17)) |
+                          (high2 & (1ULL << 17)));
 }
 
 void helper_fmerge_se(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3)
@@ -5250,9 +5013,9 @@ void helper_fmerge_se(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3)
         return;
     }
 
-    ia64_fr_spill_words(env, r2, &low2, &high2);
-    ia64_fr_spill_words(env, r3, &low3, &high3);
-    ia64_fr_fill_spill_words(env, r1, low3, high2);
+    ia64_fpreg_to_spill(env, r2, &low2, &high2);
+    ia64_fpreg_to_spill(env, r3, &low3, &high3);
+    ia64_fpreg_from_spill(env, r1, low3, high2);
 }
 
 /* ---- FP logical/swap ---- */
@@ -5910,6 +5673,16 @@ static void ia64_do_fnorm(CPUIA64State *env, uint32_t r1, uint32_t r2,
     if (ia64_fr_sig_get(env, r3)) {
         uint64_t integer = env->fr[r3];
 
+        /*
+         * setf.sig supplies the integer exponent even when the explicit
+         * integer bit is clear.  Such values (including its pseudo-zero)
+         * are architecturally unnormalized operands.  fnorm is an fma
+         * pseudo-op, so consuming one records the D exception before the
+         * payload is normalized.
+         */
+        if (!(integer & IA64_FP_SIGNIFICAND_INTEGER_BIT)) {
+            float_raise(float_flag_input_denormal_used, &env->fp_status);
+        }
         value = float128_to_floatx80(
             uint64_to_float128(integer, &env->fp_status),
             &env->fp_status);
@@ -6027,18 +5800,14 @@ uint64_t helper_getf(CPUIA64State *env, uint32_t reg, uint32_t kind)
 {
     uint64_t low;
     uint64_t high;
-    uint32_t exp;
-    bool sign;
 
-    ia64_fr_spill_words(env, reg, &low, &high);
-    exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
-    sign = (high >> 17) & 1;
     if (kind == 0) {
-        return ia64_register_format_to_float64(low, exp, sign);
+        return ia64_fpreg_to_binary64(env, reg);
     }
     if (kind == 1) {
-        return ia64_register_format_to_float32(low, exp, sign);
+        return ia64_fpreg_to_binary32(env, reg);
     }
+    ia64_fpreg_to_spill(env, reg, &low, &high);
     return kind == 2 ? low : high;
 }
 
@@ -6051,12 +5820,7 @@ void helper_setf_exp(CPUIA64State *env, uint32_t reg, uint64_t value)
 
 void helper_setf_s(CPUIA64State *env, uint32_t reg, uint64_t value)
 {
-    uint64_t sig;
-    uint32_t exp;
-    bool sign;
-
-    ia64_float32_to_register_format(value, &sig, &exp, &sign);
-    ia64_fr_write_ext(env, reg, sign, exp, sig);
+    ia64_fpreg_from_binary32(env, reg, value);
 }
 
 void helper_fmov(CPUIA64State *env, uint32_t dst, uint32_t src)
@@ -7160,7 +6924,7 @@ void helper_ldf_fill(CPUIA64State *env, uint32_t r1, uint64_t addr)
         high = cpu_ldq_le_data_ra(env, addr + 8, ra);
     }
 
-    ia64_fr_fill_spill_words(env, r1, low, high);
+    ia64_fpreg_from_spill(env, r1, low, high);
 }
 
 void helper_stfe(CPUIA64State *env, uint64_t addr, uint32_t r2)
@@ -7172,7 +6936,7 @@ void helper_stfe(CPUIA64State *env, uint64_t addr, uint32_t r2)
     bool sign;
     uint16_t ext_exp;
 
-    ia64_fr_spill_words(env, r2, &mant, &high);
+    ia64_fpreg_to_spill(env, r2, &mant, &high);
     exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
     sign = (high >> 17) & 1;
     ext_exp = ((exp >> 2) & 0x4000) | (exp & 0x3fff);
@@ -7193,7 +6957,7 @@ void helper_stf_spill(CPUIA64State *env, uint64_t addr, uint32_t r2)
     uint64_t low;
     uint64_t high;
 
-    ia64_fr_spill_words(env, r2, &low, &high);
+    ia64_fpreg_to_spill(env, r2, &low, &high);
     if (ia64_data_big_endian(env)) {
         cpu_stb_data_ra(env, addr, 0, ra);
         cpu_stb_data_ra(env, addr + 1, 0, ra);

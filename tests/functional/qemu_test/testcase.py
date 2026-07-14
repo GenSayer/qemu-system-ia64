@@ -206,8 +206,17 @@ class QemuBaseTest(unittest.TestCase):
         self.arch = self.qemu_bin.split('-')[-1]
         self.socketdir = None
 
+        test_id = self.id()
+        iteration = os.getenv('MESON_TEST_ITERATION')
+        if iteration not in (None, '', '1'):
+            if not iteration.isdecimal():
+                raise RuntimeError('MESON_TEST_ITERATION must be numeric')
+            # ``meson test --repeat`` may run repetitions concurrently.  A
+            # shared output/scratch directory lets one repetition's tearDown
+            # delete another repetition's media or QMP socket directory.
+            test_id += '.repeat-' + iteration
         self.outputdir = self.build_file('tests', 'functional',
-                                         self.arch, self.id())
+                                         self.arch, test_id)
         self.workdir = os.path.join(self.outputdir, 'scratch')
         if os.path.exists(self.workdir):
             # Purge as safety net in case of unclean termination of
