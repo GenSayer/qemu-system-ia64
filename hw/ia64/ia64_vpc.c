@@ -303,11 +303,9 @@ static void ia64_vpc_init_nvram(MachineState *machine)
 
 static GlobalProperty ia64_vpc_compat_defaults[] = {
     /*
-     * Windows Server 2003's IA-64 USB hub driver performs an
-     * alignment-requiring 32-bit load from offset 10 of Microsoft OS
-     * extended-property descriptors.  The offset is packed by definition,
-     * so do not expose the optional selective-suspend property on HID input
-     * devices.
+     * Some IA-64 USB hub drivers use an alignment-requiring 32-bit load for
+     * packed extended-property descriptors.  Do not expose the optional
+     * selective-suspend property on HID input devices.
      */
     { "usb-kbd", "msos-desc", "off" },
     { "usb-mouse", "msos-desc", "off" },
@@ -879,12 +877,14 @@ static void ia64_vpc_init_usb(MachineState *machine, PCIBus *pci_bus)
         /*
          * Attach default USB input only when PS/2 is disabled. HID keyboards
          * become QEMU's active input handler, which would otherwise hide
-         * firmware-visible PS/2 input before a guest USB stack exists.
+         * firmware-visible PS/2 input before a guest USB stack exists.  Use
+         * an absolute pointer so graphical front ends do not require a
+         * relative-pointer grab.
          */
         usb_bus = USB_BUS(object_resolve_type_unambiguous(TYPE_USB_BUS,
                                                           &error_abort));
         usb_create_simple(usb_bus, "usb-kbd");
-        usb_create_simple(usb_bus, "usb-mouse");
+        usb_create_simple(usb_bus, "usb-tablet");
     }
 
     ia64_vpc_uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);

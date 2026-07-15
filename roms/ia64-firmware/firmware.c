@@ -2395,11 +2395,15 @@ static EFI_PAGE_ALLOCATION_RECORD mPageAllocations[PAGE_ALLOCATION_MAX];
 typedef struct {
     BOOLEAN in_use;
     EFI_PHYSICAL_ADDRESS base;
-    UINTN pages;
+    UINTN size;
+    EFI_PHYSICAL_ADDRESS backing_base;
+    UINTN backing_pages;
     EFI_MEMORY_TYPE type;
 } EFI_POOL_ALLOCATION_RECORD;
 
-#define POOL_ALLOCATION_MAX 256
+#define POOL_ALLOCATION_MAX 512
+#define EFI_POOL_ALIGNMENT 8U
+#define EFI_POOL_CHUNK_SIZE 0x10000U
 static EFI_POOL_ALLOCATION_RECORD mPoolAllocations[POOL_ALLOCATION_MAX];
 
 typedef struct {
@@ -6611,19 +6615,19 @@ static BOOLEAN efi_find_allocation_overlap(UINT64 Start, UINT64 End,
         UINT64 end;
 
         if (!rec->in_use ||
-            !efi_pages_to_size(rec->pages, &size) ||
-            rec->base > ~0ULL - size) {
+            !efi_pages_to_size(rec->backing_pages, &size) ||
+            rec->backing_base > ~0ULL - size) {
             continue;
         }
-        end = rec->base + size;
-        if (Start >= end || rec->base >= End) {
+        end = rec->backing_base + size;
+        if (Start >= end || rec->backing_base >= End) {
             continue;
         }
         if (!found || end < first_end) {
             first_end = end;
         }
-        if (!found || rec->base > last_start) {
-            last_start = rec->base;
+        if (!found || rec->backing_base > last_start) {
+            last_start = rec->backing_base;
         }
         found = 1;
     }
@@ -7303,9 +7307,9 @@ EFI_STATUS bs_get_memory_map(UINTN *MemoryMapSize,
     return EFI_SUCCESS;
 }
 
-static UINT64 efi_pool_allocation_end(EFI_POOL_ALLOCATION_RECORD *Rec)
+static UINT64 efi_pool_backing_end(const EFI_POOL_ALLOCATION_RECORD *Rec)
 {
-    return Rec->base + ((UINT64)Rec->pages << 12);
+    return Rec->backing_base + ((UINT64)Rec->backing_pages << 12);
 }
 
 static BOOLEAN efi_find_pool_pages(UINT64 Size, UINT64 Alignment,
@@ -7315,37 +7319,88 @@ static BOOLEAN efi_find_pool_pages(UINT64 Size, UINT64 Alignment,
         return 0;
     }
 
-    /*
-     * AllocatePool() has no caller-visible address constraint.  Back pool
-     * requests from the high end of conventional memory so low fixed-address
-     * page-allocation candidates remain contiguous.
-     */
+    /* Keep fixed-address image candidates available to AllocatePages(). */
     return efi_find_max_pages(~0ULL, Size, Alignment, Memory);
+}
+
+static BOOLEAN efi_pool_find_gap(const EFI_POOL_ALLOCATION_RECORD *Arena,
+                                 UINTN Size,
+                                 EFI_PHYSICAL_ADDRESS *Memory)
+{
+    UINT64 end = efi_pool_backing_end(Arena);
+    UINT64 candidate = Arena->backing_base;
+
+    while (candidate <= end && Size <= end - candidate) {
+        UINT64 first_end = ~0ULL;
+        BOOLEAN overlap = 0;
+        UINTN i;
+
+        for (i = 0; i < POOL_ALLOCATION_MAX; i++) {
+            EFI_POOL_ALLOCATION_RECORD *rec = &mPoolAllocations[i];
+            UINT64 rec_end;
+
+            if (!rec->in_use ||
+                rec->backing_base != Arena->backing_base ||
+                candidate >= rec->base + rec->size ||
+                rec->base >= candidate + Size) {
+                continue;
+            }
+            rec_end = rec->base + rec->size;
+            if (!overlap || rec_end < first_end) {
+                first_end = rec_end;
+            }
+            overlap = 1;
+        }
+        if (!overlap) {
+            *Memory = candidate;
+            return 1;
+        }
+        if (!efi_align_up_u64(first_end, EFI_POOL_ALIGNMENT, &candidate)) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static EFI_POOL_ALLOCATION_RECORD *efi_find_pool_allocation(UINTN Address)
+{
+    UINTN i;
+
+    for (i = 0; i < POOL_ALLOCATION_MAX; i++) {
+        EFI_POOL_ALLOCATION_RECORD *rec = &mPoolAllocations[i];
+
+        if (rec->in_use && rec->base == Address) {
+            return rec;
+        }
+    }
+    return NULL;
 }
 
 EFI_STATUS bs_allocate_pool(EFI_MEMORY_TYPE PoolType, UINTN Size, VOID **Buffer)
 {
     EFI_POOL_ALLOCATION_RECORD *alloc_rec;
+    EFI_POOL_ALLOCATION_RECORD *arena;
     EFI_PHYSICAL_ADDRESS memory;
+    EFI_PHYSICAL_ADDRESS backing_base;
+    UINT64 backing_size;
     UINT64 alloc_size;
-    UINT64 alignment;
+    UINT64 backing_alignment;
     UINTN previous_map_key;
     UINTN request_size;
-    UINTN pages;
+    UINTN backing_pages;
     UINTN i;
+
     if (Buffer == NULL || !efi_memory_type_is_valid(PoolType)) {
         return EFI_INVALID_PARAMETER;
     }
     if (mBootServicesExited) {
         return EFI_UNSUPPORTED;
     }
-    request_size = Size == 0 ? 8U : Size;
-    alignment = efi_memory_type_allocation_granularity(PoolType);
-    if (!efi_align_up_u64(request_size, alignment, &alloc_size) ||
+    request_size = Size == 0 ? EFI_POOL_ALIGNMENT : Size;
+    if (!efi_align_up_u64(request_size, EFI_POOL_ALIGNMENT, &alloc_size) ||
         (UINTN)alloc_size != alloc_size) {
         return EFI_OUT_OF_RESOURCES;
     }
-    pages = (UINTN)(alloc_size >> 12);
     alloc_rec = NULL;
     for (i = 0; i < POOL_ALLOCATION_MAX; i++) {
         EFI_POOL_ALLOCATION_RECORD *rec = &mPoolAllocations[i];
@@ -7358,54 +7413,117 @@ EFI_STATUS bs_allocate_pool(EFI_MEMORY_TYPE PoolType, UINTN Size, VOID **Buffer)
     if (alloc_rec == NULL) {
         return EFI_OUT_OF_RESOURCES;
     }
-    if (!efi_find_pool_pages(alloc_size, alignment, &memory)) {
-        return EFI_OUT_OF_RESOURCES;
+
+    arena = NULL;
+    for (i = 0; i < POOL_ALLOCATION_MAX; i++) {
+        EFI_POOL_ALLOCATION_RECORD *rec = &mPoolAllocations[i];
+        BOOLEAN first_arena_member = 1;
+        UINTN j;
+
+        if (!rec->in_use || rec->type != PoolType) {
+            continue;
+        }
+        /* Allocation records in one arena repeat its backing range. */
+        for (j = 0; j < i; j++) {
+            EFI_POOL_ALLOCATION_RECORD *previous = &mPoolAllocations[j];
+
+            if (previous->in_use &&
+                previous->backing_base == rec->backing_base) {
+                first_arena_member = 0;
+                break;
+            }
+        }
+        if (first_arena_member &&
+            efi_pool_find_gap(rec, (UINTN)alloc_size, &memory)) {
+            arena = rec;
+            break;
+        }
     }
-    previous_map_key = mMapKey;
-    if (!efi_mark_memory_range(PoolType, memory, memory + alloc_size,
-                               efi_memory_attribute(PoolType,
-                                                    EFI_MEMORY_WB))) {
-        return EFI_OUT_OF_RESOURCES;
+
+    if (arena == NULL) {
+        backing_alignment = efi_memory_type_allocation_granularity(PoolType);
+        backing_size = alloc_size > EFI_POOL_CHUNK_SIZE ?
+                       alloc_size : EFI_POOL_CHUNK_SIZE;
+        if (!efi_align_up_u64(backing_size, backing_alignment,
+                              &backing_size) ||
+            !efi_find_pool_pages(backing_size, backing_alignment,
+                                 &backing_base)) {
+            return EFI_OUT_OF_RESOURCES;
+        }
+        previous_map_key = mMapKey;
+        if (!efi_mark_memory_range(PoolType, backing_base,
+                                   backing_base + backing_size,
+                                   efi_memory_attribute(PoolType,
+                                                        EFI_MEMORY_WB))) {
+            return EFI_OUT_OF_RESOURCES;
+        }
+        backing_pages = (UINTN)(backing_size >> 12);
+        memory = backing_base;
+        if (mMapKey == previous_map_key) {
+            mMapKey++;
+        }
+    } else {
+        backing_base = arena->backing_base;
+        backing_pages = arena->backing_pages;
     }
+
     alloc_rec->in_use = 1;
     alloc_rec->base = memory;
-    alloc_rec->pages = pages;
+    alloc_rec->size = (UINTN)alloc_size;
+    alloc_rec->backing_base = backing_base;
+    alloc_rec->backing_pages = backing_pages;
     alloc_rec->type = PoolType;
     if (Size <= FW_POOL_ZERO_LIMIT) {
         fw_set_mem((VOID *)(UINTN)memory, Size, 0);
     }
     *Buffer = (VOID *)(UINTN)memory;
-    if (mMapKey == previous_map_key) {
-        mMapKey++;
-    }
     return EFI_SUCCESS;
 }
 
 EFI_STATUS bs_free_pool(VOID *Buffer)
 {
     UINTN addr = (UINTN)Buffer;
+    EFI_POOL_ALLOCATION_RECORD *target;
     UINTN i;
 
-    if (Buffer == NULL || (addr & 0xfffU) != 0) {
+    if (Buffer == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    target = efi_find_pool_allocation(addr);
+    if (target == NULL) {
         return EFI_INVALID_PARAMETER;
     }
     for (i = 0; i < POOL_ALLOCATION_MAX; i++) {
         EFI_POOL_ALLOCATION_RECORD *rec = &mPoolAllocations[i];
 
-        if (rec->in_use && rec->base == addr) {
-            UINT64 end = efi_pool_allocation_end(rec);
-            UINTN previous_map_key = mMapKey;
+        if (rec == target) {
+            EFI_POOL_ALLOCATION_RECORD saved_rec = *rec;
+            UINT64 backing_end = efi_pool_backing_end(rec);
+            EFI_PHYSICAL_ADDRESS backing_base = rec->backing_base;
+            BOOLEAN backing_in_use = 0;
+            UINTN j;
 
-            if (!efi_mark_memory_range(EfiConventionalMemory, rec->base, end,
-                                       EFI_MEMORY_WB)) {
-                return EFI_INVALID_PARAMETER;
+            fw_set_mem(rec, sizeof(*rec), 0);
+            for (j = 0; j < POOL_ALLOCATION_MAX; j++) {
+                EFI_POOL_ALLOCATION_RECORD *other = &mPoolAllocations[j];
+
+                if (other->in_use && other->backing_base == backing_base) {
+                    backing_in_use = 1;
+                    break;
+                }
             }
-            rec->in_use = 0;
-            rec->base = 0;
-            rec->pages = 0;
-            rec->type = EfiBootServicesData;
-            if (mMapKey == previous_map_key) {
-                mMapKey++;
+            if (!backing_in_use) {
+                UINTN previous_map_key = mMapKey;
+
+                if (!efi_mark_memory_range(EfiConventionalMemory,
+                                           backing_base, backing_end,
+                                           EFI_MEMORY_WB)) {
+                    *rec = saved_rec;
+                    return EFI_INVALID_PARAMETER;
+                }
+                if (mMapKey == previous_map_key) {
+                    mMapKey++;
+                }
             }
             return EFI_SUCCESS;
         }
@@ -11350,6 +11468,9 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     EFI_PHYSICAL_ADDRESS loader_address;
     EFI_PHYSICAL_ADDRESS runtime_address;
     EFI_PHYSICAL_ADDRESS allocation_next_page_addr;
+    EFI_POOL_ALLOCATION_RECORD *pool_rec;
+    EFI_PHYSICAL_ADDRESS pool_backing_start;
+    EFI_PHYSICAL_ADDRESS pool_backing_end;
     VOID *pool = NULL;
     VOID *conventional_pool_one = NULL;
     VOID *conventional_pool_two = NULL;
@@ -11537,7 +11658,9 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     loader_address = FW_LOW_IMAGE_END;
     if (!efi_range_is_available(loader_address,
                                 loader_address + EFI_PAGE_SIZE) ||
-        !efi_find_pool_pages(EFI_PAGE_SIZE, EFI_PAGE_SIZE,
+        !efi_find_pool_pages(EFI_POOL_CHUNK_SIZE,
+                             efi_memory_type_allocation_granularity(
+                                 EfiLoaderData),
                              &expected_pool_address) ||
         expected_pool_address <= loader_address ||
         bs_allocate_pool(EfiLoaderData, 17, &pool) != EFI_SUCCESS ||
@@ -11555,15 +11678,17 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        loader_address + EFI_PAGE_SIZE,
                                        EFI_MEMORY_WB) ||
         !efi_memory_map_has_descriptor(EfiLoaderData, pool_start,
-                                       pool_start + 0x1000ULL,
+                                       pool_start + EFI_POOL_CHUNK_SIZE,
                                        EFI_MEMORY_WB) ||
+        bs_free_pool((UINT8 *)pool + EFI_POOL_ALIGNMENT) !=
+            EFI_INVALID_PARAMETER ||
         bs_free_pages(loader_address, 1) != EFI_SUCCESS ||
         bs_free_pool(pool) != EFI_SUCCESS ||
         !efi_memory_map_covers_range(EfiConventionalMemory, loader_address,
                                      loader_address + EFI_PAGE_SIZE,
                                      EFI_MEMORY_WB) ||
         !efi_memory_map_covers_range(EfiConventionalMemory, pool_start,
-                                     pool_start + 0x1000ULL,
+                                     pool_start + EFI_POOL_CHUNK_SIZE,
                                      EFI_MEMORY_WB)) {
         ok = 0;
         goto out;
@@ -11650,29 +11775,39 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     pool_start = (UINTN)pool;
     if (!efi_memory_map_has_descriptor(
             (EFI_MEMORY_TYPE)EFI_MEMORY_TYPE_OS_RESERVED_MIN,
-            pool_start, pool_start + EFI_PAGE_SIZE, EFI_MEMORY_WB) ||
+            pool_start, pool_start + EFI_POOL_CHUNK_SIZE, EFI_MEMORY_WB) ||
         bs_free_pool(pool) != EFI_SUCCESS) {
         ok = 0;
         goto out;
     }
 
     pool = NULL;
-    if (bs_allocate_pool(EfiRuntimeServicesData, 17, &pool) != EFI_SUCCESS ||
+    if (bs_allocate_pool(EfiRuntimeServicesData,
+                         2U * EFI_POOL_CHUNK_SIZE + EFI_POOL_ALIGNMENT,
+                         &pool) != EFI_SUCCESS ||
         pool == NULL) {
         ok = 0;
         goto out;
     }
     pool_start = (UINTN)pool;
-    if ((pool_start & (IA64_EFI_MEMORY_ALIGN - 1U)) != 0 ||
+    pool_rec = efi_find_pool_allocation(pool_start);
+    if (pool_rec == NULL) {
+        ok = 0;
+        goto out;
+    }
+    pool_backing_start = pool_rec->backing_base;
+    pool_backing_end = efi_pool_backing_end(pool_rec);
+    if ((pool_start & (EFI_POOL_ALIGNMENT - 1U)) != 0 ||
+        (pool_rec->backing_base & (IA64_EFI_MEMORY_ALIGN - 1U)) != 0 ||
         !efi_memory_map_has_descriptor(
-            EfiRuntimeServicesData, pool_start,
-            pool_start + IA64_EFI_MEMORY_ALIGN,
+            EfiRuntimeServicesData, pool_backing_start,
+            pool_backing_end,
             EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
         !efi_memory_map_has_ia64_descriptor_alignment() ||
         bs_free_pool(pool) != EFI_SUCCESS ||
         !efi_memory_map_covers_range(
-            EfiConventionalMemory, pool_start,
-            pool_start + IA64_EFI_MEMORY_ALIGN, EFI_MEMORY_WB)) {
+            EfiConventionalMemory, pool_backing_start,
+            pool_backing_end, EFI_MEMORY_WB)) {
         ok = 0;
         goto out;
     }
@@ -11726,17 +11861,15 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                          &conventional_pool_two) != EFI_SUCCESS ||
         conventional_pool_two == NULL ||
         conventional_pool_two == conventional_pool_one ||
-        ranges_overlap((UINTN)conventional_pool_one, EFI_PAGE_SIZE,
-                       (UINTN)conventional_pool_two, EFI_PAGE_SIZE) ||
-        ranges_overlap((UINTN)conventional_pool_one, EFI_PAGE_SIZE,
+        ((UINTN)conventional_pool_one & (EFI_POOL_ALIGNMENT - 1U)) != 0 ||
+        ((UINTN)conventional_pool_two & (EFI_POOL_ALIGNMENT - 1U)) != 0 ||
+        ranges_overlap((UINTN)conventional_pool_one, 24,
+                       (UINTN)conventional_pool_two, 24) ||
+        ranges_overlap((UINTN)conventional_pool_one, EFI_POOL_CHUNK_SIZE,
                        conventional_max_one, EFI_PAGE_SIZE) ||
-        ranges_overlap((UINTN)conventional_pool_one, EFI_PAGE_SIZE,
+        ranges_overlap((UINTN)conventional_pool_one, EFI_POOL_CHUNK_SIZE,
                        conventional_max_two, EFI_PAGE_SIZE) ||
-        ranges_overlap((UINTN)conventional_pool_two, EFI_PAGE_SIZE,
-                       conventional_max_one, EFI_PAGE_SIZE) ||
-        ranges_overlap((UINTN)conventional_pool_two, EFI_PAGE_SIZE,
-                       conventional_max_two, EFI_PAGE_SIZE) ||
-        mMapKey != allocation_key + 1U) {
+        mMapKey != allocation_key) {
         ok = 0;
         goto out;
     }
@@ -11746,6 +11879,23 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     if (bs_allocate_pages(AllocateAddress, EfiConventionalMemory, 1,
                           &conventional_duplicate) != EFI_NOT_FOUND ||
         conventional_duplicate != (UINTN)conventional_pool_one ||
+        mMapKey != allocation_key) {
+        ok = 0;
+        goto out;
+    }
+
+    /* Reuse a sub-page gap without releasing or remapping its arena. */
+    conventional_duplicate = (UINTN)conventional_pool_one;
+    allocation_key = mMapKey;
+    if (bs_free_pool(conventional_pool_one) != EFI_SUCCESS ||
+        mMapKey != allocation_key) {
+        ok = 0;
+        goto out;
+    }
+    conventional_pool_one = NULL;
+    if (bs_allocate_pool(EfiConventionalMemory, 17,
+                         &conventional_pool_one) != EFI_SUCCESS ||
+        (UINTN)conventional_pool_one != conventional_duplicate ||
         mMapKey != allocation_key) {
         ok = 0;
         goto out;
@@ -11776,7 +11926,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     }
     allocation_key = mMapKey;
     if (bs_free_pool(conventional_pool_two) != EFI_SUCCESS ||
-        mMapKey != allocation_key + 1U) {
+        mMapKey != allocation_key) {
         ok = 0;
         goto out;
     }
@@ -19772,7 +19922,9 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     mPageAllocations[0].type = EfiConventionalMemory;
     mPoolAllocations[0].in_use = 1;
     mPoolAllocations[0].base = FW_LOW_IMAGE_BASE + IA64_EFI_IMAGE_ALIGN;
-    mPoolAllocations[0].pages = IA64_EFI_IMAGE_ALIGN >> 12;
+    mPoolAllocations[0].size = IA64_EFI_IMAGE_ALIGN;
+    mPoolAllocations[0].backing_base = mPoolAllocations[0].base;
+    mPoolAllocations[0].backing_pages = IA64_EFI_IMAGE_ALIGN >> 12;
     mPoolAllocations[0].type = EfiConventionalMemory;
     mNextPeImageBase = FW_LOW_IMAGE_BASE;
     base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0);

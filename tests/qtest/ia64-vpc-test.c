@@ -331,6 +331,41 @@ static char *find_unattached_child(QTestState *qts, const char *qom_type)
     return NULL;
 }
 
+static unsigned count_unattached_children(QTestState *qts,
+                                          const char *qom_type)
+{
+    g_autoptr(QDict) response = NULL;
+    g_autofree char *child_type = g_strdup_printf("child<%s>", qom_type);
+    QList *children;
+    QListEntry *entry;
+    unsigned count = 0;
+
+    response = qtest_qmp(qts,
+                         "{'execute':'qom-list','arguments':"
+                         " {'path':'/machine/unattached'}}");
+    g_assert(qdict_haskey(response, "return"));
+    children = qdict_get_qlist(response, "return");
+    QLIST_FOREACH_ENTRY(children, entry) {
+        QDict *child = qobject_to(QDict, qlist_entry_obj(entry));
+
+        if (g_str_equal(qdict_get_str(child, "type"), child_type)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void test_default_usb_input(void)
+{
+    QTestState *qts = qtest_init("-machine ia64-vpc,i8042=off "
+                                 "-m 256M -S");
+
+    g_assert_cmpuint(count_unattached_children(qts, "usb-kbd"), ==, 1);
+    g_assert_cmpuint(count_unattached_children(qts, "usb-tablet"), ==, 1);
+    g_assert_cmpuint(count_unattached_children(qts, "usb-mouse"), ==, 0);
+    qtest_quit(qts);
+}
+
 static void test_iosapic_level_remote_irr(void)
 {
     const unsigned pin = 23;
@@ -400,6 +435,8 @@ int main(int argc, char **argv)
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
                    test_firmware_handoff_i8042_off);
+    qtest_add_func("/ia64-vpc/input/default-usb",
+                   test_default_usb_input);
     qtest_add_func("/ia64-vpc/rtc/aligned-read", test_rtc_aligned_read);
     qtest_add_func("/ia64-vpc/nvram/commit-and-restart",
                    test_nvram_commit_and_restart);
