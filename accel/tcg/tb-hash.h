@@ -36,17 +36,37 @@
 #define TB_JMP_ADDR_MASK (TB_JMP_PAGE_SIZE - 1)
 #define TB_JMP_PAGE_MASK (TB_JMP_CACHE_SIZE - TB_JMP_PAGE_SIZE)
 
+static inline vaddr tb_jmp_cache_hash_mix(vaddr pc)
+{
+    /*
+     * Most system targets, including IA-64, use 4 KiB target pages.  The
+     * generic system TCG code is shared between targets, so TARGET_PAGE_BITS
+     * is normally a run-time value here.  Keep the general calculation, but
+     * let the compiler use immediate shifts for the overwhelmingly common
+     * page size.  Indirect-branch-heavy guests execute this hash at every
+     * lookup-and-goto exit.
+     */
+    if (likely(TARGET_PAGE_BITS == 12)) {
+        return pc ^ (pc >> (12 - TB_JMP_PAGE_BITS));
+    }
+    return pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
+}
+
 static inline unsigned int tb_jmp_cache_hash_page(vaddr pc)
 {
-    vaddr tmp;
-    tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
+    vaddr tmp = tb_jmp_cache_hash_mix(pc);
+
     return (tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK;
 }
 
 static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 {
-    vaddr tmp;
-    tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
+    vaddr tmp = tb_jmp_cache_hash_mix(pc);
+
+    if (likely(TARGET_PAGE_BITS == 12)) {
+        return (((tmp >> (12 - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK) |
+                (tmp & TB_JMP_ADDR_MASK));
+    }
     return (((tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK)
            | (tmp & TB_JMP_ADDR_MASK));
 }

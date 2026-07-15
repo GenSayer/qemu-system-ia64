@@ -45,6 +45,7 @@
 /* Per translation-register bank: 16 instruction TRs and 16 data TRs. */
 #define IA64_TR_COUNT    16
 #define IA64_TLB_MAX     128
+#define IA64_MICRO_TLB_SIZE 4
 #define IA64_SUPPRESSED_TLB_MAX 4
 
 #define IA64_REGION_BITS 3
@@ -460,6 +461,7 @@ typedef struct IA64TlbEntry {
     uint64_t va;
     uint64_t pa;
     uint64_t ps;
+    uint64_t page_mask;
     uint64_t pte;
     uint8_t  perm;
     uint8_t  ar;
@@ -471,6 +473,15 @@ typedef struct IA64TlbEntry {
     uint32_t key;
     uint16_t slot;
 } IA64TlbEntry;
+
+typedef struct IA64MicroTlbEntry {
+    uint64_t va;
+    uint64_t page_mask;
+    uint32_t rid;
+    uint32_t generation;
+    uint16_t slot;
+    bool valid;
+} IA64MicroTlbEntry;
 
 typedef enum IA64MemorySpeculation {
     IA64_MEM_NON_SPECULATIVE,
@@ -492,17 +503,6 @@ ia64_pte_memory_speculation(uint64_t pte)
         return IA64_MEM_NON_SPECULATIVE;
     }
 }
-
-bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint16_t tlb_count,
-                     uint64_t va, uint32_t rid, uint8_t access_level,
-                     bool is_ifetch, uint64_t *pa, uint8_t *perm);
-
-const IA64TlbEntry *ia64_tlb_find(const IA64TlbEntry *tlb,
-                                  uint16_t tlb_count, uint64_t va,
-                                  uint32_t rid, bool is_ifetch);
-
-bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
-                    uint32_t rid, bool is_ifetch);
 
 static inline bool ia64_tlb_entry_present(const IA64TlbEntry *entry)
 {
@@ -622,8 +622,12 @@ typedef struct CPUArchState {
     uint16_t      tlb_inst_count;
     uint16_t      tlb_data_replace;
     uint16_t      tlb_inst_replace;
-    uint16_t      tlb_data_mru;
-    uint16_t      tlb_inst_mru;
+    uint32_t      tlb_data_generation;
+    uint32_t      tlb_inst_generation;
+    IA64MicroTlbEntry tlb_data_micro[IA64_MICRO_TLB_SIZE];
+    IA64MicroTlbEntry tlb_inst_micro[IA64_MICRO_TLB_SIZE];
+    uint8_t       tlb_data_micro_next;
+    uint8_t       tlb_inst_micro_next;
     uint16_t      pending_purge_data_count;
     uint16_t      pending_purge_inst_count;
 
@@ -722,9 +726,16 @@ typedef struct CPUArchState {
     uint64_t fp_backup_fr_int_value[IA64_FR_COUNT];
     uint64_t fp_backup_fr_int_origin[2];
     uint64_t fp_backup_pr[IA64_PR_COUNT];
+    uint64_t fp_backup_fr_mask[2];
+    uint64_t fp_backup_pr_mask;
     uint64_t fp_backup_psr_mf;
+    bool fp_backup_active;
     float_status fp_status;
 } CPUIA64State;
+
+void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
+const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
+                                       uint32_t rid, bool is_ifetch);
 
 static inline void ia64_rse_mark_gr_dirty(CPUIA64State *env, uint32_t reg)
 {
@@ -836,6 +847,44 @@ static inline uint64_t ia64_va_page_base(uint64_t va, uint64_t ps)
     return va & ia64_va_vpn_mask(ps);
 }
 
+static inline bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
+                                  uint32_t rid)
+{
+    if (!entry->valid || entry->ps == 0 || entry->rid != rid) {
+        return false;
+    }
+
+    return ((va ^ entry->va) & entry->page_mask) == 0;
+}
+
+static inline QEMU_ALWAYS_INLINE const IA64TlbEntry *
+ia64_tlb_find_cached(CPUIA64State *env, uint64_t va, uint32_t rid,
+                     bool is_ifetch)
+{
+    IA64TlbEntry *tlb = is_ifetch ? env->tlb_inst : env->tlb_data;
+    IA64MicroTlbEntry *micro = is_ifetch ? env->tlb_inst_micro :
+                                           env->tlb_data_micro;
+    uint8_t next = is_ifetch ? env->tlb_inst_micro_next :
+                               env->tlb_data_micro_next;
+    uint32_t generation = is_ifetch ? env->tlb_inst_generation :
+                                      env->tlb_data_generation;
+    uint16_t i;
+
+    for (i = 0; i < IA64_MICRO_TLB_SIZE; i++) {
+        uint16_t slot = (next - 1 - i) & (IA64_MICRO_TLB_SIZE - 1);
+        IA64MicroTlbEntry *cached = &micro[slot];
+
+        if (!cached->valid || cached->generation != generation ||
+            cached->rid != rid ||
+            ((va ^ cached->va) & cached->page_mask) != 0) {
+            continue;
+        }
+        return &tlb[cached->slot];
+    }
+
+    return ia64_tlb_find_slow(env, va, rid, is_ifetch);
+}
+
 static inline bool ia64_tlb_entry_covers_va_any_rid(const IA64TlbEntry *entry,
                                                     uint64_t va)
 {
@@ -845,8 +894,7 @@ static inline bool ia64_tlb_entry_covers_va_any_rid(const IA64TlbEntry *entry,
     if (ia64_rr_index(entry->va) != ia64_rr_index(va)) {
         return false;
     }
-    return ia64_va_page_base(entry->va, entry->ps) ==
-           ia64_va_page_base(va, entry->ps);
+    return ((entry->va ^ va) & entry->page_mask) == 0;
 }
 
 static inline bool ia64_tlb_has_explicit_va_mapping(const IA64TlbEntry *tlb,
@@ -873,7 +921,7 @@ static inline uint32_t ia64_region_rid(const CPUIA64State *env, uint64_t va)
     return ia64_rr_rid(env->rr[ia64_rr_index(va)]);
 }
 
-static inline bool ia64_current_code_tlb_ed(const CPUIA64State *env)
+static inline bool ia64_current_code_tlb_ed(CPUIA64State *env)
 {
     const IA64TlbEntry *entry;
     uint32_t rid;
@@ -883,8 +931,7 @@ static inline bool ia64_current_code_tlb_ed(const CPUIA64State *env)
     }
 
     rid = ia64_region_rid(env, env->ip);
-    entry = ia64_tlb_find(env->tlb_inst, env->tlb_inst_count, env->ip,
-                          rid, true);
+    entry = ia64_tlb_find_cached(env, env->ip, rid, true);
     return entry && (entry->pte & IA64_PTE_ED);
 }
 
@@ -1041,7 +1088,8 @@ bool ia64_vhpt_walk(CPUIA64State *env, uint64_t va, uint32_t rid,
 bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
                          bool is_ifetch, bool is_rse, uint8_t access_level,
                          uint64_t *pa, uint8_t *perm, uint64_t *pte,
-                         uint32_t *key);
+                         uint32_t *key,
+                         const IA64TlbEntry **installed_entry);
 bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
                                bool is_ifetch, bool is_rse,
                                uint64_t *entry_va);

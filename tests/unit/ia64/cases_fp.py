@@ -22,6 +22,7 @@ CASE_NAMES = (
     'fclass_m_ignored_bits_decode',
     'fclass_same_pred_pred_false_noop',
     'fclass_unc_same_pred_pred_false_illegal',
+    'fcmp_invalid_fault_restores_predicates',
     'fcmp_natval_clears_predicates',
     'fcmp_p2_high_bit_not_fchkfs',
     'fcmp_same_pred_illegal',

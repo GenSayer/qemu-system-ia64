@@ -9577,6 +9577,28 @@ test_fp_divzero_fault_discards_result = require_registers(
         "f8": ExpectedFP(0x8000000000000000, 0x10000),
     }, entry=0x10)
 
+test_fcmp_invalid_fault_restores_predicates = require_registers(
+    "fcmp_invalid_fault_restores_predicates", [
+        (0x10, *movl_mlx(2, 0x33e)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x00, cmp4_eq_unc_imm(6, 7, 0, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, 0x7ff0000000000001)),
+        (0x50, *movl_mlx(4, 0x3ff0000000000000)),
+        (0x60, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        (0x70, 0x1c, nop_m(), fcmp(6, 7, 6, 7), nop_b()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 1,
+        "pr_mask": ExpectedBits(mask=(1 << 6) | (1 << 7), value=1 << 6),
+        "ar_fpsr": 0x33e,
+    }, entry=0x10)
+
 test_fp_inexact_trap_commits_result = require_registers(
     "fp_inexact_trap_commits_result", [
         (0x10, *movl_mlx(2, 0x31f)),
@@ -21031,6 +21053,8 @@ TEST_NAMES = {
         test_fchkf_positive_target_ignores_bit26,
     "fchkf_negative_target_uses_bit36":
         test_fchkf_negative_target_uses_bit36,
+    "fcmp_invalid_fault_restores_predicates":
+        test_fcmp_invalid_fault_restores_predicates,
     "fcmp_p2_high_bit_not_fchkfs": test_fcmp_p2_high_bit_not_fchkfs,
     "fpmerge_parallel_forms_decode": test_fpmerge_parallel_forms_decode,
     "fpminmax_parallel_decode": test_fpminmax_parallel_decode,

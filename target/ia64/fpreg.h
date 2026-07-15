@@ -19,6 +19,20 @@ typedef struct CPUArchState CPUIA64State;
 #define IA64_FP_SPILL_EXP_SIGN_MASK 0x3ffffULL
 
 /*
+ * Keep the padding in floatx80 initialized.  Building the value with the
+ * generic positional compound literal can make the host compiler assemble
+ * the padded return value through overlapping stack stores and loads.
+ */
+static inline floatx80 ia64_make_floatx80(uint16_t exp, uint64_t mant)
+{
+    floatx80 value = { 0 };
+
+    value.low = mant;
+    value.high = exp;
+    return value;
+}
+
+/*
  * These tag operations sit on every floating-point helper path.  Keep them
  * inline even though the full spill/fill conversion lives in fpreg.c; moving
  * the old op_helper.c inlines behind an out-of-line ABI measurably increases

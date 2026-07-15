@@ -115,7 +115,7 @@ static uint64_t extended_to_binary64(CPUIA64State *env, bool sign,
     }
 
     return floatx80_to_float64(
-        make_floatx80(((uint16_t)sign << 15) | ext_exp, mant), &status);
+        ia64_make_floatx80(((uint16_t)sign << 15) | ext_exp, mant), &status);
 }
 
 void ia64_fpreg_to_spill(const CPUIA64State *env, unsigned reg,

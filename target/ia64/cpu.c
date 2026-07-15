@@ -805,6 +805,7 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
                                                             uint64_t address,
                                                             uint64_t entry_pa)
 {
+    const IA64TlbEntry *entry;
     uint64_t pa;
     uint8_t perm;
     uint32_t rid;
@@ -819,9 +820,12 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
     }
 
     rid = ia64_region_rid(env, address);
-    if (ia64_tlb_lookup(env->tlb_inst, env->tlb_inst_count, address, rid,
-                        ia64_psr_cpl(env->psr), true, &pa, &perm) &&
-        (perm & IA64_TLB_X)) {
+    entry = ia64_tlb_find_cached(env, address, rid, true);
+    if (entry) {
+        ia64_tlb_entry_translate(entry, address, ia64_psr_cpl(env->psr),
+                                 &pa, &perm);
+    }
+    if (entry && (perm & IA64_TLB_X)) {
         return pa == entry_pa;
     }
 
@@ -10959,9 +10963,26 @@ static bool sapic_vector_unmasked(CPUIA64State *env, int vector)
            ((uint64_t)vector_class > ((tpr & IA64_TPR_MIC_MASK) >> 4));
 }
 
+static int sapic_find_highest_normal(const uint64_t bitmap[4])
+{
+    int word;
+
+    for (word = 3; word >= 0; word--) {
+        uint64_t active = bitmap[word];
+
+        if (word == 0) {
+            active &= ~0xffffULL;
+        }
+        if (active) {
+            return word * 64 + 63 - clz64(active);
+        }
+    }
+    return IA64_SPURIOUS_VECTOR;
+}
+
 static int sapic_find_irr(CPUIA64State *env)
 {
-    int i;
+    int vector;
 
     if (sapic_vector_active(env->sapic_irr, 2) &&
         sapic_vector_unmasked(env, 2)) {
@@ -10971,31 +10992,23 @@ static int sapic_find_irr(CPUIA64State *env)
         sapic_vector_unmasked(env, 0)) {
         return 0;
     }
-    for (i = 255; i >= 16; i--) {
-        if (sapic_vector_active(env->sapic_irr, i) &&
-            sapic_vector_unmasked(env, i)) {
-            return i;
-        }
+    vector = sapic_find_highest_normal(env->sapic_irr);
+    if (vector != IA64_SPURIOUS_VECTOR &&
+        sapic_vector_unmasked(env, vector)) {
+        return vector;
     }
     return IA64_SPURIOUS_VECTOR;
 }
 
 static int sapic_find_isr(CPUIA64State *env)
 {
-    int i;
-
     if (sapic_vector_active(env->sapic_isr, 2)) {
         return 2;
     }
     if (sapic_vector_active(env->sapic_isr, 0)) {
         return 0;
     }
-    for (i = 255; i >= 16; i--) {
-        if (sapic_vector_active(env->sapic_isr, i)) {
-            return i;
-        }
-    }
-    return IA64_SPURIOUS_VECTOR;
+    return sapic_find_highest_normal(env->sapic_isr);
 }
 
 void ia64_sapic_update_interrupt(CPUIA64State *env)
@@ -11257,33 +11270,21 @@ static bool ia64_cpu_has_work(CPUState *cs)
 static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
-    uint32_t flags = 0;
+    uint64_t psr = cpu->env.psr;
+    uint32_t flags =
+        ((psr >> 17) & IA64_TB_FLAG_DT) |
+        ((psr >> 35) & IA64_TB_FLAG_IT) |
+        ((psr >> (IA64_PSR_RI_SHIFT - IA64_TB_FLAG_RI_SHIFT)) &
+         IA64_TB_FLAG_RI_MASK) |
+        ((psr >> 8) & IA64_TB_FLAG_PSR_IC) |
+        ((psr << 5) & IA64_TB_FLAG_BE) |
+        ((uint32_t)cpu->env.instruction_group_start << 7) |
+        ((psr >> 26) & IA64_TB_FLAG_PSR_IS) |
+        ((psr >> (IA64_PSR_CPL_SHIFT - IA64_TB_FLAG_CPL_SHIFT)) &
+         IA64_TB_FLAG_CPL_MASK);
 
-    if (cpu->env.psr & IA64_PSR_DT) {
-        flags |= IA64_TB_FLAG_DT;
-    }
-    if (cpu->env.psr & IA64_PSR_IT) {
-        flags |= IA64_TB_FLAG_IT;
-    }
-    if (cpu->env.psr & IA64_PSR_FAULT_SUPPRESS_MASK) {
-        flags |= IA64_TB_FLAG_PSR_SUPPRESS;
-    }
-    if (cpu->env.psr & IA64_PSR_IC) {
-        flags |= IA64_TB_FLAG_PSR_IC;
-    }
-    if (cpu->env.psr & IA64_PSR_BE) {
-        flags |= IA64_TB_FLAG_BE;
-    }
-    if (cpu->env.instruction_group_start) {
-        flags |= IA64_TB_FLAG_GROUP_START;
-    }
-    if (cpu->env.psr & IA64_PSR_IS) {
-        flags |= IA64_TB_FLAG_PSR_IS;
-    }
-    flags |= ((cpu->env.psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT)
-             << IA64_TB_FLAG_RI_SHIFT;
-    flags |= (uint32_t)ia64_psr_cpl(cpu->env.psr) <<
-             IA64_TB_FLAG_CPL_SHIFT;
+    flags |= (psr & IA64_PSR_FAULT_SUPPRESS_MASK) != 0 ?
+             IA64_TB_FLAG_PSR_SUPPRESS : 0;
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
@@ -11291,69 +11292,54 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     };
 }
 
-bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
-                           uint32_t rid, bool is_ifetch)
+void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch)
 {
-    uint64_t vpn_mask;
+    IA64MicroTlbEntry *micro = is_ifetch ? env->tlb_inst_micro :
+                                           env->tlb_data_micro;
+    uint32_t *generation = is_ifetch ? &env->tlb_inst_generation :
+                                       &env->tlb_data_generation;
+    uint8_t *next = is_ifetch ? &env->tlb_inst_micro_next :
+                                &env->tlb_data_micro_next;
 
-    (void)is_ifetch;
-
-    if (!entry->valid || entry->ps == 0) {
-        return false;
+    (*generation)++;
+    if (*generation == 0) {
+        *generation = 1;
+        memset(micro, 0, sizeof(*micro) * IA64_MICRO_TLB_SIZE);
+        *next = 0;
     }
-    if (entry->rid != rid) {
-        return false;
-    }
-
-    vpn_mask = ia64_va_vpn_mask(entry->ps);
-    return (va & vpn_mask) == (entry->va & vpn_mask);
 }
 
-const IA64TlbEntry *ia64_tlb_find(const IA64TlbEntry *tlb, uint16_t tlb_count,
-                                  uint64_t va, uint32_t rid, bool is_ifetch)
+const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
+                                       uint32_t rid, bool is_ifetch)
 {
+    IA64TlbEntry *tlb = is_ifetch ? env->tlb_inst : env->tlb_data;
+    IA64MicroTlbEntry *micro = is_ifetch ? env->tlb_inst_micro :
+                                           env->tlb_data_micro;
+    uint8_t *next = is_ifetch ? &env->tlb_inst_micro_next :
+                                &env->tlb_data_micro_next;
+    uint16_t tlb_count = is_ifetch ? env->tlb_inst_count :
+                                     env->tlb_data_count;
+    uint32_t generation = is_ifetch ? env->tlb_inst_generation :
+                                      env->tlb_data_generation;
     uint16_t i;
 
     for (i = 0; i < tlb_count; i++) {
-        if (ia64_tlb_match(&tlb[i], va, rid, is_ifetch)) {
-            return &tlb[i];
+        IA64TlbEntry *entry = &tlb[i];
+
+        if (ia64_tlb_match(entry, va, rid)) {
+            micro[*next] = (IA64MicroTlbEntry) {
+                .va = entry->va,
+                .page_mask = entry->page_mask,
+                .rid = entry->rid,
+                .generation = generation,
+                .slot = i,
+                .valid = true,
+            };
+            *next = (*next + 1) % IA64_MICRO_TLB_SIZE;
+            return entry;
         }
     }
     return NULL;
-}
-
-static const IA64TlbEntry *
-ia64_tlb_find_mru(const IA64TlbEntry *tlb, uint16_t tlb_count,
-                  uint16_t *mru, uint64_t va, uint32_t rid, bool is_ifetch)
-{
-    uint16_t i;
-
-    if (*mru < tlb_count &&
-        ia64_tlb_match(&tlb[*mru], va, rid, is_ifetch)) {
-        return &tlb[*mru];
-    }
-
-    for (i = 0; i < tlb_count; i++) {
-        if (i != *mru && ia64_tlb_match(&tlb[i], va, rid, is_ifetch)) {
-            *mru = i;
-            return &tlb[i];
-        }
-    }
-    return NULL;
-}
-
-bool ia64_tlb_lookup(const IA64TlbEntry *tlb, uint16_t tlb_count,
-                           uint64_t va, uint32_t rid, uint8_t access_level,
-                           bool is_ifetch, uint64_t *pa, uint8_t *perm)
-{
-    const IA64TlbEntry *entry = ia64_tlb_find(tlb, tlb_count, va, rid,
-                                              is_ifetch);
-
-    if (!entry) {
-        return false;
-    }
-    ia64_tlb_entry_translate(entry, va, access_level, pa, perm);
-    return true;
 }
 
 static void ia64_cpu_synchronize_from_tb(CPUState *cs,
@@ -11545,6 +11531,7 @@ static void ia64_tlb_set_entry_page(CPUState *cs, vaddr addr, hwaddr pa,
 static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    const IA64TlbEntry *entry;
     uint64_t pa;
     uint8_t perm;
     uint32_t rid;
@@ -11562,9 +11549,10 @@ static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
     }
 
     rid = ia64_region_rid(&cpu->env, addr);
-    if (ia64_tlb_lookup(cpu->env.tlb_inst, cpu->env.tlb_inst_count,
-                        addr, rid, ia64_psr_cpl(cpu->env.psr), true,
-                        &pa, &perm)) {
+    entry = ia64_tlb_find_cached(&cpu->env, addr, rid, true);
+    if (entry) {
+        ia64_tlb_entry_translate(entry, addr, ia64_psr_cpl(cpu->env.psr),
+                                 &pa, &perm);
         return pa & TARGET_PAGE_MASK;
     }
     if (ia64_sal_boot_identity_pa(&cpu->env, addr, &pa)) {
@@ -11578,8 +11566,6 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                               bool probe, uintptr_t retaddr)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
-    const IA64TlbEntry *tlb;
-    uint16_t tlb_count;
     bool is_ifetch = (access_type == MMU_INST_FETCH);
     uint8_t needed = is_ifetch ? IA64_TLB_X :
                      (access_type == MMU_DATA_STORE ? IA64_TLB_W :
@@ -11590,7 +11576,6 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     IA64Exception excp;
     bool is_rse = !is_ifetch && mmu_idx == MMU_IDX_RSE;
     uint8_t access_level;
-    uint16_t *tlb_mru;
     bool virt_translation_enabled;
 
     if (mmu_idx == MMU_PHYS_IDX) {
@@ -11650,19 +11635,9 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         return true;
     }
 
-    if (is_ifetch) {
-        tlb = cpu->env.tlb_inst;
-        tlb_count = cpu->env.tlb_inst_count;
-        tlb_mru = &cpu->env.tlb_inst_mru;
-    } else {
-        tlb = cpu->env.tlb_data;
-        tlb_count = cpu->env.tlb_data_count;
-        tlb_mru = &cpu->env.tlb_data_mru;
-    }
-
     {
-        const IA64TlbEntry *entry = ia64_tlb_find_mru(
-            tlb, tlb_count, tlb_mru, addr, rid, is_ifetch);
+        const IA64TlbEntry *entry = ia64_tlb_find_cached(
+            &cpu->env, addr, rid, is_ifetch);
 
         if (entry) {
             int prot;
@@ -11697,18 +11672,15 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     }
 
     if (!is_ifetch) {
+        const IA64TlbEntry *new_entry;
         uint64_t pte = 0;
         uint32_t key = 0;
 
         if (ia64_vhpt_walk_full(&cpu->env, addr, rid, false, is_rse,
-                                access_level, &pa, &perm, &pte, &key)) {
+                                access_level, &pa, &perm, &pte, &key,
+                                &new_entry)) {
             int prot;
             IA64Exception pte_excp;
-            const IA64TlbEntry *new_entry =
-                ia64_tlb_find_mru(cpu->env.tlb_data,
-                                  cpu->env.tlb_data_count,
-                                  &cpu->env.tlb_data_mru,
-                                  addr, rid, false);
             uint64_t page_size = new_entry ? new_entry->ps : TARGET_PAGE_SIZE;
 
             pte_excp = new_entry ?
@@ -11746,18 +11718,15 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     }
 
     if (is_ifetch) {
+        const IA64TlbEntry *new_entry;
         uint64_t pte = 0;
         uint32_t key = 0;
 
         if (ia64_vhpt_walk_full(&cpu->env, addr, rid, true, false,
-                                access_level, &pa, &perm, &pte, &key)) {
+                                access_level, &pa, &perm, &pte, &key,
+                                &new_entry)) {
             int prot;
             IA64Exception pte_excp;
-            const IA64TlbEntry *new_entry =
-                ia64_tlb_find_mru(cpu->env.tlb_inst,
-                                  cpu->env.tlb_inst_count,
-                                  &cpu->env.tlb_inst_mru,
-                                  addr, rid, true);
             uint64_t page_size = new_entry ? new_entry->ps : TARGET_PAGE_SIZE;
 
             pte_excp = new_entry ?
