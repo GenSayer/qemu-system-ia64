@@ -15,7 +15,8 @@ from ia64.media import (file_sha256, make_el_torito_iso, make_fat_disk,
 
 COMMON_CASES = {
     "loaded-protocols", "block-media", "media-layout", "bulk-read",
-    "block-error-contracts", "disk-read",
+    "block-error-contracts", "disk-read", "simple-filesystem",
+    "file-protocol-contracts", "unicode-collation",
 }
 
 
@@ -60,11 +61,24 @@ class Ia64Storage(Ia64FirmwareTest):
             else:
                 self.assertNotIn("bmdma_cmd_writeb", trace)
 
-    def run_scsi_layout(self, layout):
+    def run_scsi_layout(self, layout, *, fat32=False):
         app = app_path("storage")
-        media = Path(self.scratch_file(f"scsi-{layout}.img"))
-        make_fat_disk(media, app, layout=layout)
-        self.run_scenario(f"scsi-{layout}", media)
+        suffix = "-fat32" if fat32 else ""
+        media = Path(self.scratch_file(f"scsi-{layout}{suffix}.img"))
+        extra_files = (() if layout == "whole" or fat32 else
+                       ((b"START   EFI", app_path("start-image-child")),))
+        make_fat_disk(media, app, layout=layout, fat32=fat32,
+                      extra_boot_files=extra_files)
+        required = []
+        if layout != "whole":
+            required.extend(("logical-partition-handle",
+                             "partition-driver-contracts"))
+            if not fat32:
+                required.append("short-form-hard-drive-path")
+        if fat32:
+            required.append("fat32-filesystem")
+        self.run_scenario(f"scsi-{layout}{suffix}", media,
+                          required_cases=required)
 
     def run_ide(self, mode):
         app = app_path("storage")
@@ -81,6 +95,48 @@ class Ia64Storage(Ia64FirmwareTest):
                              if mode == "pio" else ""),
             drive_args=drive_args, ide_mode=mode)
 
+    def run_ahci(self):
+        app = app_path("storage")
+        media = Path(self.scratch_file("ahci.img"))
+        make_fat_disk(
+            media, app, layout="gpt",
+            extra_boot_files=((b"START   EFI",
+                               app_path("start-image-child")),))
+        drive_args = (
+            "-drive", f"file={media},format=raw,if=ide,index=0",
+        )
+        self.run_scenario(
+            "ahci", media, drive_args=drive_args,
+            required_cases=("logical-partition-handle",
+                            "short-form-hard-drive-path",
+                            "partition-driver-contracts"))
+
+    def run_empty_cd(self, transport):
+        app = app_path("storage")
+        media = Path(self.scratch_file(f"{transport}-empty-cd.img"))
+        make_fat_disk(media, app)
+        drive_args = [
+            "-drive", f"file={media},format=raw,if=scsi,index=0",
+        ]
+        if transport == "scsi":
+            drive_args.extend((
+                "-device", "scsi-cd,bus=scsi.0,scsi-id=1",
+            ))
+        elif transport == "ahci":
+            drive_args.extend((
+                "-device", "ide-cd,bus=ide.0,unit=0",
+            ))
+        elif transport == "ide":
+            drive_args.extend((
+                "-device", "cmd646-ide,id=ide,secondary=1,addr=0",
+                "-device", "ide-cd,bus=ide.0,unit=0",
+            ))
+        else:
+            raise ValueError(f"unknown empty-media transport: {transport}")
+        self.run_scenario(
+            f"{transport}-empty-cd", media, drive_args=tuple(drive_args),
+            required_cases=("empty-removable-media",))
+
     def run_optical(self, name, builder, *, udf=False):
         media = Path(self.scratch_file(name + ".iso"))
         builder(media)
@@ -94,6 +150,9 @@ class Ia64Storage(Ia64FirmwareTest):
     def test_scsi_gpt_esp(self):
         self.run_scsi_layout("gpt")
 
+    def test_scsi_gpt_fat32(self):
+        self.run_scsi_layout("gpt", fat32=True)
+
     def test_scsi_mbr_fat(self):
         self.run_scsi_layout("mbr")
 
@@ -105,6 +164,18 @@ class Ia64Storage(Ia64FirmwareTest):
 
     def test_cmd646_ide_pio(self):
         self.run_ide("pio")
+
+    def test_ahci(self):
+        self.run_ahci()
+
+    def test_scsi_empty_cd(self):
+        self.run_empty_cd("scsi")
+
+    def test_ahci_empty_cd(self):
+        self.run_empty_cd("ahci")
+
+    def test_ide_empty_cd(self):
+        self.run_empty_cd("ide")
 
     def test_el_torito_efi_platform(self):
         self.run_optical(

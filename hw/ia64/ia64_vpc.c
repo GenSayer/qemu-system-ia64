@@ -14,6 +14,7 @@
 #include "qemu/cutils.h"
 #include "qemu/datadir.h"
 #include "qemu/error-report.h"
+#include "qemu/timer.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/core/qdev-properties.h"
@@ -21,6 +22,7 @@
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "hw/ide/ahci-pci.h"
+#include "hw/ide/ide-dev.h"
 #include "hw/input/i8042.h"
 #include "hw/acpi/acpi.h"
 #include "hw/pci/pci.h"
@@ -35,6 +37,7 @@
 #include "system/runstate.h"
 #include "system/system.h"
 #include "system/reset.h"
+#include "system/watchdog.h"
 #include "target/ia64/cpu-qom.h"
 #include "target/ia64/cpu.h"
 
@@ -47,6 +50,10 @@
 #define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
 #define IA64_RTC_BASE 0x00000000ffef0000ULL
 #define IA64_RTC_SIZE (8 * KiB)
+#define IA64_WATCHDOG_BASE 0x00000000ffee0000ULL
+#define IA64_WATCHDOG_SIZE (4 * KiB)
+#define IA64_WATCHDOG_TIMEOUT 0x00
+#define IA64_WATCHDOG_CODE    0x08
 #define IA64_NVRAM_BASE 0x00000000fff00000ULL
 #define IA64_NVRAM_SIZE (64 * KiB)
 #define IA64_NVRAM_COMMIT_OFFSET (IA64_NVRAM_SIZE - 8)
@@ -108,7 +115,11 @@ static Object *ia64_vpc_pci_fixup_reset;
 static MemoryRegion *ia64_vpc_lsapic_mmio;
 static MemoryRegion ia64_vpc_firmware_space;
 static MemoryRegion ia64_vpc_rtc_mmio;
+static MemoryRegion ia64_vpc_watchdog_mmio;
 static MemoryRegion ia64_vpc_nvram_mmio;
+static QEMUTimer *ia64_vpc_watchdog_timer;
+static uint64_t ia64_vpc_watchdog_timeout;
+static uint64_t ia64_vpc_watchdog_code;
 static uint8_t ia64_vpc_nvram_data[IA64_NVRAM_SIZE];
 static char *ia64_vpc_nvram_path;
 static char *ia64_vpc_nvram_resolved_path;
@@ -175,6 +186,105 @@ static void ia64_vpc_init_rtc(MachineState *machine)
                           IA64_RTC_SIZE);
     memory_region_add_subregion_overlap(get_system_memory(), IA64_RTC_BASE,
                                         &ia64_vpc_rtc_mmio, 2);
+}
+
+static void ia64_vpc_watchdog_expired(void *opaque)
+{
+    (void)opaque;
+
+    warn_report("IA-64 firmware watchdog expired (code 0x%" PRIx64 ")",
+                ia64_vpc_watchdog_code);
+    ia64_vpc_watchdog_timeout = 0;
+    watchdog_perform_action();
+}
+
+static uint64_t ia64_vpc_watchdog_read(void *opaque, hwaddr addr,
+                                       unsigned size)
+{
+    (void)opaque;
+    (void)size;
+
+    switch (addr) {
+    case IA64_WATCHDOG_TIMEOUT:
+        return ia64_vpc_watchdog_timeout;
+    case IA64_WATCHDOG_CODE:
+        return ia64_vpc_watchdog_code;
+    default:
+        return 0;
+    }
+}
+
+static void ia64_vpc_watchdog_write(void *opaque, hwaddr addr,
+                                    uint64_t value, unsigned size)
+{
+    int64_t now;
+    int64_t delta;
+
+    (void)opaque;
+    if (size != sizeof(uint64_t)) {
+        return;
+    }
+
+    switch (addr) {
+    case IA64_WATCHDOG_CODE:
+        ia64_vpc_watchdog_code = value;
+        break;
+    case IA64_WATCHDOG_TIMEOUT:
+        ia64_vpc_watchdog_timeout = value;
+        timer_del(ia64_vpc_watchdog_timer);
+        if (value == 0) {
+            break;
+        }
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        if (value > (uint64_t)(INT64_MAX - now) / NANOSECONDS_PER_SECOND) {
+            delta = INT64_MAX - now;
+        } else {
+            delta = value * NANOSECONDS_PER_SECOND;
+        }
+        timer_mod(ia64_vpc_watchdog_timer, now + delta);
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ia64_vpc_watchdog_ops = {
+    .read = ia64_vpc_watchdog_read,
+    .write = ia64_vpc_watchdog_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 8,
+        .max_access_size = 8,
+        .unaligned = false,
+    },
+    .impl = {
+        .min_access_size = 8,
+        .max_access_size = 8,
+        .unaligned = false,
+    },
+};
+
+static void ia64_vpc_watchdog_reset(void *opaque)
+{
+    (void)opaque;
+
+    timer_del(ia64_vpc_watchdog_timer);
+    ia64_vpc_watchdog_timeout = 0;
+    ia64_vpc_watchdog_code = 0;
+}
+
+static void ia64_vpc_init_watchdog(MachineState *machine)
+{
+    ia64_vpc_watchdog_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                           ia64_vpc_watchdog_expired, NULL);
+    memory_region_init_io(&ia64_vpc_watchdog_mmio, OBJECT(machine),
+                          &ia64_vpc_watchdog_ops, NULL,
+                          "ia64-vpc.firmware-watchdog",
+                          IA64_WATCHDOG_SIZE);
+    memory_region_add_subregion_overlap(get_system_memory(),
+                                        IA64_WATCHDOG_BASE,
+                                        &ia64_vpc_watchdog_mmio, 2);
+    qemu_register_reset(ia64_vpc_watchdog_reset, NULL);
 }
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
@@ -1089,6 +1199,8 @@ static void ia64_vpc_init(MachineState *machine)
     PCIBus *pci_bus;
     ISABus *isa_bus;
     MemoryRegion *pci_io;
+    DriveInfo *sata_drives[6] = { NULL };
+    AHCIPCIState *ahci;
     int i;
 
     if (machine->ram_size < IA64_FW_LOW_RAM_MIN) {
@@ -1107,6 +1219,7 @@ static void ia64_vpc_init(MachineState *machine)
     ia64_vpc_map_ram(machine);
     ia64_vpc_map_firmware_address_space();
     ia64_vpc_init_rtc(machine);
+    ia64_vpc_init_watchdog(machine);
     ia64_vpc_init_nvram(machine);
     ia64_vpc_write_firmware_handoff(machine);
 
@@ -1183,6 +1296,10 @@ static void ia64_vpc_init(MachineState *machine)
      */
     ia64_vpc_ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
     ia64_vpc_configure_ahci(ia64_vpc_ahci_dev);
+    ahci = ICH9_AHCI(ia64_vpc_ahci_dev);
+    g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
+    ide_drive_get(sata_drives, ahci->ahci.ports);
+    ahci_ide_create_devs(&ahci->ahci, sata_drives);
 
     isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, &error_fatal);
     for (i = 0; i < ISA_NUM_IRQS; i++) {

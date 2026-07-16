@@ -33,7 +33,11 @@ class Ia64FirmwareTest(QemuSystemTest):
             machine += "," + machine_options
         vm.set_machine(machine)
         vm.set_console()
-        vm.add_args("-smp", str(smp), "-m", memory,
+        # QEMUMachine starts with ``-vga none`` for generic headless tests.
+        # Keep the display backend headless, but restore this machine's
+        # guest-visible default adapter so firmware graphics and PCI paths
+        # are exercised.
+        vm.add_args("-vga", "ati", "-smp", str(smp), "-m", memory,
                     "-bios", str(firmware_path()),
                     "-monitor", "none", "-L", str(SOURCE_ROOT / "pc-bios"))
         if drive_args is not None:

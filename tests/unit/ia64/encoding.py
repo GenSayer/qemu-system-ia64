@@ -3274,7 +3274,8 @@ def normalized_bundles(bundles):
 
 def run_program(qemu, bundles, entry=0x10, alat="full",
                 terminal_ip=None, expected=None, timeout=2.0,
-                name="ia64-microprogram"):
+                name="ia64-microprogram", poll_initial_s=0.001,
+                poll_max_s=0.020):
     """Run until an explicit architectural terminal state."""
     expected = dict(expected or {})
     if terminal_ip is None:
@@ -3291,6 +3292,8 @@ def run_program(qemu, bundles, entry=0x10, alat="full",
         entry=entry,
         expected=expectation,
         completion=Completion(terminal_ip=terminal_ip, timeout_s=timeout,
+                              poll_initial_s=poll_initial_s,
+                              poll_max_s=poll_max_s,
                               predicate=predicate),
         machine_args=(() if alat is None else (f"alat={alat}",)),
     )
@@ -14231,17 +14234,19 @@ def test_timer_interrupt_exits_chained_loop_after_virtual_deadline(qemu):
          nop_i(), nop_i()),
         (0x3020, 0x10, nop_m(), nop_i(),
          br_cond(0x3020, 0x3020)),
-    ], entry=0x10, terminal_ip=0x3020)
+    ], entry=0x10, terminal_ip=0x3020,
+       poll_initial_s=0.100, poll_max_s=0.100)
     state = result.state
     delta = state.gr[31] - state.gr[30]
     if (state.ip != 0x3020 or
         state.exception != IA64_EXCP_NONE or
         state.gr[31] < state.gr[30] or
-        delta > 100 * IA64_ITC_TICKS_PER_MILLISECOND):
+        delta > 100 * IA64_ITC_TICKS_PER_MILLISECOND or
+        result.polls != 1):
         raise RuntimeError(
             "timer_interrupt_exits_chained_loop_after_virtual_deadline "
             f"failed: itm={state.gr[30]!r} itc={state.gr[31]!r} "
-            f"delta={delta!r} ip={state.ip!r} "
+            f"delta={delta!r} polls={result.polls} ip={state.ip!r} "
             f"exception={state.exception!r}\n{result.register_output}")
 
 test_async_timer_interrupt_preserves_bank1_grs = require_registers(
@@ -20100,6 +20105,33 @@ test_firmware_unaligned_speculative_load_assist = require_registers(
     },
 )
 
+test_firmware_unaligned_virtual_load_assist = require_registers(
+    "firmware_unaligned_virtual_load_assist",
+    [
+        (0x10, *movl_mlx(20, 0x1122334455667788)),
+        (0x20, *movl_mlx(21, 0x99aabbccddeeff00)),
+        (0x30, 0x00, addl(3, 0x300, 0), nop_i(), nop_i()),
+        (0x40, 0x0a, st8(3, 20), adds(3, 8, 3), nop_i()),
+        (0x50, 0x00, st8(3, 21), nop_i(), nop_i()),
+        *dtr_setup_bundles(0x60, 0xe000000000000304, 0x304),
+        (0xc0, *movl_mlx(5, 0xe000000000000304)),
+        (0xd0, 0x00, addl(2, 0x10000, 0), nop_i(), nop_i()),
+        (0xe0, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0xf0, 0x00, ssm((1 << 17) | (1 << 13) | (1 << 3)),
+         nop_i(), nop_i()),
+        (0x100, 0x00, ld8_s(22, 5), nop_i(), nop_i()),
+        (0x110, 0x00, nop_m(), adds(23, 1, 0), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+    ],
+    {
+        "ip": 0x120,
+        "exception": IA64_EXCP_NONE,
+        "r22": 0xddeeff0011223344,
+        "r22_nat": 0,
+        "r23": 1,
+    },
+)
+
 test_speculative_unaligned_defers = require_registers(
     "speculative_unaligned_defers",
     [
@@ -22014,6 +22046,8 @@ TEST_NAMES = {
     "firmware_unaligned_store_assist": test_firmware_unaligned_store_assist,
     "firmware_unaligned_speculative_load_assist":
         test_firmware_unaligned_speculative_load_assist,
+    "firmware_unaligned_virtual_load_assist":
+        test_firmware_unaligned_virtual_load_assist,
     "speculative_unaligned_defers": test_speculative_unaligned_defers,
     "cmp_ge_or_decode": test_cmp_ge_or_decode,
     "cmp_ge_or_issue_raw_decode": test_cmp_ge_or_issue_raw_decode,

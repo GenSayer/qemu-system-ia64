@@ -14,6 +14,8 @@ from ia64.media import make_fat_disk
 
 SERVICE_CASES = {
     "memory-services", "event-services", "protocol-services",
+    "multiple-protocol-services",
+    "controller-services", "image-services", "start-image-connect",
     "memory-primitives", "time-services", "variable-services",
     "block-disk-protocols", "pci-root-io", "pci-io",
     "graphics-output", "tcg-no-tpm", "sal-state-info-no-log",
@@ -32,7 +34,10 @@ class Ia64EfiServices(Ia64FirmwareTest):
     def test_services(self):
         disk = Path(self.scratch_file("services.img"))
         nvram = self.make_nvram()
-        make_fat_disk(disk, app_path("services"))
+        make_fat_disk(
+            disk, app_path("services"),
+            extra_boot_files=((b"START   EFI",
+                               app_path("start-image-child")),))
         vm = self.launch_ia64(
             media=disk,
             machine_options=(

@@ -39,6 +39,13 @@
 #define IA64_FP_SINGLE_BIAS     127
 #define IA64_FP_SINGLE_MANT_WIDTH 24
 #define IA64_FP_ISR_SWA 0x8ULL
+#define IA64_FPSR_TRAPS_MASK        0x3fULL
+#define IA64_FPSR_SF_BITS           13
+#define IA64_FPSR_SF0_SHIFT         6
+#define IA64_FPSR_SF_CONTROLS_MASK  0x7fULL
+#define IA64_FPSR_SF_FLAGS_MASK     0x3fULL
+#define IA64_FPSR_SF_FLAGS_SHIFT    7
+#define IA64_FPSR_SF_TD             (1U << 6)
 #define IA64_ROTATING_FR_BASE  32
 #define IA64_ROTATING_FR_COUNT (IA64_FR_COUNT - IA64_ROTATING_FR_BASE)
 
@@ -153,6 +160,8 @@ static inline void ia64_fr_write_nat(CPUIA64State *env, uint32_t reg)
 static void ia64_raise_fp_fault(CPUIA64State *env, uint64_t isr);
 static uint64_t ia64_fp_active_traps(CPUIA64State *env, uint32_t sf);
 static uint64_t ia64_fp_soft_flags_to_ia64(int soft);
+static uint32_t ia64_fpsr_sf_shift(uint32_t sf);
+static uint64_t ia64_fpsr_sf_controls(const CPUIA64State *env, uint32_t sf);
 static void ia64_fp_simd_fault_end(CPUIA64State *env, uint32_t sf,
                                    int hi_soft, int lo_soft);
 
@@ -5143,8 +5152,284 @@ static floatx80 ia64_floatx80_rcpa(floatx80 num, floatx80 den,
     return floatx80_div(approximate ? one : num, den, status);
 }
 
+typedef struct IA64FPSWAFormat {
+    bool sign;
+    bool unnormal;
+    int32_t exp;
+    uint64_t mant;
+} IA64FPSWAFormat;
+
+typedef struct IA64FPSWARawResult {
+    bool sign;
+    int32_t exp;
+    uint64_t mant;
+    bool tail;
+    bool half_greater;
+    bool half_equal;
+} IA64FPSWARawResult;
+
+static IA64FPSWAFormat ia64_fpswa_format(CPUIA64State *env, uint32_t reg)
+{
+    IA64FPSWAFormat value;
+    uint64_t high;
+    int shift;
+
+    ia64_fpreg_to_spill(env, reg, &value.mant, &high);
+    value.sign = (high >> 17) & 1;
+    value.exp = high & IA64_FP_WRE_EXP_MASK;
+    value.unnormal = value.mant != 0 &&
+                     !(value.mant & IA64_FP_SIGNIFICAND_INTEGER_BIT);
+    if (value.unnormal) {
+        shift = clz64(value.mant);
+        value.mant <<= shift;
+        value.exp -= shift;
+    }
+    return value;
+}
+
+static uint8_t ia64_fpswa_physical_fr(const CPUIA64State *env,
+                                      uint32_t reg)
+{
+    if (reg < IA64_ROTATING_FR_BASE) {
+        return reg;
+    }
+    return IA64_ROTATING_FR_BASE +
+           ((reg - IA64_ROTATING_FR_BASE + env->cfm_rrb_fr) %
+            IA64_ROTATING_FR_COUNT);
+}
+
+static uint8_t ia64_fpswa_physical_pr(const CPUIA64State *env,
+                                      uint32_t reg)
+{
+    if (reg < 16) {
+        return reg;
+    }
+    return 16 + ((reg - 16 + env->cfm_rrb_pr) % 48);
+}
+
+static __uint128_t ia64_fpswa_round_right(
+    const IA64FPSWARawResult *raw, uint32_t shift, uint32_t rounding,
+    bool *inexact, bool *fpa)
+{
+    __uint128_t upper;
+    uint64_t discarded = 0;
+    uint64_t half = 0;
+    bool round_up = false;
+
+    if (shift == 0) {
+        upper = raw->mant;
+        *inexact = raw->tail;
+        if (rounding == 0 && raw->tail) {
+            round_up = raw->half_greater ||
+                       (raw->half_equal && (raw->mant & 1));
+        }
+    } else if (shift < 64) {
+        upper = raw->mant >> shift;
+        discarded = raw->mant & ((1ULL << shift) - 1);
+        half = 1ULL << (shift - 1);
+        *inexact = discarded != 0 || raw->tail;
+        if (rounding == 0 && *inexact) {
+            round_up = discarded > half ||
+                       (discarded == half &&
+                        (raw->tail || ((uint64_t)upper & 1)));
+        }
+    } else if (shift == 64) {
+        upper = 0;
+        discarded = raw->mant;
+        half = 1ULL << 63;
+        *inexact = discarded != 0 || raw->tail;
+        if (rounding == 0 && *inexact) {
+            round_up = discarded > half ||
+                       (discarded == half && raw->tail);
+        }
+    } else {
+        upper = 0;
+        *inexact = raw->mant != 0 || raw->tail;
+    }
+
+    if (*inexact && rounding != 0) {
+        round_up = (rounding == 1 && raw->sign) ||
+                   (rounding == 2 && !raw->sign);
+    }
+    if (round_up) {
+        upper++;
+    }
+    *fpa = round_up;
+    return upper;
+}
+
+static uint64_t ia64_fpswa_isqrt128(__uint128_t value,
+                                    __uint128_t *remainder)
+{
+    __uint128_t estimate;
+    __uint128_t next;
+    uint64_t high = value >> 64;
+    uint32_t significant_bits;
+
+    if (value == 0) {
+        *remainder = 0;
+        return 0;
+    }
+
+    significant_bits = high != 0 ? 128U - clz64(high) :
+                                   64U - clz64((uint64_t)value);
+    estimate = (__uint128_t)1 << ((significant_bits + 1U) / 2U);
+
+    for (;;) {
+        next = (estimate + value / estimate) >> 1;
+        if (next >= estimate) {
+            break;
+        }
+        estimate = next;
+    }
+
+    *remainder = value - estimate * estimate;
+    return estimate;
+}
+
+static bool ia64_fpswa_exception_masked(uint64_t fpsr, uint32_t sf,
+                                        uint32_t flag)
+{
+    uint64_t controls = (fpsr >> ia64_fpsr_sf_shift(sf)) &
+                        IA64_FPSR_SF_CONTROLS_MASK;
+
+    return ((sf != 0) && (controls & IA64_FPSR_SF_TD)) ||
+           (fpsr & flag);
+}
+
+static void ia64_fpswa_cache_result(CPUIA64State *env,
+                                    const IA64FPSWARawResult *raw,
+                                    uint32_t sf, bool unnormal)
+{
+    uint64_t controls = ia64_fpsr_sf_controls(env, sf);
+    uint32_t precision_control = (controls >> 2) & 3;
+    uint32_t precision = precision_control == 0 ? 24 :
+                         precision_control == 2 ? 53 : 64;
+    uint32_t rounding = (controls >> 4) & 3;
+    int32_t min_exp = (controls & 2) ? 1 : 0xc001;
+    int32_t max_exp = (controls & 2) ? 0x1fffe : 0x13ffe;
+    uint32_t precision_shift = 64 - precision;
+    uint32_t shift = precision_shift;
+    int32_t result_exp = raw->exp;
+    __uint128_t rounded;
+    uint64_t result_mant;
+    bool inexact;
+    bool fpa;
+
+    env->fpswa_flags = unnormal ? (1U << 1) : 0;
+    if (result_exp < min_exp) {
+        shift += (uint32_t)(min_exp - result_exp);
+    }
+    rounded = ia64_fpswa_round_right(raw, shift, rounding, &inexact, &fpa);
+
+    if (result_exp < min_exp) {
+        uint64_t normal_threshold = 1ULL << (precision - 1);
+
+        result_mant = (uint64_t)rounded << precision_shift;
+        result_exp = (uint64_t)rounded >= normal_threshold ? min_exp : 0;
+        if (result_exp == 0 && (controls & 1) && result_mant != 0) {
+            result_mant = 0;
+            inexact = true;
+            env->fpswa_flags |= (1U << 4) | (1U << 5);
+        } else if (result_exp == 0 &&
+                   (inexact ||
+                    !ia64_fpswa_exception_masked(env->ar_fpsr, sf,
+                                                  1U << 4))) {
+            env->fpswa_flags |= 1U << 4;
+        }
+    } else {
+        if (rounded == ((__uint128_t)1 << precision)) {
+            rounded >>= 1;
+            result_exp++;
+        }
+        result_mant = (uint64_t)rounded << precision_shift;
+    }
+
+    if (result_exp > max_exp) {
+        bool overflow_masked = ia64_fpswa_exception_masked(
+            env->ar_fpsr, sf, 1U << 3);
+
+        env->fpswa_flags |= (1U << 3) | (1U << 5);
+        inexact = true;
+        if (!overflow_masked) {
+            result_exp &= IA64_FP_WRE_EXP_MASK;
+        } else if (rounding == 0 ||
+                   (rounding == 1 && raw->sign) ||
+                   (rounding == 2 && !raw->sign)) {
+            result_exp = IA64_FP_REG_SPECIAL_EXP;
+            result_mant = IA64_FP_SIGNIFICAND_INTEGER_BIT;
+        } else {
+            result_exp = max_exp;
+            result_mant = UINT64_MAX << precision_shift;
+        }
+    }
+    if (inexact) {
+        env->fpswa_flags |= 1U << 5;
+    }
+
+    env->fpswa_result_low = result_mant;
+    env->fpswa_result_high =
+        ((uint64_t)result_exp & IA64_FP_WRE_EXP_MASK) |
+        ((uint64_t)raw->sign << 17);
+    env->fpswa_sf = sf;
+    env->fpswa_fpa = fpa;
+    env->fpswa_pending = true;
+}
+
+static void ia64_fpswa_prepare_divide(CPUIA64State *env, uint32_t r1,
+                                      uint32_t p2, uint32_t r2,
+                                      uint32_t r3, uint32_t sf)
+{
+    IA64FPSWAFormat num = ia64_fpswa_format(env, r2);
+    IA64FPSWAFormat den = ia64_fpswa_format(env, r3);
+    IA64FPSWARawResult raw = { 0 };
+    __uint128_t dividend;
+    __uint128_t remainder;
+    uint32_t normalize = num.mant < den.mant;
+
+    raw.sign = num.sign ^ den.sign;
+    raw.exp = IA64_FP_WRE_BIAS + num.exp - den.exp - normalize;
+    dividend = (__uint128_t)num.mant << (63 + normalize);
+    raw.mant = dividend / den.mant;
+    remainder = dividend % den.mant;
+    raw.tail = remainder != 0;
+    if (raw.tail) {
+        __uint128_t twice = remainder << 1;
+
+        raw.half_greater = twice > den.mant;
+        raw.half_equal = twice == den.mant;
+    }
+
+    env->fpswa_dest_fr = ia64_fpswa_physical_fr(env, r1);
+    env->fpswa_dest_pr = ia64_fpswa_physical_pr(env, p2);
+    ia64_fpswa_cache_result(env, &raw, sf,
+                            num.unnormal || den.unnormal);
+}
+
+static void ia64_fpswa_prepare_sqrt(CPUIA64State *env, uint32_t r1,
+                                    uint32_t p2, uint32_t r3, uint32_t sf)
+{
+    IA64FPSWAFormat val = ia64_fpswa_format(env, r3);
+    IA64FPSWARawResult raw = { 0 };
+    __uint128_t radicand;
+    __uint128_t remainder;
+    int32_t unbiased = val.exp - IA64_FP_WRE_BIAS;
+    uint32_t odd = unbiased & 1;
+
+    raw.sign = false;
+    raw.exp = IA64_FP_WRE_BIAS + (unbiased - (int32_t)odd) / 2;
+    radicand = (__uint128_t)val.mant << (63 + odd);
+    raw.mant = ia64_fpswa_isqrt128(radicand, &remainder);
+    raw.tail = remainder != 0;
+    raw.half_greater = remainder > raw.mant;
+
+    env->fpswa_dest_fr = ia64_fpswa_physical_fr(env, r1);
+    env->fpswa_dest_pr = ia64_fpswa_physical_pr(env, p2);
+    ia64_fpswa_cache_result(env, &raw, sf, val.unnormal);
+}
+
 static void ia64_do_frcpa(CPUIA64State *env, uint32_t r1, uint32_t p2,
-                          uint32_t r2, uint32_t r3)
+                          uint32_t r2, uint32_t r3, uint32_t sf)
 {
     floatx80 num;
     floatx80 den;
@@ -5162,6 +5447,7 @@ static void ia64_do_frcpa(CPUIA64State *env, uint32_t r1, uint32_t p2,
     num_fmt = ia64_fr_register_format(env, r2);
     den_fmt = ia64_fr_register_format(env, r3);
     if (ia64_frcpa_limits_swa_fault(&num_fmt, &den_fmt)) {
+        ia64_fpswa_prepare_divide(env, r1, p2, r2, r3, sf);
         ia64_raise_fp_fault(env, IA64_FP_ISR_SWA);
     }
 
@@ -5785,14 +6071,6 @@ static void ia64_do_fpma(CPUIA64State *env, uint32_t r1, uint32_t r2,
 
 /* ---- FP status field controls ---- */
 
-#define IA64_FPSR_TRAPS_MASK        0x3fULL
-#define IA64_FPSR_SF_BITS           13
-#define IA64_FPSR_SF0_SHIFT         6
-#define IA64_FPSR_SF_CONTROLS_MASK  0x7fULL
-#define IA64_FPSR_SF_FLAGS_MASK     0x3fULL
-#define IA64_FPSR_SF_FLAGS_SHIFT    7
-#define IA64_FPSR_SF_TD             (1U << 6)
-
 static uint32_t ia64_fpsr_sf_shift(uint32_t sf)
 {
     return IA64_FPSR_SF0_SHIFT + (sf & 3) * IA64_FPSR_SF_BITS;
@@ -6385,7 +6663,7 @@ static void ia64_do_fprsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,
 }
 
 static void ia64_do_frsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,
-                            uint32_t r3)
+                            uint32_t r3, uint32_t sf)
 {
     floatx80 val;
     IA64FPRegisterFormat fmt;
@@ -6399,6 +6677,7 @@ static void ia64_do_frsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,
 
     fmt = ia64_fr_register_format(env, r3);
     if (ia64_frsqrta_limits_swa_fault(&fmt)) {
+        ia64_fpswa_prepare_sqrt(env, r1, p2, r3, sf);
         ia64_raise_fp_fault(env, IA64_FP_ISR_SWA);
     }
 
@@ -6500,7 +6779,7 @@ void helper_frcpa(CPUIA64State *env, uint32_t r1, uint32_t p2, uint32_t r2,
                   uint32_t r3, uint32_t context)
 {
     ia64_fp_begin_context(env, context);
-    ia64_do_frcpa(env, r1, p2, r2, r3);
+    ia64_do_frcpa(env, r1, p2, r2, r3, ia64_fp_context_sf(context));
     ia64_fp_end_context(env, context);
 }
 
@@ -6594,8 +6873,601 @@ void helper_frsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,
                     uint32_t r3, uint32_t context)
 {
     ia64_fp_begin_context(env, context);
-    ia64_do_frsqrta(env, r1, p2, r3);
+    ia64_do_frsqrta(env, r1, p2, r3, ia64_fp_context_sf(context));
     ia64_fp_end_context(env, context);
+}
+
+static void ia64_fpswa_return(CPUIA64State *env, int64_t status,
+                              uint64_t err1, uint64_t err2, uint64_t err3)
+{
+    env->gr[8] = status;
+    env->gr[9] = err1;
+    env->gr[10] = err2;
+    env->gr[11] = err3;
+}
+
+static void ia64_fpswa_error(CPUIA64State *env, uint32_t number)
+{
+    ia64_fpswa_return(env, -1, (uint64_t)number << 56, 0, 0);
+}
+
+static bool ia64_fpswa_result_save_address(CPUIA64State *env,
+                                           uint64_t state,
+                                           uint32_t reg,
+                                           uint64_t *address,
+                                           uintptr_t ra)
+{
+    uint64_t mask;
+    uint64_t base;
+    uint32_t first;
+
+    mask = ia64_ldq_data_ra(env, state + (reg >= 64 ? 8 : 0), ra);
+    if (!(mask & (1ULL << (reg % 64)))) {
+        *address = 0;
+        return true;
+    }
+
+    if (reg < 6) {
+        base = ia64_ldq_data_ra(env, state + 16, ra);
+        first = 2;
+    } else if (reg < 16) {
+        base = ia64_ldq_data_ra(env, state + 24, ra);
+        first = 6;
+    } else if (reg < 32) {
+        base = ia64_ldq_data_ra(env, state + 32, ra);
+        first = 16;
+    } else {
+        base = ia64_ldq_data_ra(env, state + 40, ra);
+        first = 32;
+    }
+    if (base == 0 || (base & 7)) {
+        return false;
+    }
+    *address = base + (uint64_t)(reg - first) * 16;
+    return true;
+}
+
+static uint32_t ia64_fpswa_current_fr(const CPUIA64State *env,
+                                      uint32_t physical)
+{
+    uint32_t rrb;
+
+    if (physical < IA64_ROTATING_FR_BASE) {
+        return physical;
+    }
+    rrb = env->cfm_rrb_fr % IA64_ROTATING_FR_COUNT;
+    return IA64_ROTATING_FR_BASE +
+           ((physical - IA64_ROTATING_FR_BASE +
+             IA64_ROTATING_FR_COUNT - rrb) % IA64_ROTATING_FR_COUNT);
+}
+
+void helper_fpswa_dispatch(CPUIA64State *env)
+{
+    uint64_t trap_type = env->gr[32];
+    uint64_t bundle = env->gr[33];
+    uint64_t ipsr_ptr = env->gr[34];
+    uint64_t fpsr_ptr = env->gr[35];
+    uint64_t isr_ptr = env->gr[36];
+    uint64_t preds_ptr = env->gr[37];
+    uint64_t ifs_ptr = env->gr[38];
+    uint64_t state = env->gr[39];
+    uint64_t ipsr;
+    uint64_t fpsr;
+    uint64_t isr;
+    uint64_t preds;
+    uint64_t save_address;
+    uint64_t enabled = 0;
+    uint64_t flags;
+    uint32_t reg;
+    uintptr_t ra = GETPC();
+
+    if (trap_type > 1 || bundle == 0 || ipsr_ptr == 0 || fpsr_ptr == 0 ||
+        isr_ptr == 0 || preds_ptr == 0 || ifs_ptr == 0 || state == 0 ||
+        (bundle & 7) || (ipsr_ptr & 7) || (fpsr_ptr & 7) ||
+        (isr_ptr & 7) || (preds_ptr & 7) || (ifs_ptr & 7) || (state & 7)) {
+        ia64_fpswa_error(env, 5);
+        return;
+    }
+
+    isr = ia64_ldq_data_ra(env, isr_ptr, ra);
+    if (!env->fpswa_pending) {
+        if (trap_type == 1 && (isr & IA64_FP_ISR_SWA)) {
+            ia64_fpswa_error(env, 6);
+        } else {
+            ia64_fpswa_return(env, 1, 0, 0, 0);
+        }
+        return;
+    }
+    if (trap_type != 1 || !(isr & IA64_FP_ISR_SWA)) {
+        ia64_fpswa_error(env, 7);
+        return;
+    }
+
+    fpsr = ia64_ldq_data_ra(env, fpsr_ptr, ra);
+    if ((env->fpswa_flags & (1U << 1)) &&
+        !ia64_fpswa_exception_masked(fpsr, env->fpswa_sf, 1U << 1)) {
+        isr = (isr & ~0xffffULL) | (1U << 1);
+        ia64_stq_data_ra(env, isr_ptr, isr, ra);
+        env->fpswa_pending = false;
+        ia64_fpswa_return(env, 1, 0, 0, 0);
+        return;
+    }
+
+    reg = env->fpswa_dest_fr;
+    if (reg <= 1 || reg >= IA64_FR_COUNT ||
+        !ia64_fpswa_result_save_address(env, state, reg,
+                                        &save_address, ra)) {
+        ia64_fpswa_error(env, 8);
+        return;
+    }
+    if (save_address != 0) {
+        ia64_stq_data_ra(env, save_address, env->fpswa_result_low, ra);
+        ia64_stq_data_ra(env, save_address + 8,
+                         env->fpswa_result_high, ra);
+    } else {
+        uint32_t current = ia64_fpswa_current_fr(env, reg);
+
+        ia64_fpreg_from_spill(env, current, env->fpswa_result_low,
+                              env->fpswa_result_high);
+    }
+
+    preds = ia64_ldq_data_ra(env, preds_ptr, ra);
+    preds &= ~(1ULL << env->fpswa_dest_pr);
+    preds |= 1;
+    ia64_stq_data_ra(env, preds_ptr, preds, ra);
+
+    ipsr = ia64_ldq_data_ra(env, ipsr_ptr, ra);
+    ipsr |= reg < 32 ? IA64_PSR_MFL : IA64_PSR_MFH;
+    ia64_stq_data_ra(env, ipsr_ptr, ipsr, ra);
+
+    flags = env->fpswa_flags & IA64_FPSR_SF_FLAGS_MASK;
+    fpsr |= flags << (ia64_fpsr_sf_shift(env->fpswa_sf) +
+                      IA64_FPSR_SF_FLAGS_SHIFT);
+    ia64_stq_data_ra(env, fpsr_ptr, fpsr, ra);
+
+    for (reg = 3; reg <= 5; reg++) {
+        uint64_t flag = 1ULL << reg;
+
+        if ((flags & flag) &&
+            !ia64_fpswa_exception_masked(fpsr, env->fpswa_sf, flag)) {
+            enabled |= flag;
+        }
+    }
+    env->fpswa_pending = false;
+    if (enabled != 0) {
+        isr = (isr & ~0xffffULL) | 1 | (enabled << 8);
+        if (env->fpswa_fpa) {
+            isr |= 1U << 14;
+        }
+        ia64_stq_data_ra(env, isr_ptr, isr, ra);
+        ia64_fpswa_return(env, 3, 0, 0, 0);
+    } else {
+        ia64_fpswa_return(env, 0, 0, 0, 0);
+    }
+}
+
+/* ---- Native EFI Debug Support context bridge -------------------------- */
+
+#define FW_DEBUG_CTX_R1         8U
+#define FW_DEBUG_CTX_F2         256U
+#define FW_DEBUG_CTX_PR         736U
+#define FW_DEBUG_CTX_B0         744U
+#define FW_DEBUG_CTX_AR_RSC     808U
+#define FW_DEBUG_CTX_AR_BSP     816U
+#define FW_DEBUG_CTX_AR_BSPSTORE 824U
+#define FW_DEBUG_CTX_AR_RNAT    832U
+#define FW_DEBUG_CTX_AR_FCR     840U
+#define FW_DEBUG_CTX_AR_EFLAG   848U
+#define FW_DEBUG_CTX_AR_CSD     856U
+#define FW_DEBUG_CTX_AR_SSD     864U
+#define FW_DEBUG_CTX_AR_CFLG    872U
+#define FW_DEBUG_CTX_AR_FSR     880U
+#define FW_DEBUG_CTX_AR_FIR     888U
+#define FW_DEBUG_CTX_AR_FDR     896U
+#define FW_DEBUG_CTX_AR_CCV     904U
+#define FW_DEBUG_CTX_AR_UNAT    912U
+#define FW_DEBUG_CTX_AR_FPSR    920U
+#define FW_DEBUG_CTX_AR_PFS     928U
+#define FW_DEBUG_CTX_AR_LC      936U
+#define FW_DEBUG_CTX_AR_EC      944U
+#define FW_DEBUG_CTX_CR_DCR     952U
+#define FW_DEBUG_CTX_CR_ITM     960U
+#define FW_DEBUG_CTX_CR_IVA     968U
+#define FW_DEBUG_CTX_CR_PTA     976U
+#define FW_DEBUG_CTX_CR_IPSR    984U
+#define FW_DEBUG_CTX_CR_ISR     992U
+#define FW_DEBUG_CTX_CR_IIP     1000U
+#define FW_DEBUG_CTX_CR_IFA     1008U
+#define FW_DEBUG_CTX_CR_ITIR    1016U
+#define FW_DEBUG_CTX_CR_IIPA    1024U
+#define FW_DEBUG_CTX_CR_IFS     1032U
+#define FW_DEBUG_CTX_CR_IIM     1040U
+#define FW_DEBUG_CTX_CR_IHA     1048U
+#define FW_DEBUG_CTX_DBR0       1056U
+#define FW_DEBUG_CTX_IBR0       1120U
+#define FW_DEBUG_CTX_INT_NAT    1184U
+
+QEMU_BUILD_BUG_ON(FW_DEBUG_CTX_INT_NAT + sizeof(uint64_t) !=
+                  IA64_FW_DEBUG_CONTEXT_SIZE);
+
+static void ia64_fw_debug_putq(CPUIA64State *env, size_t offset,
+                               uint64_t value)
+{
+    stq_le_p(env->fw_debug_context + offset, value);
+}
+
+static uint64_t ia64_fw_debug_getq(const CPUIA64State *env, size_t offset)
+{
+    return ldq_le_p(env->fw_debug_context + offset);
+}
+
+static uint64_t ia64_fw_debug_pr(const CPUIA64State *env)
+{
+    uint64_t value = 1;
+    unsigned i;
+
+    for (i = 1; i < IA64_PR_COUNT; i++) {
+        value |= (env->pr[i] & 1) << i;
+    }
+    return value;
+}
+
+static uint64_t ia64_fw_debug_int_nat(const CPUIA64State *env)
+{
+    uint64_t value = 0;
+    unsigned i;
+
+    for (i = 1; i < 32; i++) {
+        value |= ((env->nat[i / 64] >> (i % 64)) & 1) << i;
+    }
+    return value;
+}
+
+static uint64_t ia64_fw_debug_current_cfm(const CPUIA64State *env)
+{
+    return env->cfm_sof
+        | ((uint64_t)env->cfm_sol << IA64_CFM_SOL_SHIFT)
+        | ((uint64_t)env->cfm_sor << IA64_CFM_SOR_SHIFT)
+        | ((uint64_t)env->cfm_rrb_gr << IA64_CFM_RRB_GR_SHIFT)
+        | ((uint64_t)env->cfm_rrb_fr << IA64_CFM_RRB_FR_SHIFT)
+        | ((uint64_t)env->cfm_rrb_pr << IA64_CFM_RRB_PR_SHIFT);
+}
+
+void ia64_firmware_debug_capture(CPUIA64State *env, uint16_t vector,
+                                 bool collected)
+{
+    uint64_t low;
+    uint64_t high;
+    unsigned i;
+
+    if (env->fw_debug_handler_active) {
+        return;
+    }
+    env->fw_debug_context_valid = false;
+    env->fw_debug_rse_valid = false;
+    if (!collected || env->cr_iva != IA64_FIRMWARE_IVT_BASE) {
+        return;
+    }
+
+    memset(env->fw_debug_context, 0, sizeof(env->fw_debug_context));
+    for (i = 1; i < 32; i++) {
+        ia64_fw_debug_putq(env, FW_DEBUG_CTX_R1 + (i - 1) * 8,
+                           env->gr[i]);
+    }
+    for (i = 2; i < 32; i++) {
+        ia64_fpreg_to_spill(env, i, &low, &high);
+        ia64_fw_debug_putq(env, FW_DEBUG_CTX_F2 + (i - 2) * 16, low);
+        ia64_fw_debug_putq(env, FW_DEBUG_CTX_F2 + (i - 2) * 16 + 8,
+                           high);
+    }
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_PR, ia64_fw_debug_pr(env));
+    for (i = 0; i < IA64_BR_COUNT; i++) {
+        ia64_fw_debug_putq(env, FW_DEBUG_CTX_B0 + i * 8, env->br[i]);
+    }
+
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_RSC, env->ar_rsc);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_BSP, env->ar_bsp);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_BSPSTORE, env->ar_bspstore);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_RNAT, env->ar_rnat);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_FCR, env->ar_fcr);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_EFLAG, env->ar_eflag);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_CSD, env->ar_csd);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_SSD, env->ar_ssd);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_CFLG, env->ar_cflg);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_FSR, env->ar_fsr);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_FIR, env->ar_fir);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_FDR, env->ar_fdr);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_CCV, env->ar_ccv);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_UNAT, env->ar_unat);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_FPSR, env->ar_fpsr);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_PFS, env->ar_pfs);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_LC, env->ar_lc);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_EC, env->ar_ec);
+
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_DCR, env->cr_dcr);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_ITM, env->cr_itm);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IVA, env->cr_iva);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_PTA, env->cr_pta);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IPSR, env->cr_ipsr);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_ISR, env->cr_isr);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IIP, env->cr_iip);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IFA, env->cr_ifa);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_ITIR, env->cr_itir);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IIPA, env->cr_iipa);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IFS,
+                       IA64_IFS_V | ia64_fw_debug_current_cfm(env));
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IIM, env->cr_iim);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IHA, env->cr_iha);
+    for (i = 0; i < 8; i++) {
+        ia64_fw_debug_putq(env, FW_DEBUG_CTX_DBR0 + i * 8, env->dbr[i]);
+    }
+    for (i = 0; i < 8; i++) {
+        ia64_fw_debug_putq(env, FW_DEBUG_CTX_IBR0 + i * 8, env->ibr[i]);
+    }
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_INT_NAT,
+                       ia64_fw_debug_int_nat(env));
+    env->fw_debug_vector = vector;
+    env->fw_debug_context_valid = true;
+}
+
+static unsigned ia64_fw_debug_exception_type(uint16_t vector)
+{
+    if (vector < 0x5000 && (vector & 0x3ff) == 0) {
+        return vector >> 10;
+    }
+    if (vector >= 0x5000 && vector <= 0x6b00 &&
+        (vector & 0xff) == 0) {
+        return 20 + ((vector - 0x5000) >> 8);
+    }
+    return 64;
+}
+
+static unsigned ia64_fw_debug_cpu_index(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+    unsigned index = cs->cpu_index < 0 ? 0 : cs->cpu_index;
+
+    return MIN(index, IA64_FW_DEBUG_MAX_CPUS - 1);
+}
+
+static hwaddr ia64_fw_debug_context_pa(CPUIA64State *env)
+{
+    unsigned index = ia64_fw_debug_cpu_index(env);
+
+    return IA64_FW_DEBUG_CONTEXT_BASE +
+           (hwaddr)index * IA64_FW_DEBUG_CONTEXT_STRIDE;
+}
+
+uint32_t helper_firmware_debug_enter(CPUIA64State *env, uint64_t address)
+{
+    uint64_t vector_base = env->cr_iva & ~0x7fffULL;
+    uint64_t vector_address = vector_base | env->fw_debug_vector;
+    uint64_t handler = env->gr[16];
+    unsigned exception_type;
+
+    if (!env->fw_debug_context_valid || env->fw_debug_handler_active ||
+        vector_base != IA64_FIRMWARE_IVT_BASE ||
+        address < vector_address || address >= vector_address + 0x100 ||
+        handler < IA64_FW_IDENTITY_BASE ||
+        handler >= IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE ||
+        (handler & (IA64_BUNDLE_SIZE - 1))) {
+        return 0;
+    }
+
+    exception_type = ia64_fw_debug_exception_type(env->fw_debug_vector);
+    if (exception_type >= 64) {
+        return 0;
+    }
+    env->fw_debug_handler_active = true;
+    env->gr[16] = exception_type;
+    env->gr[17] = ia64_fw_debug_context_pa(env);
+    env->gr[18] = ia64_fw_debug_cpu_index(env);
+    env->gr[12] = IA64_FW_DEBUG_STACK_BASE +
+                  (ia64_fw_debug_cpu_index(env) + 1) *
+                  IA64_FW_DEBUG_STACK_SIZE - 16;
+    env->nat[0] &= ~((1ULL << 12) | (1ULL << 16) |
+                     (1ULL << 17) | (1ULL << 18));
+    ia64_set_psr(env, env->psr & ~(IA64_PSR_DT | IA64_PSR_RT |
+                                   IA64_PSR_IT | IA64_PSR_RI_MASK));
+    helper_tlb_serialize(env, 1, 1);
+    env->ip = handler;
+    env->fault_slot = 0;
+    env->instruction_group_start = true;
+    return 1;
+}
+
+static void ia64_fw_debug_save_rse(CPUIA64State *env)
+{
+    IA64FirmwareDebugRseState *state = &env->fw_debug_rse;
+
+    memcpy(state->pgr, env->rse_pgr, sizeof(state->pgr));
+    memcpy(state->pgr_nat, env->rse_pgr_nat, sizeof(state->pgr_nat));
+    memcpy(state->gr_dirty, env->rse_gr_dirty, sizeof(state->gr_dirty));
+    state->bsp = env->ar_bsp;
+    state->bspstore = env->ar_bspstore;
+    state->rnat = env->ar_rnat;
+    state->bol = env->rse_bol;
+    state->dirty = env->rse_dirty;
+    state->dirty_nat = env->rse_dirty_nat;
+    state->clean = env->rse_clean;
+    state->clean_nat = env->rse_clean_nat;
+    state->invalid = env->rse_invalid;
+    state->cfm_sof = env->cfm_sof;
+    state->cfm_sol = env->cfm_sol;
+    state->cfm_sor = env->cfm_sor;
+    state->cfm_rrb_gr = env->cfm_rrb_gr;
+    state->cfm_rrb_fr = env->cfm_rrb_fr;
+    state->cfm_rrb_pr = env->cfm_rrb_pr;
+    state->cfle = env->rse_cfle;
+    env->fw_debug_rse_valid = true;
+}
+
+static void ia64_fw_debug_restore_rse(CPUIA64State *env)
+{
+    const IA64FirmwareDebugRseState *state = &env->fw_debug_rse;
+
+    memcpy(env->rse_pgr, state->pgr, sizeof(state->pgr));
+    memcpy(env->rse_pgr_nat, state->pgr_nat, sizeof(state->pgr_nat));
+    memcpy(env->rse_gr_dirty, state->gr_dirty, sizeof(state->gr_dirty));
+    env->ar_bsp = state->bsp;
+    env->ar_bspstore = state->bspstore;
+    env->ar_rnat = state->rnat;
+    env->rse_bol = state->bol;
+    env->rse_dirty = state->dirty;
+    env->rse_dirty_nat = state->dirty_nat;
+    env->rse_clean = state->clean;
+    env->rse_clean_nat = state->clean_nat;
+    env->rse_invalid = state->invalid;
+    env->cfm_sof = state->cfm_sof;
+    env->cfm_sol = state->cfm_sol;
+    env->cfm_sor = state->cfm_sor;
+    env->cfm_rrb_gr = state->cfm_rrb_gr;
+    ia64_set_cfm_rrb_fr(env, state->cfm_rrb_fr);
+    env->cfm_rrb_pr = state->cfm_rrb_pr;
+    env->rse_cfle = state->cfle;
+}
+
+uint32_t helper_firmware_debug_save(CPUIA64State *env)
+{
+    if (!env->fw_debug_handler_active || !env->fw_debug_context_valid) {
+        return 0;
+    }
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IFS, env->cr_ifs);
+    ia64_fw_debug_save_rse(env);
+    cpu_physical_memory_write(ia64_fw_debug_context_pa(env),
+                              env->fw_debug_context,
+                              sizeof(env->fw_debug_context));
+    return 1;
+}
+
+static void ia64_fw_debug_restore_static_gr(CPUIA64State *env,
+                                            uint64_t ipsr,
+                                            uint64_t int_nat)
+{
+    unsigned i;
+
+    for (i = 1; i < 16; i++) {
+        env->gr[i] = ia64_fw_debug_getq(env,
+                                       FW_DEBUG_CTX_R1 + (i - 1) * 8);
+        if (int_nat & (1ULL << i)) {
+            env->nat[0] |= 1ULL << i;
+        } else {
+            env->nat[0] &= ~(1ULL << i);
+        }
+    }
+    for (i = 16; i < 32; i++) {
+        uint64_t value = ia64_fw_debug_getq(
+            env, FW_DEBUG_CTX_R1 + (i - 1) * 8);
+        bool nat = (int_nat >> i) & 1;
+
+        if (ipsr & IA64_PSR_BN) {
+            env->banked_gr[i - 16] = value;
+            if (nat) {
+                env->banked_nat |= 1U << (i - 16);
+            } else {
+                env->banked_nat &= ~(1U << (i - 16));
+            }
+        } else {
+            env->gr[i] = value;
+            if (nat) {
+                env->nat[0] |= 1ULL << i;
+            } else {
+                env->nat[0] &= ~(1ULL << i);
+            }
+        }
+    }
+}
+
+uint32_t helper_firmware_debug_restore(CPUIA64State *env)
+{
+    uint64_t ipsr;
+    uint64_t int_nat;
+    uint64_t pr;
+    uint64_t original_bsp;
+    uint64_t original_bspstore;
+    uint64_t restored_bsp;
+    uint64_t restored_bspstore;
+    unsigned i;
+
+    if (!env->fw_debug_handler_active || !env->fw_debug_context_valid ||
+        !env->fw_debug_rse_valid) {
+        return 0;
+    }
+    original_bsp = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_BSP);
+    original_bspstore = ia64_fw_debug_getq(env,
+                                            FW_DEBUG_CTX_AR_BSPSTORE);
+    cpu_physical_memory_read(ia64_fw_debug_context_pa(env),
+                             env->fw_debug_context,
+                             sizeof(env->fw_debug_context));
+    ia64_fw_debug_restore_rse(env);
+    restored_bsp = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_BSP);
+    restored_bspstore = ia64_fw_debug_getq(env,
+                                            FW_DEBUG_CTX_AR_BSPSTORE);
+    env->ar_bsp += restored_bsp - original_bsp;
+    env->ar_bspstore += restored_bspstore - original_bspstore;
+    env->ar_rnat = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_RNAT);
+
+    ipsr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IPSR);
+    int_nat = ia64_fw_debug_getq(env, FW_DEBUG_CTX_INT_NAT);
+    ia64_fw_debug_restore_static_gr(env, ipsr, int_nat);
+    for (i = 2; i < 32; i++) {
+        uint64_t low = ia64_fw_debug_getq(
+            env, FW_DEBUG_CTX_F2 + (i - 2) * 16);
+        uint64_t high = ia64_fw_debug_getq(
+            env, FW_DEBUG_CTX_F2 + (i - 2) * 16 + 8);
+
+        ia64_fpreg_from_spill(env, i, low, high);
+    }
+    pr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_PR) | 1;
+    for (i = 1; i < IA64_PR_COUNT; i++) {
+        env->pr[i] = (pr >> i) & 1;
+    }
+    env->pr[0] = 1;
+    for (i = 0; i < IA64_BR_COUNT; i++) {
+        env->br[i] = ia64_fw_debug_getq(env, FW_DEBUG_CTX_B0 + i * 8);
+    }
+
+    env->ar_rsc = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_RSC);
+    env->ar_fcr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_FCR);
+    env->ar_eflag = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_EFLAG);
+    env->ar_csd = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_CSD);
+    env->ar_ssd = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_SSD);
+    env->ar_cflg = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_CFLG);
+    env->ar_fsr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_FSR);
+    env->ar_fir = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_FIR);
+    env->ar_fdr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_FDR);
+    env->ar_ccv = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_CCV);
+    env->ar_unat = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_UNAT);
+    env->ar_fpsr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_FPSR);
+    env->ar_pfs = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_PFS);
+    env->ar_lc = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_LC);
+    env->ar_ec = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_EC);
+
+    env->cr_dcr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_DCR);
+    helper_write_cr(env, 1, ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_ITM));
+    helper_write_cr(env, 2, ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IVA));
+    helper_write_cr(env, 8, ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_PTA));
+    env->cr_ipsr = ipsr;
+    env->cr_isr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_ISR);
+    env->cr_iip = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IIP);
+    env->cr_ifa = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IFA);
+    env->cr_itir = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_ITIR);
+    env->cr_iipa = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IIPA);
+    env->cr_ifs = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IFS);
+    env->cr_iim = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IIM);
+    env->cr_iha = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IHA);
+    for (i = 0; i < 8; i++) {
+        env->dbr[i] = ia64_fw_debug_getq(env, FW_DEBUG_CTX_DBR0 + i * 8);
+    }
+    for (i = 0; i < 8; i++) {
+        env->ibr[i] = ia64_fw_debug_getq(env, FW_DEBUG_CTX_IBR0 + i * 8);
+    }
+
+    env->fw_debug_handler_active = false;
+    env->fw_debug_context_valid = false;
+    env->fw_debug_rse_valid = false;
+    helper_rfi(env);
+    return 1;
 }
 
 /* ---- FP pack ---- */
@@ -7025,6 +7897,24 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
     }
 
     return vhpt_enabled ? IA64_EXCP_DTLB_FAULT : IA64_EXCP_ALT_DTLB;
+}
+
+bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
+                                bool is_write, uint64_t *pa)
+{
+    IA64DataReferenceResult result;
+    IA64Exception excp;
+
+    if (env == NULL || pa == NULL) {
+        return false;
+    }
+    excp = ia64_data_reference_exception(
+        env, va, is_write, false, ia64_psr_cpl(env->psr), true, &result);
+    if (excp != IA64_EXCP_NONE || !result.valid) {
+        return false;
+    }
+    *pa = result.pa;
+    return true;
 }
 
 static uint64_t ia64_speculative_deferral_dcr_mask(IA64Exception excp)

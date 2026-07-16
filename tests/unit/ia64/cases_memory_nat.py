@@ -30,6 +30,7 @@ CASE_NAMES = (
     'firmware_unaligned_load_assist',
     'firmware_unaligned_speculative_load_assist',
     'firmware_unaligned_store_assist',
+    'firmware_unaligned_virtual_load_assist',
     'integer_compare_nat_source_rules',
     'integer_nat_propagates_and_clears',
     'integer_postinc_imm9_decode',

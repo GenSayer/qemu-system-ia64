@@ -494,6 +494,42 @@ typedef struct IA64MicroTlbEntry {
     bool valid;
 } IA64MicroTlbEntry;
 
+/*
+ * The EFI 1.10 native debug-support ABI uses a fixed 1192-byte IA-64
+ * context record.  Firmware places one record per vCPU immediately after
+ * the architected IVT.  The emulator retains only the RSE bookkeeping that
+ * is needed while a registered callback runs; architected state is carried
+ * in the guest-visible context record itself.
+ */
+#define IA64_FW_DEBUG_CONTEXT_BASE    0x0000000000018000ULL
+#define IA64_FW_DEBUG_CONTEXT_STRIDE  0x800ULL
+#define IA64_FW_DEBUG_CONTEXT_SIZE    1192U
+#define IA64_FW_DEBUG_MAX_CPUS        4U
+#define IA64_FW_DEBUG_STACK_BASE      0x0000000000020000ULL
+#define IA64_FW_DEBUG_STACK_SIZE      0x8000ULL
+
+typedef struct IA64FirmwareDebugRseState {
+    uint64_t pgr[IA64_STACKED_GR_COUNT];
+    uint64_t pgr_nat[2];
+    uint64_t gr_dirty[2];
+    uint64_t bsp;
+    uint64_t bspstore;
+    uint64_t rnat;
+    uint32_t bol;
+    int32_t dirty;
+    int32_t dirty_nat;
+    int32_t clean;
+    int32_t clean_nat;
+    int32_t invalid;
+    uint8_t cfm_sof;
+    uint8_t cfm_sol;
+    uint8_t cfm_sor;
+    uint8_t cfm_rrb_gr;
+    uint8_t cfm_rrb_fr;
+    uint8_t cfm_rrb_pr;
+    bool cfle;
+} IA64FirmwareDebugRseState;
+
 typedef enum IA64MemorySpeculation {
     IA64_MEM_NON_SPECULATIVE,
     IA64_MEM_LIMITED_SPECULATION,
@@ -741,6 +777,29 @@ typedef struct CPUArchState {
     uint64_t fp_backup_pr_mask;
     uint64_t fp_backup_psr_mf;
     bool fp_backup_active;
+
+    /* Native EFI Debug Support exception/callback bridge state. */
+    uint8_t fw_debug_context[IA64_FW_DEBUG_CONTEXT_SIZE];
+    IA64FirmwareDebugRseState fw_debug_rse;
+    uint16_t fw_debug_vector;
+    bool fw_debug_context_valid;
+    bool fw_debug_handler_active;
+    bool fw_debug_rse_valid;
+
+    /*
+     * Result retained across an architecturally mandated FP software-assist
+     * fault.  The firmware entry consumes this state synchronously from the
+     * fault handler and writes it to either the supplied save area or the
+     * physical floating-point register file.
+     */
+    uint64_t fpswa_result_low;
+    uint64_t fpswa_result_high;
+    uint64_t fpswa_flags;
+    uint8_t fpswa_dest_fr;
+    uint8_t fpswa_dest_pr;
+    uint8_t fpswa_sf;
+    bool fpswa_pending;
+    bool fpswa_fpa;
     float_status fp_status;
 } CPUIA64State;
 
@@ -759,6 +818,8 @@ static inline void ia64_rse_mark_gr_dirty(CPUIA64State *env, uint32_t reg)
 
 void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb);
 void ia64_flush_suppressed_tlb(CPUIA64State *env);
+void ia64_firmware_debug_capture(CPUIA64State *env, uint16_t vector,
+                                 bool collected);
 
 static inline bool ia64_key_check_enabled(const CPUIA64State *env,
                                           bool is_ifetch, bool is_rse)
@@ -1108,6 +1169,8 @@ bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,
                                 bool is_ifetch, bool is_rse,
                                 uint64_t *entry_va);
 uint64_t ia64_vhpt_hash_address(CPUIA64State *env, uint64_t va);
+bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
+                                bool is_write, uint64_t *pa);
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value);
 void ia64_set_psr_bn(CPUIA64State *env, bool bank1);

@@ -49,6 +49,76 @@ pal_proc_entry:
     .endp pal_proc_entry
     .size pal_proc_entry, . - pal_proc_entry
 
+    /*
+     * The machine implements the arithmetic behind this architected
+     * firmware ABI.  Keeping the bridge as a leaf preserves all eight input
+     * registers and returns the four-word result directly in r8-r11.
+     */
+    .section .text.fpswa_emulation_entry, "ax"
+    .global fpswa_emulation_entry
+    .type fpswa_emulation_entry, @function
+    .proc fpswa_emulation_entry
+    .explicit
+fpswa_emulation_entry:
+    break.m 0x100001
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fpswa_emulation_entry
+    .size fpswa_emulation_entry, . - fpswa_emulation_entry
+
+    /* Copied into an IVT slot while an EFI debug callback is registered. */
+    .section .text.fw_debug_ivt_stub, "ax"
+    .align 16
+    .global fw_debug_ivt_stub_start
+    .global fw_debug_ivt_stub_end
+    .type fw_debug_ivt_stub_start, @function
+    .proc fw_debug_ivt_stub_start
+    .explicit
+fw_debug_ivt_stub_start:
+    movl r16 = fw_debug_exception_entry
+    ;;
+    break.m 0x100002
+    ;;
+fw_debug_ivt_stub_end:
+    .endp fw_debug_ivt_stub_start
+    .size fw_debug_ivt_stub_start, . - fw_debug_ivt_stub_start
+
+    /*
+     * The target bridge supplies the exception type, context record, a
+     * private stack, and the processor index in r16-r18.  cover preserves
+     * the interrupted frame in cr.ifs before calling ordinary C code.
+     */
+    .section .text.fw_debug_exception_entry, "ax"
+    .align 16
+    .global fw_debug_exception_entry
+    .type fw_debug_exception_entry, @function
+    .proc fw_debug_exception_entry
+    .explicit
+fw_debug_exception_entry:
+    cover
+    ;;
+    break.m 0x100003
+    ;;
+    .align 16
+    mov r19 = r18
+    movl r1 = __gp
+    ;;
+    alloc r18 = ar.pfs, 0, 3, 3, 0
+    ;;
+    mov r35 = r16
+    mov r36 = r17
+    mov r37 = r19
+    ;;
+    br.call.sptk.many b0 = fw_debug_support_dispatch
+    ;;
+    break.m 0x100004
+    ;;
+    break.m 0
+    ;;
+    .endp fw_debug_exception_entry
+    .size fw_debug_exception_entry, . - fw_debug_exception_entry
+
     .section .text.start_after_pal, "ax"
     .type start_after_pal, @function
     .proc start_after_pal
@@ -179,3 +249,95 @@ fw_pal_halt_light:
     ;;
     .endp fw_pal_halt_light
     .size fw_pal_halt_light, . - fw_pal_halt_light
+
+    .section .text.fw_ebc_bridge, "ax"
+
+    /* A generated thunk passes its firmware-owned context in r8. */
+    .global fw_ebc_capture_context
+    .type fw_ebc_capture_context, @function
+    .proc fw_ebc_capture_context
+    .explicit
+fw_ebc_capture_context:
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_ebc_capture_context
+    .size fw_ebc_capture_context, . - fw_ebc_capture_context
+
+    /*
+     * Invoke an IA-64 function descriptor from an EBC argument frame.
+     * The first eight natural-width arguments are loaded into the register
+     * stack.  The complete frame is copied to a temporary native stack so
+     * that additional arguments remain at their ABI-defined locations.
+     */
+    .global fw_ebc_call_native
+    .type fw_ebc_call_native, @function
+    .proc fw_ebc_call_native
+    .explicit
+fw_ebc_call_native:
+    alloc loc1 = ar.pfs, 3, 9, 8, 0
+    ;;
+    mov loc0 = b0
+    mov loc2 = r12
+    mov loc3 = r1
+    sub loc4 = in2, in1
+    ;;
+    sub loc5 = r12, loc4
+    mov loc6 = in1
+    mov loc8 = loc4
+    ;;
+    and loc5 = -16, loc5
+    ;;
+    mov loc7 = loc5
+    ;;
+1:
+    cmp.eq p6, p7 = loc8, r0
+    ;;
+(p6) br.cond.dpnt.few 2f
+    ;;
+    ld1 r14 = [loc6], 1
+    ;;
+    st1 [loc7] = r14, 1
+    add loc8 = -1, loc8
+    ;;
+    br.cond.sptk.few 1b
+    ;;
+2:
+    mov r14 = loc5
+    ;;
+    ld8 out0 = [r14], 8
+    ;;
+    ld8 out1 = [r14], 8
+    ;;
+    ld8 out2 = [r14], 8
+    ;;
+    ld8 out3 = [r14], 8
+    ;;
+    ld8 out4 = [r14], 8
+    ;;
+    ld8 out5 = [r14], 8
+    ;;
+    ld8 out6 = [r14], 8
+    ;;
+    ld8 out7 = [r14], 8
+    ;;
+    add r12 = 48, loc5
+    mov r14 = in0
+    ;;
+    ld8 r15 = [r14], 8
+    ;;
+    ld8 r16 = [r14]
+    ;;
+    mov b6 = r15
+    mov r1 = r16
+    ;;
+    br.call.sptk.many b0 = b6
+    ;;
+    mov r12 = loc2
+    mov r1 = loc3
+    mov b0 = loc0
+    mov ar.pfs = loc1
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_ebc_call_native
+    .size fw_ebc_call_native, . - fw_ebc_call_native

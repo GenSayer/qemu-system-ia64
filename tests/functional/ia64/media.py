@@ -13,7 +13,9 @@ import zlib
 SECTOR_SIZE = 512
 ISO_SECTOR_SIZE = 2048
 DISK_SECTORS = 16384
+FAT32_DISK_SECTORS = 70000
 FAT_SECTORS = 64
+FAT32_SECTORS = 600
 ROOT_ENTRIES = 512
 ROOT_SECTORS = ROOT_ENTRIES * 32 // SECTOR_SIZE
 DATA_START = 1 + FAT_SECTORS + ROOT_SECTORS
@@ -153,7 +155,9 @@ def _write_iso9660(image: bytearray, volume_sectors: int,
 def _fat_volume(efi_image: bytes, sectors: int = DISK_SECTORS,
                 fat_sectors: int = FAT_SECTORS,
                 root_entries: int = ROOT_ENTRIES,
-                reserve_test_region: bool = False) -> tuple[bytearray, int]:
+                reserve_test_region: bool = False,
+                extra_boot_files: tuple[tuple[bytes, bytes], ...] = ()) \
+        -> tuple[bytearray, int]:
     root_sectors = root_entries * 32 // SECTOR_SIZE
     data_start = 1 + fat_sectors + root_sectors
     image = bytearray(sectors * SECTOR_SIZE)
@@ -192,12 +196,29 @@ def _fat_volume(efi_image: bytes, sectors: int = DISK_SECTORS,
     first_file_cluster = 4
     last_file_cluster = first_file_cluster + file_clusters - 1
     reserved = TEST_BLOCKS if reserve_test_region else 0
-    if data_start + last_file_cluster - 2 >= sectors - reserved:
-        raise ValueError("EFI application does not fit in FAT image")
     for cluster in range(first_file_cluster, last_file_cluster + 1):
         next_cluster = (end_of_chain if cluster == last_file_cluster
                         else cluster + 1)
         _set_fat_entry(fat, cluster, next_cluster, fat12)
+
+    extra_records = []
+    next_free_cluster = last_file_cluster + 1
+    for short_name, contents in extra_boot_files:
+        if len(short_name) != 11:
+            raise ValueError("extra FAT short name must contain 11 bytes")
+        cluster_count = max(1, (len(contents) + SECTOR_SIZE - 1) //
+                            SECTOR_SIZE)
+        first_cluster = next_free_cluster
+        last_cluster = first_cluster + cluster_count - 1
+        for cluster in range(first_cluster, last_cluster + 1):
+            _set_fat_entry(
+                fat, cluster,
+                end_of_chain if cluster == last_cluster else cluster + 1,
+                fat12)
+        extra_records.append((short_name, contents, first_cluster))
+        next_free_cluster = last_cluster + 1
+    if data_start + next_free_cluster - 3 >= sectors - reserved:
+        raise ValueError("EFI applications do not fit in FAT image")
 
     root_start = (1 + fat_sectors) * SECTOR_SIZE
     image[root_start:root_start + 32] = _directory_entry(
@@ -220,6 +241,117 @@ def _fat_volume(efi_image: bytes, sectors: int = DISK_SECTORS,
         b"BOOTIA64EFI", 0x20, first_file_cluster, len(efi_image))
     file_start = (data_start + first_file_cluster - 2) * SECTOR_SIZE
     image[file_start:file_start + len(efi_image)] = efi_image
+    for index, (short_name, contents, first_cluster) in \
+            enumerate(extra_records):
+        entry_start = boot_dir_start + (3 + index) * 32
+        image[entry_start:entry_start + 32] = _directory_entry(
+            short_name, 0x20, first_cluster, len(contents))
+        file_start = (data_start + first_cluster - 2) * SECTOR_SIZE
+        image[file_start:file_start + len(contents)] = contents
+
+    test_offset = len(image) - TEST_BLOCKS * SECTOR_SIZE
+    if reserve_test_region:
+        for index in range(TEST_BLOCKS * SECTOR_SIZE):
+            image[test_offset + index] = (index * 19 + 0x31) & 0xFF
+    return image, test_offset
+
+
+def _fat32_volume(efi_image: bytes,
+                  reserve_test_region: bool = False) -> tuple[bytearray, int]:
+    """Build a standards-conforming FAT32 volume with two FAT copies."""
+    sectors = FAT32_DISK_SECTORS
+    reserved_sectors = 32
+    fat_count = 2
+    fat_sectors = FAT32_SECTORS
+    data_start = reserved_sectors + fat_count * fat_sectors
+    image = bytearray(sectors * SECTOR_SIZE)
+
+    image[0:3] = b"\xeb\x58\x90"
+    image[3:11] = b"QEMUIA64"
+    struct.pack_into("<H", image, 11, SECTOR_SIZE)
+    image[13] = 1
+    struct.pack_into("<H", image, 14, reserved_sectors)
+    image[16] = fat_count
+    struct.pack_into("<H", image, 17, 0)
+    struct.pack_into("<H", image, 19, 0)
+    image[21] = 0xF8
+    struct.pack_into("<H", image, 22, 0)
+    struct.pack_into("<H", image, 24, 32)
+    struct.pack_into("<H", image, 26, 64)
+    struct.pack_into("<I", image, 28, 0)
+    struct.pack_into("<I", image, 32, sectors)
+    struct.pack_into("<I", image, 36, fat_sectors)
+    struct.pack_into("<H", image, 40, 0)
+    struct.pack_into("<H", image, 42, 0)
+    struct.pack_into("<I", image, 44, 2)
+    struct.pack_into("<H", image, 48, 1)
+    struct.pack_into("<H", image, 50, 6)
+    image[64] = 0x80
+    image[66] = 0x29
+    image[67:71] = b"IA64"
+    image[71:82] = b"IA64 TEST  "
+    image[82:90] = b"FAT32   "
+    image[510:512] = b"\x55\xaa"
+
+    fsinfo = memoryview(image)[SECTOR_SIZE:2 * SECTOR_SIZE]
+    struct.pack_into("<I", fsinfo, 0, 0x41615252)
+    struct.pack_into("<I", fsinfo, 484, 0x61417272)
+    struct.pack_into("<I", fsinfo, 488, 0xFFFFFFFF)
+    struct.pack_into("<I", fsinfo, 492, 5)
+    struct.pack_into("<I", fsinfo, 508, 0xAA550000)
+    image[6 * SECTOR_SIZE:7 * SECTOR_SIZE] = image[0:SECTOR_SIZE]
+    image[7 * SECTOR_SIZE:8 * SECTOR_SIZE] = image[SECTOR_SIZE:2 * SECTOR_SIZE]
+
+    fats = [memoryview(image)[
+        (reserved_sectors + index * fat_sectors) * SECTOR_SIZE:
+        (reserved_sectors + (index + 1) * fat_sectors) * SECTOR_SIZE]
+        for index in range(fat_count)]
+
+    def set_entry(cluster: int, value: int) -> None:
+        for fat in fats:
+            struct.pack_into("<I", fat, cluster * 4, value & 0x0FFFFFFF)
+
+    end_of_chain = 0x0FFFFFFF
+    set_entry(0, 0x0FFFFFF8)
+    set_entry(1, end_of_chain)
+    set_entry(2, end_of_chain)
+    set_entry(3, end_of_chain)
+    set_entry(4, end_of_chain)
+
+    file_clusters = (len(efi_image) + SECTOR_SIZE - 1) // SECTOR_SIZE
+    first_file_cluster = 5
+    last_file_cluster = first_file_cluster + file_clusters - 1
+    reserved = TEST_BLOCKS if reserve_test_region else 0
+    if data_start + last_file_cluster - 2 >= sectors - reserved:
+        raise ValueError("EFI application does not fit in FAT32 image")
+    for cluster in range(first_file_cluster, last_file_cluster + 1):
+        set_entry(cluster, end_of_chain if cluster == last_file_cluster
+                  else cluster + 1)
+
+    def cluster_offset(cluster: int) -> int:
+        return (data_start + cluster - 2) * SECTOR_SIZE
+
+    root_start = cluster_offset(2)
+    image[root_start:root_start + 32] = _directory_entry(
+        b"IA64 TEST  ", 0x08, 0)
+    image[root_start + 32:root_start + 64] = _directory_entry(
+        b"EFI        ", 0x10, 3)
+    efi_dir_start = cluster_offset(3)
+    image[efi_dir_start:efi_dir_start + 32] = _directory_entry(
+        b".          ", 0x10, 3)
+    image[efi_dir_start + 32:efi_dir_start + 64] = _directory_entry(
+        b"..         ", 0x10, 2)
+    image[efi_dir_start + 64:efi_dir_start + 96] = _directory_entry(
+        b"BOOT       ", 0x10, 4)
+    boot_dir_start = cluster_offset(4)
+    image[boot_dir_start:boot_dir_start + 32] = _directory_entry(
+        b".          ", 0x10, 4)
+    image[boot_dir_start + 32:boot_dir_start + 64] = _directory_entry(
+        b"..         ", 0x10, 3)
+    image[boot_dir_start + 64:boot_dir_start + 96] = _directory_entry(
+        b"BOOTIA64EFI", 0x20, first_file_cluster, len(efi_image))
+    file_start = cluster_offset(first_file_cluster)
+    image[file_start:file_start + len(efi_image)] = efi_image
 
     test_offset = len(image) - TEST_BLOCKS * SECTOR_SIZE
     if reserve_test_region:
@@ -229,15 +361,27 @@ def _fat_volume(efi_image: bytes, sectors: int = DISK_SECTORS,
 
 
 def make_fat_disk(path: str | Path, efi_app: str | Path,
-                  layout: str = "whole") -> MediaInfo:
+                  layout: str = "whole", *, fat32: bool = False,
+                  extra_boot_files: tuple[
+                      tuple[bytes, str | Path], ...] = ()) -> MediaInfo:
     """Create a whole-disk FAT16 image, MBR partition, or GPT ESP."""
     path = Path(path)
     efi_image = Path(efi_app).read_bytes()
-    fat, fat_test_offset = _fat_volume(efi_image, reserve_test_region=True)
+    extra_contents = tuple(
+        (name, Path(source).read_bytes()) for name, source in extra_boot_files)
+    if fat32 and extra_contents:
+        raise ValueError("extra boot files are not supported for FAT32")
+    fat, fat_test_offset = (_fat32_volume(efi_image,
+                                         reserve_test_region=True)
+                             if fat32 else
+                             _fat_volume(efi_image,
+                                         reserve_test_region=True,
+                                         extra_boot_files=extra_contents))
+    disk_sectors = FAT32_DISK_SECTORS if fat32 else DISK_SECTORS
     test_offset = fat_test_offset
 
     if layout == "gpt":
-        total_sectors = GPT_ESP_START + DISK_SECTORS + 33
+        total_sectors = GPT_ESP_START + disk_sectors + 33
         raw = bytearray(total_sectors * SECTOR_SIZE)
         raw[446 + 4] = 0xEE
         struct.pack_into("<I", raw, 446 + 8, 1)
@@ -250,7 +394,7 @@ def make_fat_disk(path: str | Path, efi_app: str | Path,
         entries[16:32] = uuid.UUID(
             "12345678-9abc-def0-1234-56789abcdef0").bytes_le
         struct.pack_into("<QQ", entries, 32, GPT_ESP_START,
-                         GPT_ESP_START + DISK_SECTORS - 1)
+                         GPT_ESP_START + disk_sectors - 1)
         name = "EFI system partition".encode("utf-16le")
         entries[56:56 + len(name)] = name
         entries_crc = crc32(entries)
@@ -280,11 +424,11 @@ def make_fat_disk(path: str | Path, efi_app: str | Path,
             total_sectors - 1, 1, backup_entries_lba)
         struct.pack_into("<I", fat, 28, GPT_ESP_START)
         raw[GPT_ESP_START * SECTOR_SIZE:
-            (GPT_ESP_START + DISK_SECTORS) * SECTOR_SIZE] = fat
+            (GPT_ESP_START + disk_sectors) * SECTOR_SIZE] = fat
         test_offset += GPT_ESP_START * SECTOR_SIZE
         image = raw
     elif layout in ("mbr", "mbr-fallback"):
-        total_sectors = MBR_ESP_START + DISK_SECTORS
+        total_sectors = MBR_ESP_START + disk_sectors
         raw = bytearray(total_sectors * SECTOR_SIZE)
         entry = 446
         if layout == "mbr-fallback":
@@ -299,7 +443,7 @@ def make_fat_disk(path: str | Path, efi_app: str | Path,
             raw[entry] = 0x80
             raw[entry + 4] = 0x0E
         struct.pack_into("<I", raw, entry + 8, MBR_ESP_START)
-        struct.pack_into("<I", raw, entry + 12, DISK_SECTORS)
+        struct.pack_into("<I", raw, entry + 12, disk_sectors)
         raw[510:512] = b"\x55\xaa"
         struct.pack_into("<I", fat, 28, MBR_ESP_START)
         raw[MBR_ESP_START * SECTOR_SIZE:] = fat

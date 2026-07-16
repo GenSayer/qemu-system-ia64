@@ -37,6 +37,28 @@ foreach app : ['smoke', 'services', 'tables', 'exitbs', 'storage', 'input', 'smp
   ia64_functional_test_apps += app_target
 endforeach
 
+ia64_child_linker_script = files('apps/ia64-test-child.lds')
+ia64_start_image_child = custom_target(
+  'ia64-functional-start-image-child-app',
+  output: 'start-image-child-app.efi',
+  input: files('apps/start-image-child-app.c'),
+  depend_files: [
+    ia64_app_builder,
+    ia64_child_linker_script,
+    ia64_app_header,
+  ],
+  command: [
+    ia64_app_sh,
+    ia64_app_builder,
+    '@OUTPUT@',
+    '@INPUT@',
+    ia64_child_linker_script,
+    '0x5000000',
+  ],
+  build_by_default: false,
+)
+ia64_functional_test_apps += ia64_start_image_child
+
 alias_target('ia64-functional-apps', ia64_functional_test_apps)
 
 # tests/functional/meson.build adds this target-specific list to the common

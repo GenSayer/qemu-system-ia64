@@ -36,7 +36,9 @@ typedef UINTN EFI_TPL;
 #define EFI_WRITE_PROTECTED           EFIERR(8)
 #define EFI_OUT_OF_RESOURCES          EFIERR(9)
 #define EFI_NOT_FOUND                 EFIERR(14)
+#define EFI_ACCESS_DENIED             EFIERR(15)
 #define EFI_TIMEOUT                   EFIERR(18)
+#define EFI_ALREADY_STARTED           EFIERR(20)
 #define EFI_ABORTED                   EFIERR(21)
 #define EFI_ERROR(Status)             (((Status) & EFI_ERROR_BIT) != 0)
 
@@ -73,9 +75,16 @@ typedef UINTN EFI_TPL;
 #define EVT_NOTIFY_SIGNAL             0x00000200U
 #define TPL_APPLICATION               4U
 #define TPL_CALLBACK                  8U
+#define EFI_NATIVE_INTERFACE          0U
 #define EFI_OPEN_PROTOCOL_GET_PROTOCOL 0x00000002U
+#define EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER 0x00000008U
+#define EFI_OPEN_PROTOCOL_BY_DRIVER   0x00000010U
 #define EFI_LOCATE_BY_PROTOCOL         2U
 #define EFI_FILE_MODE_READ             0x0000000000000001ULL
+#define EFI_FILE_MODE_WRITE            0x0000000000000002ULL
+#define EFI_FILE_READ_ONLY             0x0000000000000001ULL
+#define EFI_FILE_DIRECTORY             0x0000000000000010ULL
+#define EFI_FILE_ARCHIVE               0x0000000000000020ULL
 #define EFI_SHIFT_STATE_VALID          0x80000000U
 #define EFI_RIGHT_SHIFT_PRESSED        0x00000001U
 #define EFI_LEFT_SHIFT_PRESSED         0x00000002U
@@ -87,6 +96,12 @@ typedef UINTN EFI_TPL;
 #define IA64_GUID_LOADED_IMAGE \
     { 0xa1, 0x31, 0x1b, 0x5b, 0x62, 0x95, 0xd2, 0x11, \
       0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
+#define IA64_GUID_LOADED_IMAGE_DEVICE_PATH \
+    { 0x7e, 0x15, 0x62, 0xbc, 0x33, 0x3e, 0xec, 0x4f, \
+      0x99, 0x20, 0x2d, 0x3b, 0x36, 0xd7, 0x50, 0xdf }
+#define IA64_GUID_HII_PACKAGE_LIST \
+    { 0x63, 0xe7, 0x1e, 0x6a, 0x7a, 0xd4, 0xb4, 0x43, \
+      0xaa, 0xbe, 0xef, 0x1d, 0xe2, 0xab, 0x56, 0xfc }
 #define IA64_GUID_DEVICE_PATH \
     { 0x91, 0x6e, 0x57, 0x09, 0x3f, 0x6d, 0xd2, 0x11, \
       0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
@@ -99,6 +114,36 @@ typedef UINTN EFI_TPL;
 #define IA64_GUID_SIMPLE_FILE_SYSTEM \
     { 0x22, 0x5b, 0x4e, 0x96, 0x59, 0x64, 0xd2, 0x11, \
       0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
+#define IA64_GUID_FILE_INFO \
+    { 0x92, 0x6e, 0x57, 0x09, 0x3f, 0x6d, 0xd2, 0x11, \
+      0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
+#define IA64_GUID_FILE_SYSTEM_INFO \
+    { 0x93, 0x6e, 0x57, 0x09, 0x3f, 0x6d, 0xd2, 0x11, \
+      0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
+#define IA64_GUID_FILE_SYSTEM_VOLUME_LABEL \
+    { 0xd3, 0xd7, 0x47, 0xdb, 0x81, 0xfe, 0xd3, 0x11, \
+      0x9a, 0x35, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d }
+#define IA64_GUID_UNICODE_COLLATION \
+    { 0x7f, 0xcd, 0x85, 0x1d, 0x3d, 0xf4, 0xd2, 0x11, \
+      0x9a, 0x0c, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d }
+#define IA64_GUID_DRIVER_BINDING \
+    { 0xab, 0x31, 0xa0, 0x18, 0x43, 0xb4, 0x1a, 0x4d, \
+      0xa5, 0xc0, 0x0c, 0x09, 0x26, 0x1e, 0x9f, 0x71 }
+#define IA64_GUID_PLATFORM_DRIVER_OVERRIDE \
+    { 0x38, 0xc7, 0x30, 0x6b, 0x91, 0xa3, 0xd4, 0x11, \
+      0x9a, 0x3b, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d }
+#define IA64_GUID_BUS_SPECIFIC_DRIVER_OVERRIDE \
+    { 0x85, 0xb2, 0xc1, 0x3b, 0x15, 0x8a, 0x82, 0x4a, \
+      0xaa, 0xbf, 0x4d, 0x7d, 0x13, 0xfb, 0x32, 0x65 }
+#define IA64_GUID_DRIVER_FAMILY_OVERRIDE \
+    { 0x9e, 0x12, 0xee, 0xb1, 0x36, 0xda, 0x81, 0x41, \
+      0x91, 0xf8, 0x04, 0xa4, 0x92, 0x37, 0x66, 0xa7 }
+#define IA64_GUID_LOAD_FILE \
+    { 0x91, 0x30, 0xec, 0x56, 0x4c, 0x95, 0xd2, 0x11, \
+      0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b }
+#define IA64_GUID_LOAD_FILE2 \
+    { 0xc1, 0xc0, 0x06, 0x40, 0xb3, 0xfc, 0x3e, 0x40, \
+      0x99, 0x6d, 0x4a, 0x6c, 0x87, 0x24, 0xe0, 0x6d }
 #define IA64_GUID_TEXT_INPUT_EX \
     { 0x34, 0x75, 0x9e, 0xdd, 0x62, 0x77, 0x98, 0x46, \
       0x8c, 0x14, 0xf5, 0x85, 0x17, 0xa6, 0x25, 0xaa }
@@ -219,6 +264,33 @@ typedef struct _EFI_SYSTEM_TABLE EFI_SYSTEM_TABLE;
 typedef struct _EFI_FILE_PROTOCOL EFI_FILE_PROTOCOL;
 typedef struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+typedef struct _EFI_UNICODE_COLLATION_PROTOCOL
+    EFI_UNICODE_COLLATION_PROTOCOL;
+typedef struct _EFI_DRIVER_BINDING_PROTOCOL EFI_DRIVER_BINDING_PROTOCOL;
+
+struct _EFI_UNICODE_COLLATION_PROTOCOL {
+    INTN (*StriColl)(EFI_UNICODE_COLLATION_PROTOCOL *, CHAR16 *, CHAR16 *);
+    BOOLEAN (*MetaiMatch)(EFI_UNICODE_COLLATION_PROTOCOL *, CHAR16 *,
+                          CHAR16 *);
+    VOID (*StrLwr)(EFI_UNICODE_COLLATION_PROTOCOL *, CHAR16 *);
+    VOID (*StrUpr)(EFI_UNICODE_COLLATION_PROTOCOL *, CHAR16 *);
+    VOID (*FatToStr)(EFI_UNICODE_COLLATION_PROTOCOL *, UINTN, char *,
+                     CHAR16 *);
+    BOOLEAN (*StrToFat)(EFI_UNICODE_COLLATION_PROTOCOL *, CHAR16 *, UINTN,
+                        char *);
+    char *SupportedLanguages;
+};
+
+struct _EFI_DRIVER_BINDING_PROTOCOL {
+    EFI_STATUS (*Supported)(EFI_DRIVER_BINDING_PROTOCOL *, EFI_HANDLE,
+                            VOID *);
+    EFI_STATUS (*Start)(EFI_DRIVER_BINDING_PROTOCOL *, EFI_HANDLE, VOID *);
+    EFI_STATUS (*Stop)(EFI_DRIVER_BINDING_PROTOCOL *, EFI_HANDLE, UINTN,
+                       EFI_HANDLE *);
+    UINT32 Version;
+    EFI_HANDLE ImageHandle;
+    EFI_HANDLE DriverBindingHandle;
+};
 
 typedef VOID (*EFI_EVENT_NOTIFY)(EFI_EVENT, VOID *);
 
@@ -240,25 +312,28 @@ struct _EFI_BOOT_SERVICES {
     EFI_STATUS (*SignalEvent)(EFI_EVENT);
     EFI_STATUS (*CloseEvent)(EFI_EVENT);
     EFI_STATUS (*CheckEvent)(EFI_EVENT);
-    VOID *InstallProtocolInterface;
+    EFI_STATUS (*InstallProtocolInterface)(EFI_HANDLE *, VOID *, UINTN,
+                                            VOID *);
     VOID *ReinstallProtocolInterface;
-    VOID *UninstallProtocolInterface;
+    EFI_STATUS (*UninstallProtocolInterface)(EFI_HANDLE, VOID *, VOID *);
     EFI_STATUS (*HandleProtocol)(EFI_HANDLE, VOID *, VOID **);
     VOID *Reserved;
     VOID *RegisterProtocolNotify;
     VOID *LocateHandle;
-    VOID *LocateDevicePath;
+    EFI_STATUS (*LocateDevicePath)(VOID *, VOID **, EFI_HANDLE *);
     VOID *InstallConfigurationTable;
-    VOID *LoadImage;
-    VOID *StartImage;
+    EFI_STATUS (*LoadImage)(BOOLEAN, EFI_HANDLE, VOID *, VOID *, UINTN,
+                            EFI_HANDLE *);
+    EFI_STATUS (*StartImage)(EFI_HANDLE, UINTN *, CHAR16 **);
     EFI_STATUS (*Exit)(EFI_HANDLE, EFI_STATUS, UINTN, CHAR16 *);
-    VOID *UnloadImage;
+    EFI_STATUS (*UnloadImage)(EFI_HANDLE);
     EFI_STATUS (*ExitBootServices)(EFI_HANDLE, UINTN);
     EFI_STATUS (*GetNextMonotonicCount)(UINT64 *);
     EFI_STATUS (*Stall)(UINTN);
     EFI_STATUS (*SetWatchdogTimer)(UINTN, UINT64, UINTN, CHAR16 *);
-    VOID *ConnectController;
-    VOID *DisconnectController;
+    EFI_STATUS (*ConnectController)(EFI_HANDLE, EFI_HANDLE *, VOID *,
+                                    BOOLEAN);
+    EFI_STATUS (*DisconnectController)(EFI_HANDLE, EFI_HANDLE, EFI_HANDLE);
     EFI_STATUS (*OpenProtocol)(EFI_HANDLE, VOID *, VOID **, EFI_HANDLE,
                                EFI_HANDLE, UINT32);
     EFI_STATUS (*CloseProtocol)(EFI_HANDLE, VOID *, EFI_HANDLE, EFI_HANDLE);
@@ -267,8 +342,8 @@ struct _EFI_BOOT_SERVICES {
     EFI_STATUS (*LocateHandleBuffer)(UINTN, VOID *, VOID *, UINTN *,
                                      EFI_HANDLE **);
     EFI_STATUS (*LocateProtocol)(VOID *, VOID *, VOID **);
-    VOID *InstallMultipleProtocolInterfaces;
-    VOID *UninstallMultipleProtocolInterfaces;
+    EFI_STATUS (*InstallMultipleProtocolInterfaces)(EFI_HANDLE *, ...);
+    EFI_STATUS (*UninstallMultipleProtocolInterfaces)(EFI_HANDLE, ...);
     EFI_STATUS (*CalculateCrc32)(VOID *, UINTN, UINT32 *);
     VOID (*CopyMem)(VOID *, VOID *, UINTN);
     VOID (*SetMem)(VOID *, UINTN, UINT8);
@@ -379,6 +454,27 @@ struct _EFI_FILE_PROTOCOL {
     EFI_STATUS (*SetInfo)(EFI_FILE_PROTOCOL *, VOID *, UINTN, VOID *);
     EFI_STATUS (*Flush)(EFI_FILE_PROTOCOL *);
 };
+
+typedef struct {
+    UINT64 Size;
+    UINT64 FileSize;
+    UINT64 PhysicalSize;
+    EFI_TIME CreateTime;
+    EFI_TIME LastAccessTime;
+    EFI_TIME ModificationTime;
+    UINT64 Attribute;
+    CHAR16 FileName[1];
+} EFI_FILE_INFO;
+
+typedef struct {
+    UINT64 Size;
+    BOOLEAN ReadOnly;
+    UINT8 Reserved[7];
+    UINT64 VolumeSize;
+    UINT64 FreeSpace;
+    UINT32 BlockSize;
+    CHAR16 VolumeLabel[1];
+} EFI_FILE_SYSTEM_INFO;
 
 typedef struct {
     UINT32 Version;

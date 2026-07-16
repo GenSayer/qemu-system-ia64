@@ -29,6 +29,8 @@
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
 #include "gdbstub/helpers.h"
+#include "system/address-spaces.h"
+#include "system/memory.h"
 
 #define HELPER_H "helper.h"
 #include "exec/helper-info.c.inc"
@@ -849,6 +851,19 @@ static bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
     return env->pal_proc_copy_valid &&
            ia64_instruction_address_matches_physical_entry(
                env, address, env->pal_proc_copy_addr);
+}
+
+static bool ia64_is_firmware_debug_break(uint64_t address, uint64_t imm)
+{
+    if (imm == 0x100002) {
+        return address >= IA64_FIRMWARE_IVT_BASE &&
+               address < IA64_FIRMWARE_IVT_BASE + 0x8000;
+    }
+    if (imm == 0x100003 || imm == 0x100004) {
+        return address >= IA64_FW_IDENTITY_BASE &&
+               address < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE;
+    }
+    return false;
 }
 
 static Ia64Opcode ia64_memory_opcode_from_x6a(uint64_t x6a)
@@ -8177,7 +8192,35 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     }
     case IA64_OP_BREAK:
-        if ((insn->imm & 0x100000) &&
+        if (insn->p1 == 0 &&
+            ia64_is_firmware_debug_break(insn->address, insn->imm)) {
+            TCGv_i32 handled = tcg_temp_new_i32();
+            TCGLabel *architected_break = gen_new_label();
+
+            if (insn->imm == 0x100002) {
+                gen_helper_firmware_debug_enter(
+                    handled, tcg_env, tcg_constant_i64(insn->address));
+            } else if (insn->imm == 0x100003) {
+                gen_helper_firmware_debug_save(handled, tcg_env);
+            } else {
+                gen_helper_firmware_debug_restore(handled, tcg_env);
+            }
+            tcg_gen_brcondi_i32(TCG_COND_EQ, handled, 0,
+                                architected_break);
+            if (insn->imm == 0x100003) {
+                ia64_gen_exit_to_completed(ctx, next_ip, insn->address,
+                                           record_iipa,
+                                           track_psr_suppression);
+            } else {
+                tcg_gen_exit_tb(NULL, 0);
+            }
+            gen_set_label(architected_break);
+            ia64_gen_raise_exception(IA64_EXCP_BREAK, insn->address,
+                                      insn->imm, insn->slot);
+            return true;
+        } else if (insn->imm == 0x100001) {
+            gen_helper_fpswa_dispatch(tcg_env);
+        } else if ((insn->imm & 0x100000) &&
             ia64_is_pal_proc_break(ctx->env, insn->address)) {
             TCGv_i32 flags = tcg_temp_new_i32();
             TCGLabel *no_exit = gen_new_label();
@@ -11057,9 +11100,7 @@ void ia64_sapic_update_interrupt(CPUIA64State *env)
 
     if (sapic_find_irr(env) != IA64_SPURIOUS_VECTOR) {
         cpu_set_interrupt(cs, CPU_INTERRUPT_HARD);
-        if (!qemu_cpu_is_self(cs)) {
-            qemu_cpu_kick(cs);
-        }
+        qemu_cpu_kick(cs);
     } else {
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
     }
@@ -12080,6 +12121,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
         }
     }
     ia64_rse_delivery_check(&cpu->env, excp);
+    ia64_firmware_debug_capture(&cpu->env, vector, collect);
     /*
      * Interruption delivery clears RSE.CFLE (SDM Vol.2 6.6): the
      * handler runs with the (possibly incomplete) interrupted frame,
@@ -12099,16 +12141,23 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     cpu->env.pending_extint = 0;
 }
 
-static bool ia64_debug_read(CPUState *cs, uint64_t addr, void *buf,
-                            size_t size)
+static bool ia64_debug_read_code(CPUState *cs, uint64_t addr, void *buf,
+                                 size_t size)
 {
     return cpu_memory_rw_debug(cs, addr, buf, size, false) == 0;
 }
 
-static bool ia64_debug_write(CPUState *cs, uint64_t addr, const void *buf,
-                             size_t size)
+static bool ia64_firmware_data_access(CPUIA64State *env, uint64_t addr,
+                                      void *buf, size_t size, bool is_write)
 {
-    return cpu_memory_rw_debug(cs, addr, (void *)buf, size, true) == 0;
+    uint64_t pa;
+
+    if (!ia64_translate_data_access(env, addr, is_write, &pa)) {
+        return false;
+    }
+    return address_space_rw(&address_space_memory, pa,
+                            MEMTXATTRS_UNSPECIFIED, buf, size,
+                            is_write) == MEMTX_OK;
 }
 
 static void ia64_resume_after_instruction(CPUIA64State *env, uint64_t ip,
@@ -12216,7 +12265,7 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
         return false;
     }
 
-    if (!ia64_debug_read(cs, env->fault_ip, bundle, sizeof(bundle))) {
+    if (!ia64_debug_read_code(cs, env->fault_ip, bundle, sizeof(bundle))) {
         return false;
     }
 
@@ -12283,7 +12332,8 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
             return true;
         }
 
-        if (size > sizeof(data) || !ia64_debug_read(cs, addr, data, size)) {
+        if (size > sizeof(data) ||
+            !ia64_firmware_data_access(env, addr, data, size, false)) {
             return false;
         }
         if (insn.r1 != 0) {
@@ -12322,7 +12372,7 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
         }
 
         stm_p(data, memop, env->gr[insn.r2]);
-        if (!ia64_debug_write(cs, addr, data, size)) {
+        if (!ia64_firmware_data_access(env, addr, data, size, true)) {
             return false;
         }
         if (env->alat_full) {

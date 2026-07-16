@@ -5,6 +5,7 @@ set -eu
 output="$1"
 source="$2"
 linker_script="$3"
+image_base="${4:-0x4000000}"
 output_dir=$(dirname "$output")
 name=$(basename "$output" .efi)
 
@@ -23,5 +24,5 @@ $cc -O2 -ffreestanding -fno-builtin -nostdlib -nostdinc -mno-sdata \
     -Wall -Wextra -Werror -c -o "$object" "$source"
 $ld -nostdlib -static -T "$linker_script" -o "$elf" "$object" "$libgcc"
 $objcopy --strip-debug -R .comment -O pei-ia64 \
-    --image-base=0x4000000 --subsystem=10 \
+    --image-base="$image_base" --subsystem=10 \
     "$elf" "$output"

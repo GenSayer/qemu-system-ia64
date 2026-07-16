@@ -7,6 +7,9 @@
      ((UINT32)(D) << 24))
 
 static UINT8 loaded_image_guid[16] = IA64_GUID_LOADED_IMAGE;
+static UINT8 loaded_image_device_path_guid[16] =
+    IA64_GUID_LOADED_IMAGE_DEVICE_PATH;
+static UINT8 hii_package_list_guid[16] = IA64_GUID_HII_PACKAGE_LIST;
 static UINT8 device_path_guid[16] = IA64_GUID_DEVICE_PATH;
 static UINT8 block_io_guid[16] = IA64_GUID_BLOCK_IO;
 static UINT8 disk_io_guid[16] = IA64_GUID_DISK_IO;
@@ -14,6 +17,15 @@ static UINT8 gop_guid[16] = IA64_GUID_GOP;
 static UINT8 pci_root_guid[16] = IA64_GUID_PCI_ROOT_IO;
 static UINT8 pci_io_guid[16] = IA64_GUID_PCI_IO;
 static UINT8 tcg_guid[16] = IA64_GUID_TCG;
+static UINT8 driver_binding_guid[16] = IA64_GUID_DRIVER_BINDING;
+static UINT8 platform_override_guid[16] =
+    IA64_GUID_PLATFORM_DRIVER_OVERRIDE;
+static UINT8 bus_override_guid[16] =
+    IA64_GUID_BUS_SPECIFIC_DRIVER_OVERRIDE;
+static UINT8 family_override_guid[16] =
+    IA64_GUID_DRIVER_FAMILY_OVERRIDE;
+static UINT8 load_file_guid[16] = IA64_GUID_LOAD_FILE;
+static UINT8 load_file2_guid[16] = IA64_GUID_LOAD_FILE2;
 static UINT8 acpi20_guid[16] = IA64_GUID_ACPI20;
 static UINT8 sal_guid[16] = IA64_GUID_SAL;
 static UINT8 hcdp_guid[16] = IA64_GUID_HCDP;
@@ -25,6 +37,18 @@ static UINT8 debug_image_guid[16] = {
 static UINT8 variable_guid[16] = {
     0x15, 0x64, 0x72, 0xe2, 0xe2, 0x5c, 0x49, 0x4c,
     0xb7, 0x2c, 0xf3, 0x47, 0x15, 0xe7, 0x75, 0x7a,
+};
+static UINT8 connection_test_guid[16] = {
+    0x49, 0x41, 0x36, 0x34, 0x43, 0x4f, 0x4e, 0x4e,
+    0x45, 0x43, 0x54, 0x54, 0x45, 0x53, 0x54, 0x01,
+};
+static UINT8 start_image_base_guid[16] = {
+    0x49, 0x41, 0x36, 0x34, 0x53, 0x54, 0x41, 0x52,
+    0x54, 0x42, 0x41, 0x53, 0x45, 0x00, 0x00, 0x01,
+};
+static UINT8 start_image_change_guid[16] = {
+    0x49, 0x41, 0x36, 0x34, 0x53, 0x54, 0x41, 0x52,
+    0x54, 0x43, 0x48, 0x41, 0x4e, 0x47, 0x45, 0x01,
 };
 static CHAR16 variable_name[] = {
     'I', 'A', '6', '4', 'F', 'u', 'n', 'c', 'T', 'e', 's', 't', 0,
@@ -126,6 +150,44 @@ typedef struct {
     UINTN RootEntryCount;
     BOOLEAN Valid;
 } TEST_TABLE_CONTEXT;
+
+typedef struct _TEST_PLATFORM_DRIVER_OVERRIDE_PROTOCOL
+    TEST_PLATFORM_DRIVER_OVERRIDE_PROTOCOL;
+
+struct _TEST_PLATFORM_DRIVER_OVERRIDE_PROTOCOL {
+    EFI_STATUS (*GetDriver)(TEST_PLATFORM_DRIVER_OVERRIDE_PROTOCOL *,
+                            EFI_HANDLE, EFI_HANDLE *);
+    VOID *GetDriverPath;
+    VOID *DriverLoaded;
+};
+
+typedef struct _TEST_BUS_DRIVER_OVERRIDE_PROTOCOL
+    TEST_BUS_DRIVER_OVERRIDE_PROTOCOL;
+
+struct _TEST_BUS_DRIVER_OVERRIDE_PROTOCOL {
+    EFI_STATUS (*GetDriver)(TEST_BUS_DRIVER_OVERRIDE_PROTOCOL *,
+                            EFI_HANDLE *);
+};
+
+typedef struct _TEST_DRIVER_FAMILY_OVERRIDE_PROTOCOL
+    TEST_DRIVER_FAMILY_OVERRIDE_PROTOCOL;
+
+struct _TEST_DRIVER_FAMILY_OVERRIDE_PROTOCOL {
+    UINT32 (*GetVersion)(TEST_DRIVER_FAMILY_OVERRIDE_PROTOCOL *);
+};
+
+typedef struct _TEST_LOAD_FILE_PROTOCOL TEST_LOAD_FILE_PROTOCOL;
+
+struct _TEST_LOAD_FILE_PROTOCOL {
+    EFI_STATUS (*LoadFile)(TEST_LOAD_FILE_PROTOCOL *, VOID *, BOOLEAN,
+                           UINTN *, VOID *);
+};
+
+typedef struct {
+    UINT8 Type;
+    UINT8 SubType;
+    UINT16 Length;
+} __attribute__((packed)) TEST_DEVICE_PATH_NODE;
 
 #define TEST_UART_BASE               0x00000047f0000000ULL
 #define TEST_UART_SIZE               0x0000000000002000ULL
@@ -570,6 +632,752 @@ static BOOLEAN test_protocol_services(EFI_HANDLE ImageHandle,
     return 1;
 }
 
+static BOOLEAN test_multiple_protocol_services(EFI_SYSTEM_TABLE *SystemTable)
+{
+    static UINT8 marker1_guid[16] = {
+        0x4d, 0x55, 0x4c, 0x54, 0x49, 0x50, 0x52, 0x4f,
+        0x54, 0x4f, 0x43, 0x4f, 0x4c, 0x00, 0x00, 0x01,
+    };
+    static UINT8 marker2_guid[16] = {
+        0x4d, 0x55, 0x4c, 0x54, 0x49, 0x50, 0x52, 0x4f,
+        0x54, 0x4f, 0x43, 0x4f, 0x4c, 0x00, 0x00, 0x02,
+    };
+    struct {
+        TEST_DEVICE_PATH_NODE Pci;
+        UINT8 Function;
+        UINT8 Device;
+        TEST_DEVICE_PATH_NODE End;
+    } __attribute__((packed, aligned(8))) path1 = {
+        { 0x01, 0x01, 6 }, 0, 30, { 0x7f, 0xff, 4 },
+    }, path2 = {
+        { 0x01, 0x01, 6 }, 0, 30, { 0x7f, 0xff, 4 },
+    };
+    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    EFI_HANDLE handle = NULL;
+    EFI_HANDLE path_handle = NULL;
+    EFI_HANDLE duplicate = NULL;
+    UINT8 interface1 = 1;
+    UINT8 interface2 = 2;
+    UINT8 wrong_interface = 3;
+    VOID *located1 = NULL;
+    VOID *located2 = NULL;
+    BOOLEAN handle_installed = 0;
+    BOOLEAN path_installed = 0;
+    BOOLEAN ok = 0;
+
+    if (bs->InstallMultipleProtocolInterfaces(
+            &duplicate, marker1_guid, &interface1,
+            marker1_guid, &interface2, NULL) != EFI_INVALID_PARAMETER ||
+        duplicate != NULL) {
+        return 0;
+    }
+    if (bs->InstallMultipleProtocolInterfaces(
+            &handle, marker1_guid, &interface1,
+            marker2_guid, &interface2, NULL) != EFI_SUCCESS ||
+        handle == NULL) {
+        goto out;
+    }
+    handle_installed = 1;
+
+    if (bs->UninstallMultipleProtocolInterfaces(
+            handle, marker1_guid, &interface1,
+            marker2_guid, &wrong_interface, NULL) !=
+            EFI_INVALID_PARAMETER ||
+        bs->HandleProtocol(handle, marker1_guid, &located1) != EFI_SUCCESS ||
+        located1 != &interface1 ||
+        bs->HandleProtocol(handle, marker2_guid, &located2) != EFI_SUCCESS ||
+        located2 != &interface2) {
+        goto out;
+    }
+
+    if (bs->InstallMultipleProtocolInterfaces(
+            &path_handle, device_path_guid, &path1,
+            marker1_guid, &interface1, NULL) != EFI_SUCCESS ||
+        path_handle == NULL) {
+        goto out;
+    }
+    path_installed = 1;
+    if (bs->InstallMultipleProtocolInterfaces(
+            &duplicate, device_path_guid, &path2, NULL) !=
+            EFI_ALREADY_STARTED || duplicate != NULL) {
+        goto out;
+    }
+    ok = 1;
+
+out:
+    if (path_installed &&
+        bs->UninstallMultipleProtocolInterfaces(
+            path_handle, marker1_guid, &interface1,
+            device_path_guid, &path1, NULL) != EFI_SUCCESS) {
+        ok = 0;
+    }
+    if (handle_installed &&
+        bs->UninstallMultipleProtocolInterfaces(
+            handle, marker1_guid, &interface1,
+            marker2_guid, &interface2, NULL) != EFI_SUCCESS) {
+        ok = 0;
+    }
+    return ok;
+}
+
+#define TEST_CONNECT_DRIVER_COUNT 8U
+
+static EFI_HANDLE test_connect_driver_handles[TEST_CONNECT_DRIVER_COUNT];
+static EFI_DRIVER_BINDING_PROTOCOL
+    test_connect_bindings[TEST_CONNECT_DRIVER_COUNT];
+static TEST_DRIVER_FAMILY_OVERRIDE_PROTOCOL test_family_overrides[2];
+static EFI_HANDLE test_primary_controller;
+static EFI_HANDLE test_secondary_controller;
+static UINT8 test_start_order[TEST_CONNECT_DRIVER_COUNT + 1U];
+static UINTN test_start_count;
+
+static UINTN test_binding_index(EFI_DRIVER_BINDING_PROTOCOL *This)
+{
+    UINTN i;
+
+    for (i = 0; i < TEST_CONNECT_DRIVER_COUNT; i++) {
+        if (This == &test_connect_bindings[i]) {
+            return i;
+        }
+    }
+    return TEST_CONNECT_DRIVER_COUNT;
+}
+
+static EFI_STATUS test_driver_supported(EFI_DRIVER_BINDING_PROTOCOL *This,
+                                        EFI_HANDLE ControllerHandle,
+                                        VOID *RemainingDevicePath)
+{
+    UINTN index = test_binding_index(This);
+
+    if (RemainingDevicePath != NULL || index >= TEST_CONNECT_DRIVER_COUNT) {
+        return EFI_UNSUPPORTED;
+    }
+    if ((ControllerHandle == test_primary_controller && index < 7U) ||
+        (ControllerHandle == test_secondary_controller && index == 7U)) {
+        return EFI_SUCCESS;
+    }
+    return EFI_UNSUPPORTED;
+}
+
+static EFI_STATUS test_driver_start(EFI_DRIVER_BINDING_PROTOCOL *This,
+                                    EFI_HANDLE ControllerHandle,
+                                    VOID *RemainingDevicePath)
+{
+    UINTN index = test_binding_index(This);
+
+    if (test_driver_supported(This, ControllerHandle,
+                              RemainingDevicePath) != EFI_SUCCESS ||
+        test_start_count >= sizeof(test_start_order)) {
+        return EFI_DEVICE_ERROR;
+    }
+    test_start_order[test_start_count++] = (UINT8)index;
+    return index == 7U ? EFI_ALREADY_STARTED : EFI_SUCCESS;
+}
+
+static EFI_STATUS test_driver_stop(EFI_DRIVER_BINDING_PROTOCOL *This,
+                                   EFI_HANDLE ControllerHandle,
+                                   UINTN NumberOfChildren,
+                                   EFI_HANDLE *ChildHandleBuffer)
+{
+    (void)This;
+    (void)ControllerHandle;
+    (void)NumberOfChildren;
+    (void)ChildHandleBuffer;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS test_platform_get_driver(
+    TEST_PLATFORM_DRIVER_OVERRIDE_PROTOCOL *This,
+    EFI_HANDLE ControllerHandle, EFI_HANDLE *DriverImageHandle)
+{
+    (void)This;
+    if (DriverImageHandle == NULL ||
+        ControllerHandle != test_primary_controller) {
+        return EFI_NOT_FOUND;
+    }
+    if (*DriverImageHandle == NULL) {
+        *DriverImageHandle = test_connect_driver_handles[1];
+        return EFI_SUCCESS;
+    }
+    return *DriverImageHandle == test_connect_driver_handles[1] ?
+        EFI_NOT_FOUND : EFI_INVALID_PARAMETER;
+}
+
+static EFI_STATUS test_bus_get_driver(
+    TEST_BUS_DRIVER_OVERRIDE_PROTOCOL *This,
+    EFI_HANDLE *DriverImageHandle)
+{
+    (void)This;
+    if (DriverImageHandle == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (*DriverImageHandle == NULL) {
+        *DriverImageHandle = test_connect_driver_handles[4];
+        return EFI_SUCCESS;
+    }
+    return *DriverImageHandle == test_connect_driver_handles[4] ?
+        EFI_NOT_FOUND : EFI_INVALID_PARAMETER;
+}
+
+static UINT32 test_family_get_version(
+    TEST_DRIVER_FAMILY_OVERRIDE_PROTOCOL *This)
+{
+    return This == &test_family_overrides[0] ? 10U : 20U;
+}
+
+static BOOLEAN test_controller_services(EFI_SYSTEM_TABLE *SystemTable)
+{
+    static const UINT8 expected_order[] = { 0, 1, 3, 2, 4, 6, 5 };
+    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    TEST_PLATFORM_DRIVER_OVERRIDE_PROTOCOL platform = {
+        test_platform_get_driver, NULL, NULL,
+    };
+    TEST_BUS_DRIVER_OVERRIDE_PROTOCOL bus = { test_bus_get_driver };
+    EFI_HANDLE platform_handle = NULL;
+    EFI_HANDLE explicit_drivers[2];
+    UINT8 primary_token = 1;
+    UINT8 secondary_token = 2;
+    BOOLEAN family_installed[2] = { 0, 0 };
+    BOOLEAN platform_installed = 0;
+    BOOLEAN bus_installed = 0;
+    BOOLEAN primary_installed = 0;
+    BOOLEAN secondary_installed = 0;
+    BOOLEAN cleanup_ok = 1;
+    BOOLEAN ok = 0;
+    UINTN installed_drivers = 0;
+    UINTN i;
+    EFI_STATUS status;
+
+    zero_bytes(test_connect_driver_handles,
+               sizeof(test_connect_driver_handles));
+    zero_bytes(test_connect_bindings, sizeof(test_connect_bindings));
+    zero_bytes(test_start_order, sizeof(test_start_order));
+    test_start_count = 0;
+    test_primary_controller = NULL;
+    test_secondary_controller = NULL;
+    test_family_overrides[0].GetVersion = test_family_get_version;
+    test_family_overrides[1].GetVersion = test_family_get_version;
+
+    status = bs->InstallProtocolInterface(
+        &test_primary_controller, connection_test_guid,
+        EFI_NATIVE_INTERFACE, &primary_token);
+    if (status != EFI_SUCCESS) {
+        goto out;
+    }
+    primary_installed = 1;
+    status = bs->InstallProtocolInterface(
+        &test_secondary_controller, connection_test_guid,
+        EFI_NATIVE_INTERFACE, &secondary_token);
+    if (status != EFI_SUCCESS) {
+        goto out;
+    }
+    secondary_installed = 1;
+
+    for (i = 0; i < TEST_CONNECT_DRIVER_COUNT; i++) {
+        EFI_HANDLE handle = NULL;
+
+        test_connect_bindings[i].Supported = test_driver_supported;
+        test_connect_bindings[i].Start = test_driver_start;
+        test_connect_bindings[i].Stop = test_driver_stop;
+        test_connect_bindings[i].Version = 0x100U + (UINT32)i;
+        status = bs->InstallProtocolInterface(
+            &handle, driver_binding_guid, EFI_NATIVE_INTERFACE,
+            &test_connect_bindings[i]);
+        if (status != EFI_SUCCESS) {
+            goto out;
+        }
+        test_connect_driver_handles[i] = handle;
+        test_connect_bindings[i].ImageHandle = handle;
+        test_connect_bindings[i].DriverBindingHandle = handle;
+        installed_drivers++;
+    }
+
+    for (i = 0; i < 2U; i++) {
+        status = bs->InstallProtocolInterface(
+            &test_connect_driver_handles[2U + i], family_override_guid,
+            EFI_NATIVE_INTERFACE, &test_family_overrides[i]);
+        if (status != EFI_SUCCESS) {
+            goto out;
+        }
+        family_installed[i] = 1;
+    }
+    status = bs->InstallProtocolInterface(
+        &test_primary_controller, bus_override_guid,
+        EFI_NATIVE_INTERFACE, &bus);
+    if (status != EFI_SUCCESS) {
+        goto out;
+    }
+    bus_installed = 1;
+    status = bs->InstallProtocolInterface(
+        &platform_handle, platform_override_guid,
+        EFI_NATIVE_INTERFACE, &platform);
+    if (status != EFI_SUCCESS) {
+        goto out;
+    }
+    platform_installed = 1;
+
+    explicit_drivers[0] = test_connect_driver_handles[0];
+    explicit_drivers[1] = NULL;
+    status = bs->ConnectController(test_primary_controller,
+                                   explicit_drivers, NULL, 0);
+    if (status != EFI_SUCCESS ||
+        test_start_count != sizeof(expected_order) ||
+        !ia64_bytes_equal(test_start_order, expected_order,
+                          sizeof(expected_order))) {
+        goto out;
+    }
+
+    test_start_count = 0;
+    explicit_drivers[0] = test_connect_driver_handles[7];
+    status = bs->ConnectController(test_secondary_controller,
+                                   explicit_drivers, NULL, 0);
+    if (status != EFI_NOT_FOUND || test_start_count != 1U ||
+        test_start_order[0] != 7U ||
+        bs->DisconnectController(test_secondary_controller,
+                                 NULL, NULL) != EFI_SUCCESS ||
+        bs->DisconnectController(test_secondary_controller,
+                                 test_connect_driver_handles[0], NULL) !=
+            EFI_SUCCESS ||
+        bs->DisconnectController(test_secondary_controller,
+                                 (EFI_HANDLE)(UINTN)1, NULL) !=
+            EFI_INVALID_PARAMETER ||
+        bs->DisconnectController(test_secondary_controller,
+                                 platform_handle, NULL) !=
+            EFI_INVALID_PARAMETER ||
+        bs->DisconnectController(test_secondary_controller, NULL,
+                                 (EFI_HANDLE)(UINTN)1) !=
+            EFI_INVALID_PARAMETER) {
+        goto out;
+    }
+    ok = 1;
+
+out:
+    if (platform_installed &&
+        bs->UninstallProtocolInterface(platform_handle,
+                                       platform_override_guid,
+                                       &platform) != EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    if (bus_installed &&
+        bs->UninstallProtocolInterface(test_primary_controller,
+                                       bus_override_guid,
+                                       &bus) != EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    for (i = 2U; i > 0; i--) {
+        UINTN index = i - 1U;
+
+        if (family_installed[index] &&
+            bs->UninstallProtocolInterface(
+                test_connect_driver_handles[2U + index],
+                family_override_guid, &test_family_overrides[index]) !=
+                EFI_SUCCESS) {
+            cleanup_ok = 0;
+        }
+    }
+    while (installed_drivers != 0) {
+        installed_drivers--;
+        if (bs->UninstallProtocolInterface(
+                test_connect_driver_handles[installed_drivers],
+                driver_binding_guid,
+                &test_connect_bindings[installed_drivers]) != EFI_SUCCESS) {
+            cleanup_ok = 0;
+        }
+    }
+    if (secondary_installed &&
+        bs->UninstallProtocolInterface(test_secondary_controller,
+                                       connection_test_guid,
+                                       &secondary_token) != EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    if (primary_installed &&
+        bs->UninstallProtocolInterface(test_primary_controller,
+                                       connection_test_guid,
+                                       &primary_token) != EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    test_primary_controller = NULL;
+    test_secondary_controller = NULL;
+    return ok && cleanup_ok;
+}
+
+static TEST_LOAD_FILE_PROTOCOL test_load_file_protocols[2];
+static UINTN test_load_file_calls[2];
+static BOOLEAN test_load_file_policy;
+static BOOLEAN test_load_file_policy_ok;
+static BOOLEAN test_load_file2_not_found;
+
+static EFI_STATUS test_load_file_callback(TEST_LOAD_FILE_PROTOCOL *This,
+                                          VOID *FilePath,
+                                          BOOLEAN BootPolicy,
+                                          UINTN *BufferSize, VOID *Buffer)
+{
+    TEST_DEVICE_PATH_NODE *node = (TEST_DEVICE_PATH_NODE *)FilePath;
+    UINTN index;
+    UINTN i;
+
+    if (This == &test_load_file_protocols[0]) {
+        index = 0;
+    } else if (This == &test_load_file_protocols[1]) {
+        index = 1;
+    } else {
+        return EFI_INVALID_PARAMETER;
+    }
+    test_load_file_calls[index]++;
+    if (BootPolicy != test_load_file_policy) {
+        test_load_file_policy_ok = 0;
+    }
+    if (node == NULL || node->Type != 0x04U || node->SubType != 0x04U ||
+        node->Length < sizeof(*node)) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (index == 1U && test_load_file2_not_found) {
+        return EFI_NOT_FOUND;
+    }
+    if (BufferSize == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (Buffer == NULL || *BufferSize < 64U) {
+        *BufferSize = 64U;
+        return EFI_BUFFER_TOO_SMALL;
+    }
+    for (i = 0; i < 64U; i++) {
+        ((UINT8 *)Buffer)[i] = 0;
+    }
+    *BufferSize = 64U;
+    return EFI_SUCCESS;
+}
+
+static BOOLEAN test_image_services(EFI_HANDLE ImageHandle,
+                                   EFI_SYSTEM_TABLE *SystemTable)
+{
+    struct {
+        TEST_DEVICE_PATH_NODE Pci;
+        UINT8 Function;
+        UINT8 Device;
+        TEST_DEVICE_PATH_NODE End;
+    } __attribute__((packed, aligned(8))) provider_path = {
+        { 0x01, 0x01, 6 }, 0, 31, { 0x7f, 0xff, 4 },
+    };
+    struct {
+        TEST_DEVICE_PATH_NODE Pci;
+        UINT8 Function;
+        UINT8 Device;
+        TEST_DEVICE_PATH_NODE File;
+        CHAR16 Name[2];
+        TEST_DEVICE_PATH_NODE End;
+    } __attribute__((packed, aligned(8))) file_path = {
+        { 0x01, 0x01, 6 }, 0, 31,
+        { 0x04, 0x04, 8 }, { 'x', 0 }, { 0x7f, 0xff, 4 },
+    };
+    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    EFI_HANDLE provider = NULL;
+    EFI_HANDLE image = (EFI_HANDLE)(UINTN)1;
+    UINT8 invalid_image[1] = { 0 };
+    UINT8 truncated_file_header[68] __attribute__((aligned(8)));
+    UINT8 truncated_optional_header[88] __attribute__((aligned(8)));
+    BOOLEAN path_installed = 0;
+    BOOLEAN load_file_installed = 0;
+    BOOLEAN load_file2_installed = 0;
+    BOOLEAN cleanup_ok = 1;
+    BOOLEAN ok = 0;
+
+    zero_bytes(truncated_file_header, sizeof(truncated_file_header));
+    truncated_file_header[0] = 'M';
+    truncated_file_header[1] = 'Z';
+    truncated_file_header[60] = 64U;
+    truncated_file_header[64] = 'P';
+    truncated_file_header[65] = 'E';
+    zero_bytes(truncated_optional_header, sizeof(truncated_optional_header));
+    truncated_optional_header[0] = 'M';
+    truncated_optional_header[1] = 'Z';
+    truncated_optional_header[60] = 64U;
+    truncated_optional_header[64] = 'P';
+    truncated_optional_header[65] = 'E';
+    truncated_optional_header[68] = 0x00U;
+    truncated_optional_header[69] = 0x02U;
+    truncated_optional_header[84] = 0xf0U;
+
+    if (bs->LoadImage(0, NULL, NULL, invalid_image,
+                      sizeof(invalid_image), &image) !=
+            EFI_INVALID_PARAMETER || image != NULL ||
+        bs->LoadImage(0, ImageHandle, NULL, NULL, 0, &image) !=
+            EFI_NOT_FOUND || image != NULL ||
+        bs->LoadImage(0, ImageHandle, NULL, invalid_image, 0, &image) !=
+            EFI_INVALID_PARAMETER || image != NULL ||
+        bs->LoadImage(0, ImageHandle, NULL, invalid_image,
+                      sizeof(invalid_image), NULL) != EFI_INVALID_PARAMETER ||
+        bs->LoadImage(0, ImageHandle, NULL, truncated_file_header,
+                      sizeof(truncated_file_header), &image) !=
+            EFI_LOAD_ERROR || image != NULL ||
+        bs->LoadImage(0, ImageHandle, NULL, truncated_optional_header,
+                      sizeof(truncated_optional_header), &image) !=
+            EFI_LOAD_ERROR || image != NULL) {
+        return 0;
+    }
+
+    test_load_file_protocols[0].LoadFile = test_load_file_callback;
+    test_load_file_protocols[1].LoadFile = test_load_file_callback;
+    if (bs->InstallProtocolInterface(&provider, device_path_guid,
+                                     EFI_NATIVE_INTERFACE,
+                                     &provider_path) != EFI_SUCCESS) {
+        goto out;
+    }
+    path_installed = 1;
+    if (bs->InstallProtocolInterface(&provider, load_file2_guid,
+                                     EFI_NATIVE_INTERFACE,
+                                     &test_load_file_protocols[1]) !=
+            EFI_SUCCESS) {
+        goto out;
+    }
+    load_file2_installed = 1;
+    if (bs->InstallProtocolInterface(&provider, load_file_guid,
+                                     EFI_NATIVE_INTERFACE,
+                                     &test_load_file_protocols[0]) !=
+            EFI_SUCCESS) {
+        goto out;
+    }
+    load_file_installed = 1;
+
+    zero_bytes(test_load_file_calls, sizeof(test_load_file_calls));
+    test_load_file_policy = 0;
+    test_load_file_policy_ok = 1;
+    test_load_file2_not_found = 0;
+    image = (EFI_HANDLE)(UINTN)1;
+    if (bs->LoadImage(0, ImageHandle, &file_path, NULL, 0, &image) !=
+            EFI_LOAD_ERROR || image != NULL ||
+        test_load_file_calls[0] != 0 || test_load_file_calls[1] != 2U ||
+        !test_load_file_policy_ok) {
+        goto out;
+    }
+
+    zero_bytes(test_load_file_calls, sizeof(test_load_file_calls));
+    test_load_file2_not_found = 1;
+    image = (EFI_HANDLE)(UINTN)1;
+    if (bs->LoadImage(0, ImageHandle, &file_path, NULL, 0, &image) !=
+            EFI_LOAD_ERROR || image != NULL ||
+        test_load_file_calls[0] != 2U || test_load_file_calls[1] != 1U ||
+        !test_load_file_policy_ok) {
+        goto out;
+    }
+
+    zero_bytes(test_load_file_calls, sizeof(test_load_file_calls));
+    test_load_file_policy = 1;
+    test_load_file_policy_ok = 1;
+    test_load_file2_not_found = 0;
+    image = (EFI_HANDLE)(UINTN)1;
+    if (bs->LoadImage(1, ImageHandle, &file_path, NULL, 0, &image) !=
+            EFI_LOAD_ERROR || image != NULL ||
+        test_load_file_calls[0] != 2U || test_load_file_calls[1] != 0 ||
+        !test_load_file_policy_ok) {
+        goto out;
+    }
+    ok = 1;
+
+out:
+    if (load_file_installed &&
+        bs->UninstallProtocolInterface(provider, load_file_guid,
+                                       &test_load_file_protocols[0]) !=
+            EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    if (load_file2_installed &&
+        bs->UninstallProtocolInterface(provider, load_file2_guid,
+                                       &test_load_file_protocols[1]) !=
+            EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    if (path_installed &&
+        bs->UninstallProtocolInterface(provider, device_path_guid,
+                                       &provider_path) != EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    return ok && cleanup_ok;
+}
+
+#define START_IMAGE_CHILD_SIGNATURE 0x4941363453544152ULL
+
+typedef struct {
+    UINT64 Signature;
+    EFI_HANDLE Controller;
+    VOID *Interface;
+    BOOLEAN UseExit;
+} TEST_START_IMAGE_CHILD_OPTIONS;
+
+static EFI_HANDLE test_start_image_controller;
+static UINTN test_start_image_start_count;
+static EFI_BOOT_SERVICES *test_start_image_bs;
+
+static EFI_STATUS test_start_image_supported(
+    EFI_DRIVER_BINDING_PROTOCOL *This, EFI_HANDLE Controller,
+    VOID *RemainingDevicePath)
+{
+    VOID *interface = NULL;
+
+    (void)This;
+    (void)RemainingDevicePath;
+    if (Controller != test_start_image_controller) {
+        return EFI_UNSUPPORTED;
+    }
+    return test_start_image_bs != NULL &&
+           test_start_image_bs->HandleProtocol(
+               Controller, start_image_change_guid, &interface) ==
+               EFI_SUCCESS &&
+           interface != NULL ? EFI_SUCCESS : EFI_UNSUPPORTED;
+}
+
+static EFI_STATUS test_start_image_start(EFI_DRIVER_BINDING_PROTOCOL *This,
+                                         EFI_HANDLE Controller,
+                                         VOID *RemainingDevicePath)
+{
+    (void)This;
+    (void)RemainingDevicePath;
+    if (Controller != test_start_image_controller) {
+        return EFI_UNSUPPORTED;
+    }
+    test_start_image_start_count++;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS test_start_image_stop(EFI_DRIVER_BINDING_PROTOCOL *This,
+                                        EFI_HANDLE Controller,
+                                        UINTN NumberOfChildren,
+                                        EFI_HANDLE *ChildHandleBuffer)
+{
+    (void)This;
+    (void)Controller;
+    (void)NumberOfChildren;
+    (void)ChildHandleBuffer;
+    return EFI_SUCCESS;
+}
+
+static BOOLEAN test_start_image_connect(EFI_HANDLE ImageHandle,
+                                        EFI_SYSTEM_TABLE *SystemTable)
+{
+    struct {
+        TEST_DEVICE_PATH_NODE File;
+        CHAR16 Name[20];
+        TEST_DEVICE_PATH_NODE End;
+    } __attribute__((packed, aligned(8))) path = {
+        { 0x04, 0x04, sizeof(TEST_DEVICE_PATH_NODE) + 20U * sizeof(CHAR16) },
+        {
+            '\\', 'E', 'F', 'I', '\\', 'B', 'O', 'O', 'T', '\\',
+            'S', 'T', 'A', 'R', 'T', '.', 'E', 'F', 'I', 0,
+        },
+        { 0x7f, 0xff, sizeof(TEST_DEVICE_PATH_NODE) },
+    };
+    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    EFI_DRIVER_BINDING_PROTOCOL binding;
+    TEST_START_IMAGE_CHILD_OPTIONS options;
+    EFI_HANDLE driver = NULL;
+    EFI_HANDLE child = NULL;
+    EFI_LOADED_IMAGE_PROTOCOL *loaded = NULL;
+    UINTN base_interface = 1;
+    UINTN change_interface = 2;
+    BOOLEAN base_installed = 0;
+    BOOLEAN binding_installed = 0;
+    BOOLEAN change_installed = 0;
+    BOOLEAN cleanup_ok = 1;
+    BOOLEAN ok = 0;
+    UINTN pass;
+    EFI_STATUS status;
+
+    test_start_image_controller = NULL;
+    test_start_image_start_count = 0;
+    test_start_image_bs = bs;
+    if (bs->InstallProtocolInterface(&test_start_image_controller,
+                                     start_image_base_guid,
+                                     EFI_NATIVE_INTERFACE,
+                                     &base_interface) != EFI_SUCCESS) {
+        goto out;
+    }
+    base_installed = 1;
+    zero_bytes(&binding, sizeof(binding));
+    binding.Supported = test_start_image_supported;
+    binding.Start = test_start_image_start;
+    binding.Stop = test_start_image_stop;
+    binding.Version = 1;
+    binding.ImageHandle = ImageHandle;
+    if (bs->InstallProtocolInterface(&driver, driver_binding_guid,
+                                     EFI_NATIVE_INTERFACE,
+                                     &binding) != EFI_SUCCESS) {
+        goto out;
+    }
+    binding_installed = 1;
+    binding.DriverBindingHandle = driver;
+
+    options.Signature = START_IMAGE_CHILD_SIGNATURE;
+    options.Controller = test_start_image_controller;
+    options.Interface = &change_interface;
+    for (pass = 0; pass < 2U; pass++) {
+        VOID *installed_change = NULL;
+        VOID *loaded_device_path = NULL;
+        VOID *hii_package_list = NULL;
+
+        options.UseExit = pass != 0;
+        child = NULL;
+        loaded = NULL;
+        status = bs->LoadImage(0, ImageHandle, &path, NULL, 0, &child);
+        if (status != EFI_SUCCESS || child == NULL ||
+            bs->HandleProtocol(child, loaded_image_guid,
+                               (VOID **)&loaded) != EFI_SUCCESS ||
+            loaded == NULL ||
+            bs->HandleProtocol(child, loaded_image_device_path_guid,
+                               &loaded_device_path) != EFI_SUCCESS ||
+            loaded_device_path == NULL || loaded_device_path == &path ||
+            !ia64_bytes_equal(loaded_device_path, &path, sizeof(path)) ||
+            loaded->FilePath != loaded_device_path ||
+            bs->HandleProtocol(child, hii_package_list_guid,
+                               &hii_package_list) != EFI_SUCCESS ||
+            hii_package_list == NULL ||
+            get_u32((UINT8 *)hii_package_list + 16U) != 24U ||
+            get_u32((UINT8 *)hii_package_list + 20U) != 0xdf000004U) {
+            goto out;
+        }
+        loaded->LoadOptions = &options;
+        loaded->LoadOptionsSize = sizeof(options);
+        status = bs->StartImage(child, NULL, NULL);
+        if (status != EFI_SUCCESS ||
+            test_start_image_start_count != pass + 1U ||
+            bs->HandleProtocol(test_start_image_controller,
+                               start_image_change_guid,
+                               &installed_change) != EFI_SUCCESS ||
+            installed_change != &change_interface) {
+            goto out;
+        }
+        change_installed = 1;
+        if (bs->UninstallProtocolInterface(test_start_image_controller,
+                                           start_image_change_guid,
+                                           &change_interface) != EFI_SUCCESS) {
+            goto out;
+        }
+        change_installed = 0;
+    }
+    ok = 1;
+
+out:
+    if (change_installed &&
+        bs->UninstallProtocolInterface(test_start_image_controller,
+                                       start_image_change_guid,
+                                       &change_interface) != EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    if (binding_installed &&
+        bs->UninstallProtocolInterface(driver, driver_binding_guid,
+                                       &binding) != EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    if (base_installed &&
+        bs->UninstallProtocolInterface(test_start_image_controller,
+                                       start_image_base_guid,
+                                       &base_interface) != EFI_SUCCESS) {
+        cleanup_ok = 0;
+    }
+    test_start_image_controller = NULL;
+    test_start_image_bs = NULL;
+    return ok && cleanup_ok;
+}
+
 static BOOLEAN test_memory_primitives(EFI_SYSTEM_TABLE *SystemTable)
 {
     static UINT8 input[] = "123456789";
@@ -890,41 +1698,11 @@ static BOOLEAN test_gop_protocol(EFI_SYSTEM_TABLE *SystemTable)
 
 static BOOLEAN test_tcg_protocol(EFI_SYSTEM_TABLE *SystemTable)
 {
-    static UINT8 abc[] = { 'a', 'b', 'c' };
-    static const UINT8 expected[20] = {
-        0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
-        0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
-    };
     EFI_TCG_PROTOCOL *tcg = NULL;
-    TCG_EFI_BOOT_SERVICE_CAPABILITY capability;
-    EFI_PHYSICAL_ADDRESS first = 1;
-    EFI_PHYSICAL_ADDRESS last = 1;
-    UINT32 features = 1;
-    UINT64 result_size = 0;
-    UINT8 *result = NULL;
-    UINT8 in = 0;
-    UINT8 out = 0;
-    BOOLEAN ok = 0;
 
-    if (SystemTable->BootServices->LocateProtocol(
-            tcg_guid, NULL, (VOID **)&tcg) != EFI_SUCCESS || tcg == NULL ||
-        tcg->StatusCheck(tcg, &capability, &features, &first, &last) !=
-            EFI_SUCCESS ||
-        capability.TPMPresentFlag != 0 || features != 0 || first != 0 ||
-        last != 0 ||
-        tcg->HashAll(tcg, abc, sizeof(abc), 4U, &result_size, &result) !=
-            EFI_SUCCESS ||
-        result_size != sizeof(expected) || result == NULL ||
-        !ia64_bytes_equal(result, expected, sizeof(expected)) ||
-        tcg->PassThroughToTpm(tcg, 1, &in, 1, &out) != EFI_DEVICE_ERROR) {
-        goto out;
-    }
-    ok = 1;
-out:
-    if (result != NULL) {
-        (void)SystemTable->BootServices->FreePool(result);
-    }
-    return ok;
+    return SystemTable->BootServices->LocateProtocol(
+               tcg_guid, NULL, (VOID **)&tcg) == EFI_NOT_FOUND &&
+           tcg == NULL;
 }
 
 static const UINT8 *find_bytes(const UINT8 *Buffer, UINTN Length,
@@ -1805,6 +2583,27 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             &context, "protocol-services",
             test_protocol_services(ImageHandle, SystemTable, &loaded),
             EFI_DEVICE_ERROR, "protocol-contract");
+        ia64_test_check(&context, "multiple-protocol-services",
+                        test_multiple_protocol_services(SystemTable),
+                        EFI_DEVICE_ERROR,
+                        "transaction-duplicate-device-path");
+        ia64_test_check(&context, "controller-services",
+                        test_controller_services(SystemTable),
+                        EFI_DEVICE_ERROR,
+                        "driver-precedence-disconnect-contract");
+        ia64_test_check(&context, "image-services",
+                        test_image_services(ImageHandle, SystemTable),
+                        EFI_DEVICE_ERROR,
+                        "load-file-fallback-parameter-contract");
+        {
+            BOOLEAN start_connect_ok =
+                test_start_image_connect(ImageHandle, SystemTable);
+
+            ia64_test_check(
+                &context, "start-image-connect", start_connect_ok,
+                EFI_DEVICE_ERROR,
+                "modified-handle-auto-connect");
+        }
         ia64_test_check(&context, "memory-primitives",
                         test_memory_primitives(SystemTable), EFI_DEVICE_ERROR,
                         "crc-copy-set");
