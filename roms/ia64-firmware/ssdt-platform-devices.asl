@@ -6,8 +6,42 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
 
     Scope (\_SB)
     {
+        Name (C0EN, 0x0F)
+        // Keep these as AML BytePrefix objects; firmware patches the payload.
+        Name (C1EN, 0x0F)
+        Name (C2EN, 0x0F)
+        Name (C3EN, 0x0F)
+
         Processor (CPU0, 0, 0, 0)
         {
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (C0EN)
+            }
+        }
+
+        Processor (CPU1, 1, 0, 0)
+        {
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (C1EN)
+            }
+        }
+
+        Processor (CPU2, 2, 0, 0)
+        {
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (C2EN)
+            }
+        }
+
+        Processor (CPU3, 3, 0, 0)
+        {
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (C3EN)
+            }
         }
     }
 

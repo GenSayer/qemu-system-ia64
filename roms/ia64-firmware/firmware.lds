@@ -11,6 +11,8 @@ SECTIONS
         *(.text._start)
         *(.text.pal_proc_entry)
         *(.text.start_after_pal)
+        *(.text.start_secondary)
+        *(.text.fw_pal_halt_light)
     }
 
     . = ALIGN(0x2000);

@@ -24,7 +24,8 @@ class Ia64FirmwareTest(QemuSystemTest):
 
     def launch_ia64(self, *, name: str = "default", media: Path | None = None,
                     optical: bool = False, machine_options: str = "",
-                    memory: str = "512M", extra_args: tuple[str, ...] = (),
+                    memory: str = "512M", smp: int = 1,
+                    extra_args: tuple[str, ...] = (),
                     drive_args: tuple[str, ...] | None = None):
         vm = self.get_vm(name=name)
         machine = "ia64-vpc"
@@ -32,7 +33,7 @@ class Ia64FirmwareTest(QemuSystemTest):
             machine += "," + machine_options
         vm.set_machine(machine)
         vm.set_console()
-        vm.add_args("-smp", "1", "-m", memory,
+        vm.add_args("-smp", str(smp), "-m", memory,
                     "-bios", str(firmware_path()),
                     "-monitor", "none", "-L", str(SOURCE_ROOT / "pc-bios"))
         if drive_args is not None:

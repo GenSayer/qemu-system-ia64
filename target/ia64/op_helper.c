@@ -4,6 +4,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/atomic.h"
 #include "cpu.h"
 #include "fpreg.h"
 #include "exec/helper-proto.h"
@@ -15,6 +16,7 @@
 #include "exec/tlb-flags.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/probe.h"
+#include "system/memory.h"
 #include "fpu/softfloat.h"
 #include "qemu/timer.h"
 
@@ -573,6 +575,11 @@ static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr,
 #define PAL_SELF_TEST_STATE_TESTED (1ULL << 2)
 #define PAL_MEM_ATTR_WB            (1ULL << 0)
 #define PAL_MEM_ATTR_VALID_MASK    0xffffULL
+#define PAL_PERF_MON_INFO_VALUE    0x08123004ULL
+#define PAL_PERF_PMC_MASK          0x3fffULL
+#define PAL_PERF_PMD_MASK          0x3ffffULL
+#define PAL_PERF_GENERIC_MASK      0xf0ULL
+
 #define PAL_CACHE_FLUSH_OPERATION_MASK 0x3ULL
 #define PAL_HALT_STATE_COUNT       8
 #define PAL_HALT_STATE_IMPLEMENTED (1ULL << 60)
@@ -1443,7 +1450,7 @@ void ia64_rse_delivery_check(CPUIA64State *env, int excp)
 static void ia64_rse_check(CPUIA64State *env, const char *site)
 {
 #ifdef CONFIG_DEBUG_TCG
-    static int reported;
+    static unsigned reported;
     int64_t total = (int64_t)env->cfm_sof + env->rse_dirty +
                     env->rse_clean + env->rse_invalid;
     uint64_t expected_bspstore = env->ar_bsp -
@@ -1468,8 +1475,7 @@ static void ia64_rse_check(CPUIA64State *env, const char *site)
                          (int64_t)(bspload >> 9));
     }
 
-    if (bad && reported < 8) {
-        reported++;
+    if (bad && qatomic_fetch_inc(&reported) < 8) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "ia64 rse inconsistency at %s: excp=%u ip=%016" PRIx64
                       " sof=%u sol=%u sor=%u rrb=%u bol=%u dirty=%d/%d"
@@ -1726,6 +1732,43 @@ uint64_t helper_cmp8xchg16(CPUIA64State *env, uint64_t addr, uint64_t cmp,
     int mmu_idx = cpu_mmu_index(env_cpu(env), false);
 
     probe_write(env, base, 16, mmu_idx, ra);
+    if (tcg_cflags_has(env_cpu(env), CF_PARALLEL)) {
+#if HAVE_CMPXCHG128
+        bool big_endian = ia64_data_big_endian(env);
+        MemOpIdx oi = make_memop_idx(
+            ia64_data_memop(env, MO_UO | MO_ALIGN_16), mmu_idx);
+        Int128 desired = big_endian ? int128_make128(csd, val) :
+                                     int128_make128(val, csd);
+        Int128 observed = cpu_ld16_mmu(env, base, oi, ra);
+
+        for (;;) {
+            Int128 expected = observed;
+
+            if (big_endian) {
+                old = (addr & 8) ? int128_getlo(expected) :
+                                   int128_gethi(expected);
+            } else {
+                old = (addr & 8) ? int128_gethi(expected) :
+                                   int128_getlo(expected);
+            }
+            if (old != cmp) {
+                return old;
+            }
+            observed = big_endian ?
+                cpu_atomic_cmpxchgo_be_mmu(env, base, expected, desired,
+                                           oi, ra) :
+                cpu_atomic_cmpxchgo_le_mmu(env, base, expected, desired,
+                                           oi, ra);
+            if (int128_eq(observed, expected)) {
+                ia64_invalidate_alat_store(env, base, 16);
+                return old;
+            }
+        }
+#else
+        cpu_loop_exit_atomic(env_cpu(env), ra);
+#endif
+    }
+
     old = ia64_ldq_data_ra(env, addr, ra);
     if (old == cmp) {
         ia64_stq_data_ra(env, base, val, ra);
@@ -2060,6 +2103,8 @@ uint64_t helper_read_cr(CPUIA64State *env, uint32_t cr_num)
         return 0;
     }
     switch (cr_num) {
+    case IA64_CR_SAPIC_LID:
+        return qatomic_read(&env->cr[cr_num]);
     case IA64_CR_SAPIC_IVR:
         return (uint64_t)ia64_sapic_get_ivr(env) & 0xFF;
     case IA64_CR_SAPIC_IRR0:
@@ -2294,6 +2339,9 @@ void helper_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
         env->cr[cr_num] = value & IA64_TPR_WRITABLE_MASK;
         ia64_sapic_update_interrupt(env);
         break;
+    case IA64_CR_SAPIC_LID:
+        qatomic_set(&env->cr[cr_num], value);
+        break;
     case IA64_CR_SAPIC_EOI:
         ia64_sapic_eoi(env);
         break;
@@ -2466,8 +2514,14 @@ static bool pal_halt_light(CPUIA64State *env)
      * resumes, so remember that this halt has PAL wake semantics.
      */
     env->pal_halt_wake = true;
-    cs->halted = 1;
     ia64_itc_enter_halt(env);
+    /*
+     * Leave cpu_exec only after the PAL break instruction has completed and
+     * the translator has committed its continuation IP.  Setting halted here
+     * merely ended the current translation block; cpu_exec could then run on
+     * with a stale halted flag and stop later at an unrelated instruction.
+     */
+    cpu_set_interrupt(cs, CPU_INTERRUPT_HALT);
     return true;
 }
 
@@ -2560,8 +2614,8 @@ static bool pal_halt(CPUIA64State *env)
     env->gr[10] = 0;
     env->gr[11] = 0;
     env->pal_halt_wake = true;
-    cs->halted = 1;
     ia64_itc_enter_halt(env);
+    cpu_set_interrupt(cs, CPU_INTERRUPT_HALT);
     return true;
 }
 
@@ -2716,10 +2770,17 @@ static void pal_copy_pal(CPUIA64State *env)
         cpu_physical_memory_write(target_pa, le_words, sizeof(le_words));
         tb_invalidate_phys_range(env_cpu(env), target_pa,
                                  target_pa + PAL_COPY_CODE_SIZE - 1);
-        env->pal_proc_copy_addr = target_pa + PAL_COPY_PROC_OFFSET;
-        env->pal_proc_copy_valid = true;
-        env->pal_pmi_entry = target_pa + PAL_COPY_PROC_OFFSET;
     }
+
+    /*
+     * An application-processor call does not repeat the memory copy, but it
+     * still installs the relocated procedure and PMI entry points in that
+     * processor (SDM Vol. 2, PAL_COPY_PAL).  Keep this state per CPU so a
+     * subsequent break in the shared PAL image is dispatched as a PAL call.
+     */
+    env->pal_proc_copy_addr = target_pa + PAL_COPY_PROC_OFFSET;
+    env->pal_proc_copy_valid = true;
+    env->pal_pmi_entry = target_pa + PAL_COPY_PROC_OFFSET;
 
     env->gr[8] = PAL_STATUS_SUCCESS;
     env->gr[9] = PAL_COPY_PROC_OFFSET;
@@ -3166,8 +3227,12 @@ static void pal_bus_get_features(CPUIA64State *env)
 {
     if (pal_reserved_args_are_zero(env)) {
         env->gr[8] = PAL_STATUS_SUCCESS;
-        env->gr[9] = (1ULL << 0) | (1ULL << 1) | (1ULL << 2) |
-                     (1ULL << 4) | (1ULL << 8) | (1ULL << 16);
+        /*
+         * This model has no software-configurable processor-bus features.
+         * Bits 0 through 28 are reserved by the PAL specification, so do not
+         * expose the old placeholder mask in features_avail.
+         */
+        env->gr[9] = 0;
         env->gr[10] = 0;
         env->gr[11] = 0;
     } else {
@@ -3246,8 +3311,19 @@ static void pal_perf_mon_info(CPUIA64State *env)
         cpu_stq_data_ra(env, pm_buffer + i * 8, 0, ra);
     }
 
+    /*
+     * The architecture requires at least four generic PMC/PMD pairs.
+     * Model the baseline processor monitor layout used by this CPU model:
+     * four 48-bit generic counters at indices 4 through 7, with event
+     * selectors 0x12 for cycles and 0x08 for retired bundles.
+     */
+    cpu_stq_data_ra(env, pm_buffer, PAL_PERF_PMC_MASK, ra);
+    cpu_stq_data_ra(env, pm_buffer + 0x20, PAL_PERF_PMD_MASK, ra);
+    cpu_stq_data_ra(env, pm_buffer + 0x40, PAL_PERF_GENERIC_MASK, ra);
+    cpu_stq_data_ra(env, pm_buffer + 0x60, PAL_PERF_GENERIC_MASK, ra);
+
     env->gr[8] = PAL_STATUS_SUCCESS;
-    env->gr[9] = 0;
+    env->gr[9] = PAL_PERF_MON_INFO_VALUE;
     env->gr[10] = 0;
     env->gr[11] = 0;
 }
@@ -4409,6 +4485,53 @@ void helper_ptr_purge(CPUIA64State *env, uint64_t ifa, uint64_t size_reg,
     ia64_assert_pending_purge_counts(env);
 }
 
+typedef struct IA64PtcGlobalWork {
+    uint64_t va;
+    uint64_t ps;
+    uint32_t rid;
+    bool global_alat;
+} IA64PtcGlobalWork;
+
+static void ia64_ptc_mark_global(CPUIA64State *env,
+                                 const IA64PtcGlobalWork *work,
+                                 bool remote)
+{
+    ia64_mark_pending_purge_entries(
+        env->tlb_data, env->tlb_data_count,
+        &env->pending_purge_data_count,
+        work->va, work->ps, work->rid, true, 'd');
+    ia64_mark_pending_purge_entries(
+        env->tlb_inst, env->tlb_inst_count,
+        &env->pending_purge_inst_count,
+        work->va, work->ps, work->rid, true, 'i');
+    ia64_assert_pending_purge_counts(env);
+
+    if (remote) {
+        /* The remote processor must not execute through the old mapping. */
+        helper_tlb_serialize(env, 1, 1);
+        if (work->global_alat) {
+            memset(env->alat, 0, sizeof(env->alat));
+            env->alat_active_count = 0;
+        }
+    }
+}
+
+static void ia64_ptc_global_remote_work(CPUState *cs, run_on_cpu_data data)
+{
+    IA64PtcGlobalWork *work = data.host_ptr;
+
+    ia64_ptc_mark_global(cpu_env(cs), work, true);
+    g_free(work);
+}
+
+static void ia64_ptc_global_source_work(CPUState *cs, run_on_cpu_data data)
+{
+    IA64PtcGlobalWork *work = data.host_ptr;
+
+    ia64_ptc_mark_global(cpu_env(cs), work, false);
+    g_free(work);
+}
+
 void helper_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
                       uint32_t mode)
 {
@@ -4419,7 +4542,38 @@ void helper_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
             env, va, 0, true, false, ia64_current_code_tlb_ed(env));
     }
 
-    if (mode == 2) {
+    if (mode == 1 || mode == 3) {
+        CPUState *src = env_cpu(env);
+        CPUState *cs;
+        uint64_t ps = ia64_gr_page_size(size_reg);
+        IA64PtcGlobalWork template = {
+            .va = va & ~(ps - 1),
+            .ps = ps,
+            .rid = rid,
+            .global_alat = mode == 3,
+        };
+        bool wait = false;
+
+        CPU_FOREACH(cs) {
+            if (cs != src) {
+                IA64PtcGlobalWork *work = g_new(IA64PtcGlobalWork, 1);
+
+                *work = template;
+                async_run_on_cpu(cs, ia64_ptc_global_remote_work,
+                                 RUN_ON_CPU_HOST_PTR(work));
+                wait = true;
+            }
+        }
+        if (wait) {
+            IA64PtcGlobalWork *work = g_new(IA64PtcGlobalWork, 1);
+
+            *work = template;
+            async_safe_run_on_cpu(src, ia64_ptc_global_source_work,
+                                  RUN_ON_CPU_HOST_PTR(work));
+        } else {
+            ia64_ptc_mark_global(env, &template, false);
+        }
+    } else if (mode == 2) {
         ia64_mark_pending_purge_all_tc(
             env->tlb_data, env->tlb_data_count,
             &env->pending_purge_data_count, 'd');
@@ -7171,6 +7325,63 @@ uint64_t helper_advanced_load_allowed(CPUIA64State *env, uint64_t va)
     return full->extra.ia64.speculation != IA64_MEM_NON_SPECULATIVE;
 }
 
+static bool ia64_probe_writeback_ram(CPUIA64State *env, uint64_t addr,
+                                     MMUAccessType access_type,
+                                     bool *direct, uintptr_t ra)
+{
+    CPUTLBEntryFull *full;
+    void *host;
+    int mmu_idx = cpu_mmu_index(env_cpu(env), false);
+    int flags = probe_access_full(env, addr, 10, access_type, mmu_idx,
+                                  false, &host, &full, ra);
+
+    *direct = !(flags & (TLB_MMIO | TLB_WATCHPOINT));
+    return full->extra.ia64.memory_attribute == IA64_PTE_MA_WB &&
+           memory_region_is_ram(full->section->mr);
+}
+
+static Int128 ia64_ld16_raw(CPUIA64State *env, uint64_t addr, uintptr_t ra)
+{
+    int mmu_idx = cpu_mmu_index(env_cpu(env), false);
+    MemOpIdx oi = make_memop_idx(MO_LE | MO_UO, mmu_idx);
+
+    return cpu_ld16_mmu(env, addr, oi, ra);
+}
+
+static void ia64_st10_atomic(CPUIA64State *env, uint64_t addr,
+                             uint64_t mant, uint16_t ext, uintptr_t ra)
+{
+#if HAVE_CMPXCHG128
+    int mmu_idx = cpu_mmu_index(env_cpu(env), false);
+    MemOpIdx oi = make_memop_idx(MO_LE | MO_UO, mmu_idx);
+    Int128 observed = ia64_ld16_raw(env, addr, ra);
+    uint64_t raw_mant = ia64_data_big_endian(env) ? bswap64(mant) : mant;
+    uint16_t raw_ext = ia64_data_big_endian(env) ? bswap16(ext) : ext;
+    uint64_t low = ia64_data_big_endian(env) ?
+                   (raw_mant << 16) | raw_ext : mant;
+
+    for (;;) {
+        Int128 expected = observed;
+        uint64_t high = int128_gethi(expected);
+        Int128 desired;
+
+        if (ia64_data_big_endian(env)) {
+            high = (high & ~UINT64_C(0xffff)) | (raw_mant >> 48);
+        } else {
+            high = (high & ~UINT64_C(0xffff)) | ext;
+        }
+        desired = int128_make128(low, high);
+        observed = cpu_atomic_cmpxchgo_le_mmu(env, addr, expected, desired,
+                                              oi, ra);
+        if (int128_eq(observed, expected)) {
+            return;
+        }
+    }
+#else
+    cpu_loop_exit_atomic(env_cpu(env), ra);
+#endif
+}
+
 void helper_ldfe(CPUIA64State *env, uint32_t r1, uint64_t addr)
 {
     uintptr_t ra = GETPC();
@@ -7178,8 +7389,28 @@ void helper_ldfe(CPUIA64State *env, uint32_t r1, uint64_t addr)
     uint16_t high;
     uint32_t exp;
     bool sign;
+    bool direct;
 
-    if (ia64_data_big_endian(env)) {
+    if ((addr & 15) == 0 &&
+        ia64_probe_writeback_ram(env, addr, MMU_DATA_LOAD, &direct, ra) &&
+        tcg_cflags_has(env_cpu(env), CF_PARALLEL)) {
+        Int128 raw;
+
+        if (!direct) {
+            cpu_loop_exit_atomic(env_cpu(env), ra);
+        }
+        raw = ia64_ld16_raw(env, addr, ra);
+        if (ia64_data_big_endian(env)) {
+            uint64_t raw_low = int128_getlo(raw);
+            uint64_t raw_high = int128_gethi(raw);
+
+            high = bswap16(raw_low & 0xffff);
+            low = bswap64((raw_low >> 16) | (raw_high << 48));
+        } else {
+            low = int128_getlo(raw);
+            high = int128_gethi(raw) & 0xffff;
+        }
+    } else if (ia64_data_big_endian(env)) {
         high = cpu_lduw_be_data_ra(env, addr, ra);
         low = cpu_ldq_be_data_ra(env, addr + 2, ra);
     } else {
@@ -7199,18 +7430,12 @@ void helper_ldfe(CPUIA64State *env, uint32_t r1, uint64_t addr)
 void helper_ldf_fill(CPUIA64State *env, uint32_t r1, uint64_t addr)
 {
     uintptr_t ra = GETPC();
-    uint64_t low;
-    uint64_t high;
-
-    if (ia64_data_big_endian(env)) {
-        low = cpu_ldq_be_data_ra(env, addr + 8, ra);
-        high = ((uint64_t)cpu_ldub_data_ra(env, addr + 7, ra)) |
-               ((uint64_t)cpu_ldub_data_ra(env, addr + 6, ra) << 8) |
-               ((uint64_t)cpu_ldub_data_ra(env, addr + 5, ra) << 16);
-    } else {
-        low = cpu_ldq_le_data_ra(env, addr, ra);
-        high = cpu_ldq_le_data_ra(env, addr + 8, ra);
-    }
+    int mmu_idx = cpu_mmu_index(env_cpu(env), false);
+    MemOpIdx oi = make_memop_idx(
+        ia64_data_memop(env, MO_UO), mmu_idx);
+    Int128 pair = cpu_ld16_mmu(env, addr, oi, ra);
+    uint64_t low = int128_getlo(pair);
+    uint64_t high = int128_gethi(pair);
 
     ia64_fpreg_from_spill(env, r1, low, high);
 }
@@ -7223,11 +7448,23 @@ void helper_stfe(CPUIA64State *env, uint64_t addr, uint32_t r2)
     uint32_t exp;
     bool sign;
     uint16_t ext_exp;
+    bool direct;
 
     ia64_fpreg_to_spill(env, r2, &mant, &high);
     exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
     sign = (high >> 17) & 1;
     ext_exp = ((exp >> 2) & 0x4000) | (exp & 0x3fff);
+
+    if ((addr & 15) == 0 &&
+        ia64_probe_writeback_ram(env, addr, MMU_DATA_STORE, &direct, ra) &&
+        tcg_cflags_has(env_cpu(env), CF_PARALLEL)) {
+        if (!direct) {
+            cpu_loop_exit_atomic(env_cpu(env), ra);
+        }
+        ia64_st10_atomic(env, addr, mant,
+                         ((uint16_t)sign << 15) | ext_exp, ra);
+        return;
+    }
 
     if (ia64_data_big_endian(env)) {
         cpu_stw_be_data_ra(env, addr, ((uint16_t)sign << 15) | ext_exp, ra);
@@ -7242,24 +7479,14 @@ void helper_stfe(CPUIA64State *env, uint64_t addr, uint32_t r2)
 void helper_stf_spill(CPUIA64State *env, uint64_t addr, uint32_t r2)
 {
     uintptr_t ra = GETPC();
+    int mmu_idx = cpu_mmu_index(env_cpu(env), false);
+    MemOpIdx oi = make_memop_idx(
+        ia64_data_memop(env, MO_UO), mmu_idx);
     uint64_t low;
     uint64_t high;
 
     ia64_fpreg_to_spill(env, r2, &low, &high);
-    if (ia64_data_big_endian(env)) {
-        cpu_stb_data_ra(env, addr, 0, ra);
-        cpu_stb_data_ra(env, addr + 1, 0, ra);
-        cpu_stb_data_ra(env, addr + 2, 0, ra);
-        cpu_stb_data_ra(env, addr + 3, 0, ra);
-        cpu_stb_data_ra(env, addr + 4, 0, ra);
-        cpu_stb_data_ra(env, addr + 5, (high >> 16) & 0xff, ra);
-        cpu_stb_data_ra(env, addr + 6, (high >> 8) & 0xff, ra);
-        cpu_stb_data_ra(env, addr + 7, high & 0xff, ra);
-        cpu_stq_be_data_ra(env, addr + 8, low, ra);
-    } else {
-        cpu_stq_le_data_ra(env, addr, low, ra);
-        cpu_stq_le_data_ra(env, addr + 8, high, ra);
-    }
+    cpu_st16_mmu(env, addr, int128_make128(low, high), oi, ra);
 }
 
 /* ---- ITC read helper ---- */

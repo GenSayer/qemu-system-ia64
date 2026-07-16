@@ -10,7 +10,7 @@ ia64_app_header = files('apps/ia64-test.h')
 ia64_app_sh = find_program('sh')
 ia64_functional_test_apps = []
 
-foreach app : ['smoke', 'services', 'tables', 'exitbs', 'storage', 'input']
+foreach app : ['smoke', 'services', 'tables', 'exitbs', 'storage', 'input', 'smp']
   app_source = files('apps/' + app + '-app.c')
   app_depend_files = [
     ia64_app_builder,
@@ -50,6 +50,7 @@ tests_ia64_system_quick = [
   'smoke',
   'services',
   'tables',
+  'smp',
 ]
 
 tests_ia64_system_thorough = [
@@ -62,6 +63,7 @@ test_ia64_timeouts = {
   'smoke': 120,
   'services': 90,
   'tables': 90,
+  'smp': 120,
   'storage': 300,
   'input': 120,
 }

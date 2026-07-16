@@ -28,7 +28,7 @@ class Ia64PlatformTables(Ia64FirmwareTest):
         nvram = self.make_nvram()
         make_fat_disk(disk, app_path("tables"))
         vm = self.launch_ia64(
-            media=disk,
+            media=disk, smp=4,
             machine_options=f"firmware-console=serial,nvram={nvram}",
             extra_args=("-debug-port", f"file:{debug_log}"))
         result = self.wait_ia64_suite(

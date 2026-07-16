@@ -1068,6 +1068,21 @@ static BOOLEAN aml_named_buffer(const UINT8 *Aml, UINTN AmlLength,
     return 0;
 }
 
+static BOOLEAN aml_named_byte(const UINT8 *Aml, UINTN AmlLength,
+                              const UINT8 Name[4], UINT8 Value)
+{
+    UINTN i;
+
+    for (i = 0; i + 7U <= AmlLength; i++) {
+        if (Aml[i] == 0x08U &&
+            ia64_bytes_equal(Aml + i + 1U, Name, 4) &&
+            Aml[i + 5U] == 0x0aU && Aml[i + 6U] == Value) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
 {
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
@@ -1375,23 +1390,67 @@ static BOOLEAN test_acpi_fadt_links_gas(const TEST_TABLE_CONTEXT *Context)
 
 static BOOLEAN test_acpi_topology(const TEST_TABLE_CONTEXT *Context)
 {
+    static const UINT8 processor_enabled_names[4][4] = {
+        { 'C', '0', 'E', 'N' },
+        { 'C', '1', 'E', 'N' },
+        { 'C', '2', 'E', 'N' },
+        { 'C', '3', 'E', 'N' },
+    };
     const UINT8 *madt;
     const UINT8 *srat;
+    const UINT8 *ssdt;
     const UINT8 *slit;
+    UINTN madt_length;
     UINTN srat_length;
+    UINTN ssdt_length;
     UINTN offset;
+    UINT32 madt_processors = 0;
+    UINT32 srat_processors = 0;
+    BOOLEAN iosapic = 0;
     BOOLEAN low_memory = 0;
-    BOOLEAN processor = 0;
 
     if (!Context->Valid) {
         return 0;
     }
+    ssdt = (const UINT8 *)Context->Ssdt;
+    ssdt_length = get_u32(ssdt + 4U);
+    if (ssdt_length < sizeof(TEST_SDT_HEADER)) {
+        return 0;
+    }
+    for (offset = 0; offset < 4U; offset++) {
+        if (!aml_named_byte(ssdt + sizeof(TEST_SDT_HEADER),
+                            ssdt_length - sizeof(TEST_SDT_HEADER),
+                            processor_enabled_names[offset], 0x0fU)) {
+            return 0;
+        }
+    }
     madt = (const UINT8 *)Context->Madt;
-    if (get_u32(madt + 36U) != 0xfee00000U || madt[44U] != 7U ||
-        madt[45U] != 12U || get_u32(madt + 52U) != 1U ||
-        madt[56U] != 6U || madt[57U] != 16U ||
-        get_u32(madt + 60U) != 0 ||
-        get_u64(madt + 64U) != 0x80110000U) {
+    madt_length = get_u32(madt + 4U);
+    if (get_u32(madt + 36U) != 0xfee00000U || madt_length < 44U) {
+        return 0;
+    }
+    for (offset = 44U; offset + 2U <= madt_length; ) {
+        UINTN length = madt[offset + 1U];
+
+        if (length < 2U || length > madt_length - offset) {
+            return 0;
+        }
+        if (madt[offset] == 7U && length >= 12U &&
+            (get_u32(madt + offset + 8U) & 1U) != 0) {
+            UINTN id = madt[offset + 3U];
+
+            if (id >= 4U || madt[offset + 2U] != id ||
+                madt[offset + 4U] != 0) {
+                return 0;
+            }
+            madt_processors |= 1U << id;
+        } else if (madt[offset] == 6U && length >= 16U) {
+            iosapic = get_u32(madt + offset + 4U) == 0 &&
+                get_u64(madt + offset + 8U) == 0x80110000U;
+        }
+        offset += length;
+    }
+    if (offset != madt_length || madt_processors != 0x0fU || !iosapic) {
         return 0;
     }
 
@@ -1418,12 +1477,18 @@ static BOOLEAN test_acpi_topology(const TEST_TABLE_CONTEXT *Context)
             }
         } else if (srat[offset] == 0U && length >= 16U &&
                    (get_u32(srat + offset + 4U) & 1U) != 0) {
-            processor = 1;
+            UINTN id = srat[offset + 3U];
+
+            if (id >= 4U || srat[offset + 8U] != 0) {
+                return 0;
+            }
+            srat_processors |= 1U << id;
         }
         offset += length;
     }
     slit = (const UINT8 *)Context->Slit;
-    return offset == srat_length && low_memory && processor &&
+    return offset == srat_length && low_memory &&
+           srat_processors == 0x0fU &&
            get_u64(slit + 36U) == 1U && slit[44U] == 10U;
 }
 
@@ -1587,13 +1652,20 @@ static BOOLEAN test_sal_smbios_tables(EFI_SYSTEM_TABLE *SystemTable,
     UINT8 *smbios = (UINT8 *)find_config_table(SystemTable, smbios_guid);
     UINT8 *table;
     UINT32 sal_length;
+    UINT64 stack_pointer;
     UINTN table_length;
     UINTN structure_count;
     UINTN expected_count;
     UINTN offset = 0;
     BOOLEAN end_table = 0;
+    BOOLEAN processor_topology = 0;
+
+    __asm__ volatile ("mov %0 = r12;;" : "=r"(stack_pointer));
 
     if (!Context->Valid || sal == NULL || smbios == NULL ||
+        !memory_range_has_type(&Context->MemoryMap, stack_pointer, 16U,
+                               EfiRuntimeServicesData,
+                               EFI_MEMORY_RUNTIME) ||
         !memory_range_is_mapped(&Context->MemoryMap, (UINTN)sal, 8U) ||
         get_u32(sal) != SIG32('S', 'S', 'T', '_')) {
         return 0;
@@ -1629,6 +1701,10 @@ static BOOLEAN test_sal_smbios_tables(EFI_SYSTEM_TABLE *SystemTable,
         }
         if (table[offset] == 127U) {
             end_table = 1;
+        } else if (table[offset] == 4U && formatted_length >= 38U) {
+            processor_topology = table[offset + 35U] == 4U &&
+                table[offset + 36U] == 4U &&
+                table[offset + 37U] == 4U;
         }
         offset += formatted_length;
         while (offset + 1U < table_length &&
@@ -1641,7 +1717,7 @@ static BOOLEAN test_sal_smbios_tables(EFI_SYSTEM_TABLE *SystemTable,
         offset += 2U;
     }
     return offset == table_length && structure_count == expected_count &&
-           end_table;
+           end_table && processor_topology;
 }
 
 #ifdef IA64_TABLES_ONLY

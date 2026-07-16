@@ -10,6 +10,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/atomic.h"
 #include "qemu/qemu-print.h"
 #include "qemu/timer.h"
 #include "cpu.h"
@@ -6980,30 +6981,47 @@ static void ia64_gen_fp_load_pair_value(DisasContext *ctx,
                                         const Ia64Instruction *insn,
                                         TCGv_i64 addr)
 {
+    TCGv_i64 first = tcg_temp_new_i64();
     TCGv_i64 second = tcg_temp_new_i64();
 
     switch (insn->opcode) {
-    case IA64_OP_LDFPS:
-        ia64_gen_fr_ld_s(insn->r1, addr, ctx->mmu_idx,
-                         ia64_data_memop(ctx, MO_LEUL));
-        tcg_gen_addi_i64(second, addr, 4);
-        ia64_gen_fr_ld_s(insn->r2, second, ctx->mmu_idx,
-                         ia64_data_memop(ctx, MO_LEUL));
+    case IA64_OP_LDFPS: {
+        TCGv_i64 pair = tcg_temp_new_i64();
+
+        tcg_gen_qemu_ld_i64(pair, addr, ctx->mmu_idx,
+                            ia64_data_memop(ctx, MO_UQ));
+        if (ctx->be_data) {
+            tcg_gen_shri_i64(first, pair, 32);
+            tcg_gen_ext32u_i64(second, pair);
+        } else {
+            tcg_gen_ext32u_i64(first, pair);
+            tcg_gen_shri_i64(second, pair, 32);
+        }
+        gen_helper_setf_s(tcg_env, tcg_constant_i32(insn->r1), first);
+        gen_helper_setf_s(tcg_env, tcg_constant_i32(insn->r2), second);
         break;
+    }
     case IA64_OP_LDFPD:
-        ia64_gen_fr_ld(insn->r1, addr, ctx->mmu_idx,
-                       ia64_data_memop(ctx, MO_LEUQ));
-        tcg_gen_addi_i64(second, addr, 8);
-        ia64_gen_fr_ld(insn->r2, second, ctx->mmu_idx,
-                       ia64_data_memop(ctx, MO_LEUQ));
+    case IA64_OP_LDFP8: {
+        TCGv_i128 pair = tcg_temp_new_i128();
+
+        tcg_gen_qemu_ld_i128(
+            pair, addr, ctx->mmu_idx,
+            ia64_data_memop(ctx, MO_UO));
+        if (ctx->be_data) {
+            tcg_gen_extr_i128_i64(second, first, pair);
+        } else {
+            tcg_gen_extr_i128_i64(first, second, pair);
+        }
+        if (insn->opcode == IA64_OP_LDFPD) {
+            ia64_gen_fr_mov(insn->r1, first);
+            ia64_gen_fr_mov(insn->r2, second);
+        } else {
+            ia64_gen_fr_mov_sig(insn->r1, first);
+            ia64_gen_fr_mov_sig(insn->r2, second);
+        }
         break;
-    case IA64_OP_LDFP8:
-        ia64_gen_fr_ld_sig(insn->r1, addr, ctx->mmu_idx,
-                           ia64_data_memop(ctx, MO_LEUQ));
-        tcg_gen_addi_i64(second, addr, 8);
-        ia64_gen_fr_ld_sig(insn->r2, second, ctx->mmu_idx,
-                           ia64_data_memop(ctx, MO_LEUQ));
-        break;
+    }
     default:
         g_assert_not_reached();
     }
@@ -7973,7 +7991,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     if (!insn->valid) {
         static unsigned invalid_logs;
 
-        if (invalid_logs++ < 128) {
+        if (qatomic_fetch_inc(&invalid_logs) < 128) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "ia64 invalid insn ip=0x%016" PRIx64
                           " slot=%u unit=%u raw=0x%010" PRIx64 "\n",
@@ -9014,7 +9032,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     }
     case IA64_OP_LD16:
         {
-            TCGv_i64 high_addr = tcg_temp_new_i64();
+            TCGv_i128 pair = tcg_temp_new_i128();
             TCGv_i64 high = tcg_temp_new_i64();
             TCGv_i64 low = insn->r1 != 0 ? cpu_gr[insn->r1] :
                            tcg_temp_new_i64();
@@ -9022,12 +9040,14 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_check_nat_non_access(insn, insn->r3, false);
             ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 16, false,
                                      false);
-            tcg_gen_qemu_ld_i64(low, ia64_gr_src(insn->r3),
-                                ctx->mmu_idx,
-                                ia64_data_memop(ctx, MO_LEUQ));
-            tcg_gen_addi_i64(high_addr, ia64_gr_src(insn->r3), 8);
-            tcg_gen_qemu_ld_i64(high, high_addr, ctx->mmu_idx,
-                                ia64_data_memop(ctx, MO_LEUQ));
+            tcg_gen_qemu_ld_i128(
+                pair, ia64_gr_src(insn->r3), ctx->mmu_idx,
+                ia64_data_memop(ctx, MO_UO));
+            if (ctx->be_data) {
+                tcg_gen_extr_i128_i64(high, low, pair);
+            } else {
+                tcg_gen_extr_i128_i64(low, high, pair);
+            }
             ia64_gen_memory_acquire(insn);
             if (insn->r1 != 0) {
                 ia64_gen_gr_nat_clear(insn->r1);
@@ -9037,7 +9057,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         break;
     case IA64_OP_ST16:
         {
-            TCGv_i64 high_addr = tcg_temp_new_i64();
+            TCGv_i128 pair = tcg_temp_new_i128();
             TCGv_i64 high = tcg_temp_new_i64();
 
             ia64_gen_check_nat_non_access(insn, insn->r3, true);
@@ -9045,13 +9065,17 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 16, false,
                                      true);
             ia64_gen_memory_release(insn);
-            tcg_gen_qemu_st_i64(ia64_gr_src(insn->r2),
-                                ia64_gr_src(insn->r3), ctx->mmu_idx,
-                                ia64_data_memop(ctx, MO_LEUQ));
-            tcg_gen_addi_i64(high_addr, ia64_gr_src(insn->r3), 8);
             gen_helper_read_ar(high, tcg_env, tcg_constant_i32(25));
-            tcg_gen_qemu_st_i64(high, high_addr, ctx->mmu_idx,
-                                ia64_data_memop(ctx, MO_LEUQ));
+            if (ctx->be_data) {
+                tcg_gen_concat_i64_i128(pair, high,
+                                        ia64_gr_src(insn->r2));
+            } else {
+                tcg_gen_concat_i64_i128(pair, ia64_gr_src(insn->r2),
+                                        high);
+            }
+            tcg_gen_qemu_st_i128(
+                pair, ia64_gr_src(insn->r3), ctx->mmu_idx,
+                ia64_data_memop(ctx, MO_UO));
             ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(insn->r3), 16);
         }
         break;
@@ -10918,6 +10942,22 @@ static vaddr ia64_cpu_get_pc(CPUState *cs)
 
 static int sapic_find_isr(CPUIA64State *env);
 
+CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid)
+{
+    CPUState *cs;
+    uint64_t lid = ia64_sapic_lid(id, eid);
+
+    CPU_FOREACH(cs) {
+        IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+
+        if ((qatomic_read(&cpu->env.cr[IA64_CR_SAPIC_LID]) &
+             (IA64_SAPIC_LID_ID_MASK | IA64_SAPIC_LID_EID_MASK)) == lid) {
+            return cs;
+        }
+    }
+    return NULL;
+}
+
 static bool sapic_vector_active(const uint64_t bitmap[4], int vector)
 {
     return bitmap[vector / 64] & (1ULL << (vector % 64));
@@ -11099,14 +11139,26 @@ int ia64_sapic_get_ivr(CPUIA64State *env)
     return ia64_sapic_accept(env);
 }
 
-void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
+static void ia64_sapic_set_irq_work(CPUState *cs, run_on_cpu_data data)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    uint8_t vector = data.host_int;
     int idx = vector / 64;
     int bit = vector % 64;
 
     cpu->env.sapic_irr[idx] |= (1ULL << bit);
     ia64_sapic_update_interrupt(&cpu->env);
+}
+
+void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
+{
+    run_on_cpu_data data = RUN_ON_CPU_HOST_INT(vector);
+
+    if (qemu_cpu_is_self(cs)) {
+        ia64_sapic_set_irq_work(cs, data);
+    } else {
+        async_run_on_cpu(cs, ia64_sapic_set_irq_work, data);
+    }
 }
 
 static void ia64_itm_raise(CPUIA64State *env, uint64_t itm_value)
@@ -11159,12 +11211,13 @@ static bool ia64_itm_update_pending(CPUIA64State *env, uint64_t itc,
     return true;
 }
 
-static void ia64_itm_timer_cb(void *opaque)
+static void ia64_itm_timer_work(CPUState *cs, run_on_cpu_data data)
 {
-    IA64CPU *cpu = opaque;
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint64_t itm;
     bool was_armed;
 
+    (void)data;
     if (!cpu->env.itm_armed) {
         return;
     }
@@ -11177,6 +11230,17 @@ static void ia64_itm_timer_cb(void *opaque)
     if (!ia64_itm_update_pending(&cpu->env, cpu->env.ar_itc, itm,
                                  was_armed)) {
         ia64_itm_update(&cpu->env, itm);
+    }
+}
+
+static void ia64_itm_timer_cb(void *opaque)
+{
+    CPUState *cs = CPU(opaque);
+
+    if (qemu_cpu_is_self(cs)) {
+        ia64_itm_timer_work(cs, RUN_ON_CPU_NULL);
+    } else {
+        async_run_on_cpu(cs, ia64_itm_timer_work, RUN_ON_CPU_NULL);
     }
 }
 
@@ -11514,7 +11578,8 @@ void ia64_flush_suppressed_tlb(CPUIA64State *env)
 
 static void ia64_tlb_set_entry_page(CPUState *cs, vaddr addr, hwaddr pa,
                                     uint64_t page_size, int prot, int mmu_idx,
-                                    IA64MemorySpeculation speculation)
+                                    IA64MemorySpeculation speculation,
+                                    uint8_t memory_attribute)
 {
     CPUTLBEntryFull full = {
         .phys_addr = pa & TARGET_PAGE_MASK,
@@ -11525,6 +11590,7 @@ static void ia64_tlb_set_entry_page(CPUState *cs, vaddr addr, hwaddr pa,
 
     (void)page_size;
     full.extra.ia64.speculation = speculation;
+    full.extra.ia64.memory_attribute = memory_attribute;
     tlb_set_page_full(cs, mmu_idx, addr & TARGET_PAGE_MASK, &full);
 }
 
@@ -11584,7 +11650,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             cs, addr, pa, TARGET_PAGE_SIZE,
             PAGE_READ | PAGE_WRITE | PAGE_EXEC, mmu_idx,
             (addr & IA64_PHYS_UC_BIT) ? IA64_MEM_NON_SPECULATIVE :
-                                       IA64_MEM_LIMITED_SPECULATION);
+                                       IA64_MEM_LIMITED_SPECULATION,
+            (addr & IA64_PHYS_UC_BIT) ? 4 : 0);
         return true;
     }
 
@@ -11617,7 +11684,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
         ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
-                                mmu_idx, IA64_MEM_SPECULATIVE);
+                                mmu_idx, IA64_MEM_SPECULATIVE, 0);
         return true;
     }
 
@@ -11631,7 +11698,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                       (access_type == MMU_DATA_STORE ? 'w' : 'd'),
                       (uint64_t)addr, pa, cpu->env.psr);
         ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
-                                mmu_idx, IA64_MEM_SPECULATIVE);
+                                mmu_idx, IA64_MEM_SPECULATIVE, 0);
         return true;
     }
 
@@ -11666,7 +11733,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                           perm);
             ia64_tlb_set_entry_page(
                 cs, addr, pa, entry->ps, prot, mmu_idx,
-                ia64_pte_memory_speculation(entry->pte));
+                ia64_pte_memory_speculation(entry->pte),
+                (entry->pte >> 2) & 7);
             return true;
         }
     }
@@ -11712,7 +11780,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             ia64_tlb_set_entry_page(
                 cs, addr, pa, page_size, prot, mmu_idx,
                 ia64_pte_memory_speculation(new_entry ? new_entry->pte :
-                                                        pte));
+                                                        pte),
+                ((new_entry ? new_entry->pte : pte) >> 2) & 7);
             return true;
         }
     }
@@ -11756,7 +11825,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             ia64_tlb_set_entry_page(
                 cs, addr, pa, page_size, prot, mmu_idx,
                 ia64_pte_memory_speculation(new_entry ? new_entry->pte :
-                                                        pte));
+                                                        pte),
+                ((new_entry ? new_entry->pte : pte) >> 2) & 7);
             return true;
         }
     }
@@ -11770,7 +11840,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                       (access_type == MMU_DATA_STORE ? 'w' : 'd'),
                       (uint64_t)addr, pa, cpu->env.psr);
         ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
-                                mmu_idx, IA64_MEM_SPECULATIVE);
+                                mmu_idx, IA64_MEM_SPECULATIVE, 0);
         return true;
     }
     if (probe) {
@@ -12473,7 +12543,8 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     set_float_3nan_prop_rule(float_3nan_prop_abc, &cpu->env.fp_status);
     set_float_infzeronan_rule(float_infzeronan_dnan_never, &cpu->env.fp_status);
     set_float_default_nan_pattern(0b01000000, &cpu->env.fp_status);
-    cpu->env.cr[IA64_CR_SAPIC_LID] = 0;
+    cpu->env.cr[IA64_CR_SAPIC_LID] =
+        ia64_sapic_lid(MAX(CPU(cpu)->cpu_index, 0), 0);
     cpu->env.cr[IA64_CR_SAPIC_TPR] = 0;
     cpu->env.cr[IA64_CR_ITV] = IA64_VECTOR_MASKED;
     cpu->env.pal_proc_copy_valid = false;
@@ -13349,7 +13420,7 @@ static void ia64_cpu_translate_code(CPUState *cs, TranslationBlock *tb,
 
 static const TCGCPUOps ia64_tcg_ops = {
     .guest_default_memory_order = TCG_MO_ALL,
-    .mttcg_supported = false,
+    .mttcg_supported = true,
     .initialize = ia64_cpu_tcg_init,
     .translate_code = ia64_cpu_translate_code,
     .get_tb_cpu_state = ia64_get_tb_cpu_state,

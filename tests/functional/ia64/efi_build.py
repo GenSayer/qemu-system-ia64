@@ -8,7 +8,8 @@ import shutil
 import subprocess
 
 
-APP_NAMES = ("smoke", "services", "tables", "exitbs", "storage", "input")
+APP_NAMES = ("smoke", "services", "tables", "exitbs", "storage", "input",
+             "smp")
 SOURCE_DIR = Path(__file__).resolve().parent
 APPS_SOURCE_DIR = SOURCE_DIR / "apps"
 

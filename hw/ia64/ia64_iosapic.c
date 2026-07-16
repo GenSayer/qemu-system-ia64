@@ -19,11 +19,16 @@
 #define IOSAPIC_RTE_BASE   0x10
 
 #define RTE_VECTOR_MASK      0x00000000000000FFULL
+#define RTE_DELIVERY_MODE    0x0000000000000700ULL
 #define RTE_DELIVERY_STATUS  0x0000000000001000ULL
 #define RTE_REMOTE_IRR       0x0000000000004000ULL
 #define RTE_MASKED           0x0000000000010000ULL
 #define RTE_TRIGGER_LEVEL    0x0000000000008000ULL
 #define RTE_RO_BITS          (RTE_DELIVERY_STATUS | RTE_REMOTE_IRR)
+
+#define IOSAPIC_DELIVERY_INT   0
+#define IOSAPIC_DELIVERY_NMI   4
+#define IOSAPIC_DELIVERY_EXTINT 7
 
 struct IA64IOSapicState {
     SysBusDevice parent_obj;
@@ -36,16 +41,36 @@ struct IA64IOSapicState {
 static void iosapic_update(IA64IOSapicState *s, int pin)
 {
     uint64_t rte = s->rte[pin];
-    uint8_t vector = rte & RTE_VECTOR_MASK;
+    unsigned delivery = (rte & RTE_DELIVERY_MODE) >> 8;
+    uint8_t id = rte >> 56;
+    uint8_t eid = rte >> 48;
+    uint8_t vector;
     bool masked = (rte & RTE_MASKED) != 0;
     bool level_triggered = (rte & RTE_TRIGGER_LEVEL) != 0;
     CPUState *cs;
 
-    if (masked || vector == 0 || (level_triggered && !s->irq_level[pin])) {
+    if (masked || (level_triggered && !s->irq_level[pin])) {
         return;
     }
 
-    cs = first_cpu;
+    switch (delivery) {
+    case IOSAPIC_DELIVERY_INT:
+        vector = rte & RTE_VECTOR_MASK;
+        if (!ia64_external_interrupt_vector_valid(vector)) {
+            return;
+        }
+        break;
+    case IOSAPIC_DELIVERY_NMI:
+        vector = 2;
+        break;
+    case IOSAPIC_DELIVERY_EXTINT:
+        vector = 0;
+        break;
+    default:
+        return;
+    }
+
+    cs = ia64_cpu_by_sapic_id(id, eid);
     if (!cs) {
         return;
     }

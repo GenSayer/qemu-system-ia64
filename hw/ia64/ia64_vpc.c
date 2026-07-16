@@ -79,13 +79,22 @@
 #define IA64_ACPI_SCI_IRQ       9
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION      7ULL
+#define IA64_FW_HANDOFF_VERSION      8ULL
 #define IA64_FW_CONSOLE_SERIAL       0ULL
 #define IA64_FW_CONSOLE_VGA          1ULL
 #define IA64_FW_DEBUG_PORT_PRESENT   1ULL
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
+#define IA64_VPC_MAX_CPUS           4
+#define IA64_VPC_RSE_STACK_SIZE     0x8000ULL
+#define IA64_VPC_EARLY_STACK_TOP    0x08000000ULL
+#define IA64_VPC_AP_EARLY_STACK_TOP 0x00100000ULL
+#define IA64_VPC_EARLY_STACK_STRIDE 0x10000ULL
+
+#define IA64_SAPIC_DELIVERY_INT     0
+#define IA64_SAPIC_DELIVERY_NMI     4
+#define IA64_SAPIC_DELIVERY_EXTINT  7
 
 static PCIDevice *ia64_vpc_ahci_dev;
 static PCIDevice *ia64_vpc_ohci_dev;
@@ -498,7 +507,9 @@ static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
                                     uint64_t value, unsigned size)
 {
     CPUState *cs;
-    uint32_t cpu_index;
+    unsigned delivery;
+    uint8_t id;
+    uint8_t eid;
     uint8_t vector;
 
     (void)opaque;
@@ -520,10 +531,28 @@ static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
      * region.  The address selects the target processor and the low data byte
      * carries the interrupt vector for INT delivery messages.
      */
-    cpu_index = addr >> 4;
-    vector = value & 0xff;
-    cs = qemu_get_cpu(cpu_index);
-    if (cs == NULL || vector < 16) {
+    id = (addr >> 12) & 0xff;
+    eid = (addr >> 4) & 0xff;
+    delivery = (value >> 8) & 7;
+    switch (delivery) {
+    case IA64_SAPIC_DELIVERY_INT:
+        vector = value & 0xff;
+        if (!ia64_external_interrupt_vector_valid(vector)) {
+            return;
+        }
+        break;
+    case IA64_SAPIC_DELIVERY_NMI:
+        vector = 2;
+        break;
+    case IA64_SAPIC_DELIVERY_EXTINT:
+        vector = 0;
+        break;
+    default:
+        return;
+    }
+
+    cs = ia64_cpu_by_sapic_id(id, eid);
+    if (cs == NULL) {
         return;
     }
 
@@ -639,7 +668,7 @@ static void ia64_vpc_map_ram(MachineState *machine)
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
 {
-    uint8_t handoff[64] = { 0 };
+    uint8_t handoff[72] = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
     stq_le_p(handoff, IA64_FW_HANDOFF_MAGIC);
@@ -651,6 +680,7 @@ static void ia64_vpc_write_firmware_handoff(MachineState *machine)
              debug_port_present ? IA64_FW_DEBUG_PORT_PRESENT : 0);
     stq_le_p(handoff + 48, debug_port_present ? IA64_DEBUG_UART_BASE : 0);
     stq_le_p(handoff + 56, ia64_vpc_i8042_enabled);
+    stq_le_p(handoff + 64, machine->smp.cpus);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
 }
 
@@ -901,66 +931,51 @@ static void ia64_vpc_init_usb(MachineState *machine, PCIBus *pci_bus)
  */
 static void ia64_vpc_reset(void *opaque)
 {
-    CPUState *cs = first_cpu;
-    CPUIA64State *env = cpu_env(cs);
+    CPUState *cs;
 
     (void)opaque;
 
-    /* The CPU is not a child of the platform system bus. */
-    cpu_reset(cs);
+    CPU_FOREACH(cs) {
+        CPUIA64State *env = cpu_env(cs);
+        uint64_t cpu_offset = cs->cpu_index;
 
-    /* Set initial PSR: physical mode, interrupts disabled, cpl=0 */
-    env->psr = 0;
+        /* The CPUs are not children of the platform system bus. */
+        cpu_reset(cs);
 
-    /* Set initial IP to start of firmware */
-    env->ip = IA64_FW_BASE;
+        /* Start in physical mode at the firmware entry point. */
+        env->psr = 0;
+        env->ip = IA64_FW_BASE;
+        env->br[0] = IA64_FW_BASE;
+        env->cr_iva = IA64_IVT_BASE;
+        env->cr_pta = 0;
+        env->cr[8] = 0x0000000000000030ULL; /* rr0: 256MB, RID 0 */
+        env->cr_dcr = IA64_DCR_DM | IA64_DCR_DP;
+        env->ar_kr0 = IA64_FW_BASE;
+        env->ar_kr7 = 0;
 
-    /* Set up b0 (return branch register) to firmware entry */
-    env->br[0] = IA64_FW_BASE;
+        /* Give every processor independent early RSE and memory stacks. */
+        env->ar_rsc = IA64_RSC_MODE;
+        env->ar_bsp = 0x80000 + cpu_offset * IA64_VPC_RSE_STACK_SIZE;
+        env->ar_bspstore = env->ar_bsp;
+        env->ar_rnat = 0;
+        env->cfm_sof = 0;
+        env->cfm_sol = 0;
+        env->cfm_sor = 0;
+        env->cfm_rrb_gr = 0;
+        env->gr[12] = cpu_offset == 0 ? IA64_VPC_EARLY_STACK_TOP - 16 :
+                      IA64_VPC_AP_EARLY_STACK_TOP - 16 -
+                      cpu_offset * IA64_VPC_EARLY_STACK_STRIDE;
 
-    /* IVA (Interrupt Vector Address) */
-    env->cr_iva = IA64_IVT_BASE;
-
-    /* Initialize PTA with VHPT disabled for physical mode */
-    env->cr_pta = 0;
-
-    /* Region registers */
-    env->cr[8] = 0x0000000000000030ULL;  /* rr0: 256MB page, RID=0 */
-
-    /* Initialize DCR */
-    env->cr_dcr = IA64_DCR_DM | IA64_DCR_DP;
-
-    /* Kernel registers */
-    env->ar_kr0 = IA64_FW_BASE;
-    env->ar_kr7 = 0;
-
-    /* RSE state */
-    env->ar_rsc = IA64_RSC_MODE;
-    env->ar_bsp = 0x80000;
-    env->ar_bspstore = 0x80000;
-    env->ar_rnat = 0;
-    env->cfm_sof = 0;
-    env->cfm_sol = 0;
-    env->cfm_sor = 0;
-    env->cfm_rrb_gr = 0;
-
-    /* Stack pointer */
-    env->gr[12] = 0x200000;
-
-    /* Loader base.  The flat firmware entry code derives its link-time GP. */
-    env->gr[1] = IA64_FW_BASE;
-
-    /* ITC timer */
-    ia64_itc_write(env, 0);
-
-    /* FPSR */
-    env->ar_fpsr = IA64_FPSR_DEFAULT;
-
-    /* FP status */
-    set_float_rounding_mode(float_round_nearest_even, &env->fp_status);
-    set_flush_to_zero(false, &env->fp_status);
-    set_flush_inputs_to_zero(false, &env->fp_status);
-    set_default_nan_mode(false, &env->fp_status);
+        /* The flat firmware entry code derives its link-time GP. */
+        env->gr[1] = IA64_FW_BASE;
+        env->pal_halt_wake = cs->start_powered_off;
+        ia64_itc_write(env, 0);
+        env->ar_fpsr = IA64_FPSR_DEFAULT;
+        set_float_rounding_mode(float_round_nearest_even, &env->fp_status);
+        set_flush_to_zero(false, &env->fp_status);
+        set_flush_inputs_to_zero(false, &env->fp_status);
+        set_default_nan_mode(false, &env->fp_status);
+    }
 
     acpi_pm1_evt_reset(&ia64_vpc_acpi_regs);
     acpi_pm1_cnt_reset(&ia64_vpc_acpi_regs);
@@ -983,8 +998,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     IA64VpcDoneNotifier *n = container_of(notifier,
                                             IA64VpcDoneNotifier, notifier);
     MachineState *machine = n->machine;
-    CPUState *cs = first_cpu;
-    CPUIA64State *env = cpu_env(cs);
+    CPUState *cs;
 
     ia64_vpc_configure_platform_pci();
 
@@ -1047,9 +1061,13 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
 
         /* Sanity: entry must be in a reasonable address range */
         if (entry_addr != 0 && entry_addr < 0x100000000ULL) {
-            env->ip = entry_addr;
-            env->br[0] = entry_addr;
-            env->gr[1] = gp_val;
+            CPU_FOREACH(cs) {
+                CPUIA64State *env = cpu_env(cs);
+
+                env->ip = entry_addr;
+                env->br[0] = entry_addr;
+                env->gr[1] = gp_val;
+            }
         }
     }
 }
@@ -1074,15 +1092,25 @@ static void ia64_vpc_init(MachineState *machine)
         exit(1);
     }
 
+    if (ia64_vpc_alat_full && machine->smp.cpus > 1) {
+        error_report("full ALAT emulation is not SMP-safe");
+        exit(1);
+    }
+
     ia64_vpc_map_ram(machine);
     ia64_vpc_map_firmware_address_space();
     ia64_vpc_init_rtc(machine);
     ia64_vpc_init_nvram(machine);
     ia64_vpc_write_firmware_handoff(machine);
 
-    cpu = IA64_CPU(cpu_create(machine->cpu_type));
-    cpu->alat_full = ia64_vpc_alat_full;
-    cpu->env.alat_full = ia64_vpc_alat_full;
+    for (i = 0; i < machine->smp.cpus; i++) {
+        cpu = IA64_CPU(object_new(machine->cpu_type));
+        cpu->alat_full = ia64_vpc_alat_full;
+        cpu->env.alat_full = ia64_vpc_alat_full;
+        object_property_set_bool(OBJECT(cpu), "start-powered-off", i != 0,
+                                 &error_abort);
+        qdev_realize_and_unref(DEVICE(cpu), NULL, &error_fatal);
+    }
     ia64_vpc_map_lsapic();
 
     iosapic = qdev_new(TYPE_IA64_IOSAPIC);
@@ -1187,7 +1215,7 @@ static void ia64_vpc_machine_init(MachineClass *mc)
 
     mc->desc = "IA-64 virtual PC platform";
     mc->init = ia64_vpc_init;
-    mc->max_cpus = 1;
+    mc->max_cpus = IA64_VPC_MAX_CPUS;
     mc->default_cpus = 1;
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("itanium2");
     mc->default_ram_size = 2 * GiB;

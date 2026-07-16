@@ -37,13 +37,14 @@
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL
-#define IA64_FW_HANDOFF_VERSION      7ULL
+#define IA64_FW_HANDOFF_VERSION      8ULL
 #define IA64_FW_HANDOFF_RAM_SIZE     0x10ULL
 #define IA64_FW_HANDOFF_CONSOLE      0x18ULL
 #define IA64_FW_HANDOFF_IDE_DMA      0x20ULL
 #define IA64_FW_HANDOFF_DEBUG        0x28ULL
 #define IA64_FW_HANDOFF_DEBUG_BASE   0x30ULL
 #define IA64_FW_HANDOFF_I8042        0x38ULL
+#define IA64_FW_HANDOFF_CPUS         0x40ULL
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 
 typedef struct ExpectedPCIDevice {
@@ -79,7 +80,8 @@ static void test_acpi_reset_register(void)
     qtest_quit(qts);
 }
 
-static void assert_firmware_handoff(QTestState *qts, uint64_t i8042)
+static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
+                                    uint64_t cpus)
 {
     g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR), ==,
                     IA64_FW_HANDOFF_MAGIC);
@@ -98,13 +100,15 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042)
                                IA64_FW_HANDOFF_DEBUG_BASE), ==, 0);
     g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
                                IA64_FW_HANDOFF_I8042), ==, i8042);
+    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
+                               IA64_FW_HANDOFF_CPUS), ==, cpus);
 }
 
 static void test_firmware_handoff_defaults(void)
 {
     QTestState *qts = ia64_vpc_start(NULL);
 
-    assert_firmware_handoff(qts, 1);
+    assert_firmware_handoff(qts, 1, 1);
     qtest_quit(qts);
 }
 
@@ -113,8 +117,48 @@ static void test_firmware_handoff_i8042_off(void)
     QTestState *qts = qtest_init("-machine ia64-vpc,i8042=off "
                                  "-m 256M -S");
 
-    assert_firmware_handoff(qts, 0);
+    assert_firmware_handoff(qts, 0, 1);
     qtest_quit(qts);
+}
+
+static void test_smp_topology(gconstpointer opaque)
+{
+    uint64_t count = GPOINTER_TO_UINT(opaque);
+    g_autofree char *args = g_strdup_printf("-smp %" PRIu64, count);
+    QTestState *qts = ia64_vpc_start(args);
+    g_autoptr(QDict) response = NULL;
+    QList *cpus;
+
+    assert_firmware_handoff(qts, 1, count);
+    response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
+    g_assert(qdict_haskey(response, "return"));
+    cpus = qdict_get_qlist(response, "return");
+    g_assert_cmpuint(qlist_size(cpus), ==, count);
+    qtest_quit(qts);
+}
+
+static void test_smp_rejects_full_alat(void)
+{
+    const char *argv[] = {
+        qtest_qemu_binary(NULL),
+        "-machine", "ia64-vpc,alat=full",
+        "-smp", "2",
+        "-display", "none",
+        NULL,
+    };
+    g_autofree char *stderr_text = NULL;
+    g_autoptr(GError) error = NULL;
+    int wait_status;
+
+    g_assert_true(g_spawn_sync(NULL, (char **)argv, NULL,
+                               G_SPAWN_STDOUT_TO_DEV_NULL,
+                               NULL, NULL, NULL, &stderr_text,
+                               &wait_status, &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 1);
+    g_assert_nonnull(strstr(stderr_text,
+                            "full ALAT emulation is not SMP-safe"));
 }
 
 static bool rtc_value_is_current(uint64_t value)
@@ -428,6 +472,8 @@ static void test_sparse_io_pm_register(void)
 
 int main(int argc, char **argv)
 {
+    unsigned cpus;
+
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ia64-vpc/acpi-reset-register",
                    test_acpi_reset_register);
@@ -435,6 +481,14 @@ int main(int argc, char **argv)
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
                    test_firmware_handoff_i8042_off);
+    for (cpus = 1; cpus <= 4; cpus++) {
+        g_autofree char *path =
+            g_strdup_printf("/ia64-vpc/smp/topology/%u", cpus);
+
+        qtest_add_data_func(path, GUINT_TO_POINTER(cpus), test_smp_topology);
+    }
+    qtest_add_func("/ia64-vpc/smp/reject-full-alat",
+                   test_smp_rejects_full_alat);
     qtest_add_func("/ia64-vpc/input/default-usb",
                    test_default_usb_input);
     qtest_add_func("/ia64-vpc/rtc/aligned-read", test_rtc_aligned_read);

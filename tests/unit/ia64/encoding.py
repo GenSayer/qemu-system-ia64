@@ -3385,9 +3385,10 @@ def require_exception(name, bundles, excp, fault_ip=None, fault_imm=None,
                 expected["fault_ip"] = fault_ip
             if fault_imm is not None:
                 expected["fault_imm"] = fault_imm
+            # The faulting IP can also be the initial IP.  Complete on the
+            # exception state so an early QMP stop cannot observe reset state.
             run_program(
-                qemu, bundles, entry=entry, terminal_ip=fault_ip,
-                expected=expected, name=name)
+                qemu, bundles, entry=entry, expected=expected, name=name)
             return
 
         setup = 0x100000
@@ -7396,7 +7397,7 @@ test_ld8_c_clr_address_mismatch_reloads = require_registers(
     ], {"ip": 0x50, "r4": CHECK_LOAD_MISMATCH_DATA}, entry=0x10)
 
 test_ld16_loads_gr_and_csd = require_registers("ld16_loads_gr_and_csd", [
-    (0x10, 0x00, addl(3, 0x100, 0), addl(4, 0x108, 0),
+    (0x10, 0x00, addl(3, 0x104, 0), addl(4, 0x10c, 0),
      nop_i()),
     (0x20, *movl_mlx(16, 0x0123456789abcdef)),
     (0x30, *movl_mlx(17, 0xfedcba9876543210)),
@@ -7440,7 +7441,7 @@ test_ld16_acq_hint_decode = require_registers("ld16_acq_hint_decode", [
 }, entry=0x10)
 
 test_st16_stores_gr_and_csd = require_registers("st16_stores_gr_and_csd", [
-    (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x208, 0),
+    (0x10, 0x00, addl(3, 0x204, 0), addl(4, 0x20c, 0),
      nop_i()),
     (0x20, *movl_mlx(15, 0x0123456789abcdef)),
     (0x30, *movl_mlx(5, 0xfedcba9876543210)),
@@ -7577,9 +7578,9 @@ test_data_big_endian_cmpxchg4 = require_registers(
 
 test_data_big_endian_stf_spill_ldf_fill = require_registers(
     "data_big_endian_stf_spill_ldf_fill", [
-        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x205, 0),
-         addl(5, 0x207, 0)),
-        (0x20, 0x00, addl(6, 0x208, 0), addl(7, 0x20f, 0),
+        (0x10, 0x00, addl(3, 0x204, 0), addl(4, 0x209, 0),
+         addl(5, 0x20b, 0)),
+        (0x20, 0x00, addl(6, 0x20c, 0), addl(7, 0x213, 0),
          nop_i()),
         (0x30, *movl_mlx(16, 0x1122334455667788)),
         (0x40, 0x09, setf_sig(8, 16), nop_i(),
@@ -7615,9 +7616,9 @@ test_data_big_endian_stf_spill_ldf_fill = require_registers(
 
 test_data_big_endian_ldfe_stfe = require_registers(
     "data_big_endian_ldfe_stfe", [
-        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x210, 0),
-         addl(5, 0x211, 0)),
-        (0x20, 0x00, addl(6, 0x212, 0), addl(7, 0x219, 0),
+        (0x10, 0x00, addl(3, 0x204, 0), addl(4, 0x224, 0),
+         addl(5, 0x225, 0)),
+        (0x20, 0x00, addl(6, 0x226, 0), addl(7, 0x22d, 0),
          adds(16, 0x3f, 0)),
         (0x30, 0x00, adds(17, 0xff, 0), adds(18, 0x80, 0),
          nop_i()),
@@ -7625,7 +7626,7 @@ test_data_big_endian_ldfe_stfe = require_registers(
          nop_i()),
         (0x50, 0x00, st1_postinc(3, 18, 1), nop_i(),
          nop_i()),
-        (0x60, 0x00, addl(3, 0x200, 0), nop_i(),
+        (0x60, 0x00, addl(3, 0x204, 0), nop_i(),
          nop_i()),
         (0x70, 0x00, sum_um(IA64_PSR_BE), nop_i(),
          nop_i()),
@@ -8862,7 +8863,7 @@ test_ldfp8_postinc_decode = require_registers("ldfp8_postinc_decode", [
 
 test_ldf_fill_postinc_decode = require_registers("ldf_fill_postinc_decode", [
     (0x10, *movl_mlx(2, 0x123456789abcdef0)),
-    (0x20, 0x00, addl(3, 0x200, 0), addl(7, 0x208, 0),
+    (0x20, 0x00, addl(3, 0x204, 0), addl(7, 0x20c, 0),
      nop_i()),
     (0x30, 0x00, addl(5, 0x1003e, 0), nop_i(),
      nop_i()),
@@ -8876,7 +8877,7 @@ test_ldf_fill_postinc_decode = require_registers("ldf_fill_postinc_decode", [
      br_cond(0x70, 0x70)),
 ], {
     "ip": 0x70,
-    "r3": 0x1d0,
+    "r3": 0x1d4,
     "r4": 0x123456789abcdef0,
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
@@ -8934,7 +8935,7 @@ test_ldfs_preserves_single_nan_payload = require_registers(
 test_ldfps_expands_both_single_values = require_registers(
     "ldfps_expands_both_single_values", [
         (0x10, *movl_mlx(2, 0xc02000003f800000)),
-        (0x20, 0x00, addl(3, 0x200, 0), nop_i(), nop_i()),
+        (0x20, 0x00, addl(3, 0x204, 0), nop_i(), nop_i()),
         (0x30, 0x00, st8(3, 2), nop_i(), nop_i()),
         (0x40, 0x00, ldfps(6, 7, 3), nop_i(), nop_i()),
         (0x50, 0x09, getf_s(4, 6), getf_s(5, 7), nop_i()),
@@ -14441,6 +14442,27 @@ test_pal_halt_light_wakes_on_due_itm = require_registers(
         "r31": 0x5a,
     }, entry=0x10)
 
+test_pal_halt_light_stops_at_pal_continuation = require_registers(
+    "pal_halt_light_stops_at_pal_continuation", [
+        (0x10, *movl_mlx(28, PAL_HALT_LIGHT)),
+        (0x20, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x20, PAL_PROC_ENTRY)),
+        (0x30, 0x00, nop_m(), adds(31, 0x5a, 0),
+         nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(),
+         br_cond(0x40, 0x40)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(),
+         nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": PAL_PROC_ENTRY + 0x10,
+        "halted": 1,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r31": 0,
+    }, entry=0x10)
+
 test_pal_halt_wakes_on_due_itm = require_registers(
     "pal_halt_wakes_on_due_itm", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
@@ -18774,9 +18796,7 @@ test_pal_mem_attrib_reserved_arg = require_registers(
 test_pal_bus_get_features = require_registers("pal_bus_get_features",
     pal_call_program(PAL_BUS_GET_FEATURES),
     {"ip": 0x30, "r28": PAL_BUS_GET_FEATURES, "r8": 0,
-     "r9": ((1 << 0) | (1 << 1) | (1 << 2) | (1 << 4) |
-            (1 << 8) | (1 << 16)),
-     "r10": 0, "r11": 0}, entry=0x10)
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
 test_pal_bus_get_features_reserved_arg = require_registers(
     "pal_bus_get_features_reserved_arg",
@@ -18890,8 +18910,9 @@ test_pal_perf_mon_info = require_registers("pal_perf_mon_info", [
     (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
     (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
 ], {"ip": 0xc0, "r28": PAL_PERF_MON_INFO, "r8": 0,
-    "r9": 0, "r10": 0, "r11": 0,
-    "r20": 0, "r21": 0, "r22": 0, "r23": 0, "r24": 0, "r25": 0},
+    "r9": 0x08123004, "r10": 0, "r11": 0,
+    "r20": 0x3fff, "r21": 0, "r22": 0x3ffff, "r23": 0,
+    "r24": 0xf0, "r25": 0xf0},
     entry=0x10)
 
 test_pal_perf_mon_info_bad_buffer = require_registers(
@@ -19013,6 +19034,33 @@ test_pal_copy_pal_entry_callable = require_registers(
          br_cond(0xb0, 0xb0)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
         (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ],
+    {"ip": 0xb0, "r28": PAL_VERSION, "r8": 0,
+     "r9": PAL_VERSION_VALUE, "r10": PAL_VERSION_VALUE, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_ap_entry_callable = require_registers(
+    "pal_copy_pal_ap_entry_callable", [
+        (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+        (0x20, *movl_mlx(28, PAL_COPY_PAL)),
+        (0x30, *movl_mlx(32, PAL_COPY_PAL)),
+        (0x40, *movl_mlx(33, PAL_COPY_TARGET | (1 << 63))),
+        (0x50, *movl_mlx(34, PAL_COPY_BUFFER_SIZE)),
+        (0x60, *movl_mlx(35, 1)),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, *movl_mlx(28, PAL_VERSION)),
+        (0x90, 0x00, nop_m(), addl(29, 0, 0), addl(30, 0, 0)),
+        (0xa0, 0x10, nop_m(), addl(31, 0, 0),
+         br_call(0, 0xa0, PAL_COPY_TARGET)),
+        (0xb0, 0x10, nop_m(), nop_i(),
+         br_cond(0xb0, 0xb0)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+        (PAL_COPY_TARGET, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_COPY_TARGET + 0x10, 0x10, nop_m(), nop_i(),
          br_ret(0)),
     ],
     {"ip": 0xb0, "r28": PAL_VERSION, "r8": 0,
@@ -21306,6 +21354,8 @@ TEST_NAMES = {
         test_sapic_extint_masks_external_until_eoi,
     "sapic_same_class_higher_vector_preempts":
         test_sapic_same_class_higher_vector_preempts,
+    "pal_halt_light_stops_at_pal_continuation":
+        test_pal_halt_light_stops_at_pal_continuation,
     "pal_halt_light_wakes_on_due_itm": test_pal_halt_light_wakes_on_due_itm,
     "pal_halt_wakes_on_due_itm": test_pal_halt_wakes_on_due_itm,
     "masked_itv_discards_due_timer": test_masked_itv_discards_due_timer,
@@ -21796,6 +21846,7 @@ TEST_NAMES = {
     "pal_copy_info_ia32_unsupported": test_pal_copy_info_ia32_unsupported,
     "pal_copy_info_platform_for_ia64": test_pal_copy_info_platform_for_ia64,
     "pal_copy_pal_entry_callable": test_pal_copy_pal_entry_callable,
+    "pal_copy_pal_ap_entry_callable": test_pal_copy_pal_ap_entry_callable,
     "pal_copy_pal_bad_alloc": test_pal_copy_pal_bad_alloc,
     "pal_copy_pal_bad_alignment": test_pal_copy_pal_bad_alignment,
     "pal_copy_pal_bad_processor": test_pal_copy_pal_bad_processor,

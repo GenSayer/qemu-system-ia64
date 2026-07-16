@@ -8,11 +8,20 @@
 
     .section .text._start, "ax"
     .equ FW_BOOTSTRAP_STACK_TOP, 0x08000000
+    .equ FW_AP_BOOTSTRAP_STACK_TOP, 0x00100000
     .global _start
     .type _start, @function
     .proc _start
     .explicit
 _start:
+    /* Secondary processors resume here when the platform wake IPI arrives. */
+    mov r14 = cr.lid
+    ;;
+    cmp.ne p6, p7 = r14, r0
+    ;;
+(p6) br.cond.sptk.few start_secondary
+    ;;
+
     /*
      * Use the minimum-memory stack until the machine handoff has been
      * validated.  start_after_pal moves to the selected RAM-top stack before
@@ -108,3 +117,65 @@ start_after_pal:
     ;;
     .endp start_after_pal
     .size start_after_pal, . - start_after_pal
+
+    .section .text.start_secondary, "ax"
+    .type start_secondary, @function
+    .proc start_secondary
+    .explicit
+start_secondary:
+    movl r1 = __gp
+    ;;
+    mov r14 = cr.lid
+    ;;
+    extr.u r14 = r14, 24, 8
+    ;;
+    shl r15 = r14, 16
+    movl r12 = (FW_AP_BOOTSTRAP_STACK_TOP - 16)
+    ;;
+    sub r12 = r12, r15
+    ;;
+    alloc r2 = ar.pfs, 0, 3, 1, 0
+    ;;
+    mov r32 = r14
+    mov r35 = r14
+    ;;
+    br.call.sptk.many b0 = fw_ap_stack_top
+    ;;
+    adds r12 = -16, r8
+    mov r35 = r32
+    ;;
+    br.call.sptk.many b0 = firmware_ap_main
+    ;;
+    break 0
+    ;;
+    .endp start_secondary
+    .size start_secondary, . - start_secondary
+
+    .section .text.fw_pal_halt_light, "ax"
+    .global fw_pal_halt_light
+    .type fw_pal_halt_light, @function
+    .proc fw_pal_halt_light
+    .explicit
+fw_pal_halt_light:
+    alloc r33 = ar.pfs, 0, 2, 0, 0
+    ;;
+    mov r32 = b0
+    movl r28 = 0x1d
+    ;;
+    movl r14 = pal_proc_entry
+    ;;
+    mov b6 = r14
+    movl r14 = 1f
+    ;;
+    mov b0 = r14
+    ;;
+    br.sptk.many b6
+    ;;
+1:
+    mov b0 = r32
+    mov ar.pfs = r33
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_pal_halt_light
+    .size fw_pal_halt_light, . - fw_pal_halt_light

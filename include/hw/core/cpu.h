@@ -269,6 +269,7 @@ struct CPUTLBEntryFull {
         } arm;
         struct {
             uint8_t speculation;
+            uint8_t memory_attribute;
         } ia64;
     } extra;
 };

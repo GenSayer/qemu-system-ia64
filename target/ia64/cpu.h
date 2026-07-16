@@ -122,6 +122,17 @@
 #define IA64_LOCAL_SAPIC_SIZE 0x00200000ULL
 #define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
 
+#define IA64_SAPIC_LID_ID_SHIFT   24
+#define IA64_SAPIC_LID_EID_SHIFT  16
+#define IA64_SAPIC_LID_ID_MASK    (0xffULL << IA64_SAPIC_LID_ID_SHIFT)
+#define IA64_SAPIC_LID_EID_MASK   (0xffULL << IA64_SAPIC_LID_EID_SHIFT)
+
+static inline uint64_t ia64_sapic_lid(uint8_t id, uint8_t eid)
+{
+    return ((uint64_t)id << IA64_SAPIC_LID_ID_SHIFT) |
+           ((uint64_t)eid << IA64_SAPIC_LID_EID_SHIFT);
+}
+
 #define IA64_RR_RID_MASK   (0xffffffULL << 8)
 #define IA64_RR_RID_SHIFT  8
 #define IA64_RR_VE         (1ULL << 0)
@@ -1102,6 +1113,7 @@ void ia64_set_psr(CPUIA64State *env, uint64_t value);
 void ia64_set_psr_bn(CPUIA64State *env, bool bank1);
 void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 
+CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
 void ia64_sapic_update_interrupt(CPUIA64State *env);
 bool ia64_sapic_has_pending(CPUIA64State *env);
