@@ -881,7 +881,9 @@ uint32_t vga_mem_readb(VGACommonState *s, hwaddr addr)
 }
 
 /* called for accesses between 0xa0000 and 0xc0000 */
-void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
+static bool vga_mem_writeb_internal(VGACommonState *s, hwaddr addr,
+                                    uint32_t val, hwaddr *dirty_start,
+                                    hwaddr *dirty_end)
 {
     int memory_map_mode, write_mode, b, func_select, mask;
     uint32_t write_mask, bit_mask, set_mask;
@@ -898,19 +900,19 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
         break;
     case 1:
         if (addr >= 0x10000)
-            return;
+            return false;
         addr += s->bank_offset;
         break;
     case 2:
         addr -= 0x10000;
         if (addr >= 0x8000)
-            return;
+            return false;
         break;
     default:
     case 3:
         addr -= 0x18000;
         if (addr >= 0x8000)
-            return;
+            return false;
         break;
     }
 
@@ -953,7 +955,7 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
     }
 
     if (addr * sizeof(uint32_t) >= s->vram_size) {
-        return;
+        return false;
     }
 
     if (sr(s, VGA_SEQ_MEMORY_MODE) & VGA_SR04_CHN_4M) {
@@ -963,9 +965,11 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
             printf("vga: chain4: [0x" HWADDR_FMT_plx "]\n", addr);
 #endif
             s->plane_updated |= mask; /* only used to detect font change */
-            memory_region_set_dirty(&s->vram, addr, 1);
+            *dirty_start = (addr << 2) | plane;
+            *dirty_end = *dirty_start + 1;
+            return true;
         }
-        return;
+        return false;
     }
 
     /* standard VGA latched access */
@@ -1039,7 +1043,20 @@ do_write:
     printf("vga: latch: [0x" HWADDR_FMT_plx "] mask=0x%08x val=0x%08x\n",
            addr * 4, write_mask, val);
 #endif
-    memory_region_set_dirty(&s->vram, addr << 2, sizeof(uint32_t));
+    *dirty_start = addr << 2;
+    *dirty_end = *dirty_start + sizeof(uint32_t);
+    return true;
+}
+
+void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
+{
+    hwaddr dirty_start;
+    hwaddr dirty_end;
+
+    if (vga_mem_writeb_internal(s, addr, val, &dirty_start, &dirty_end)) {
+        memory_region_set_dirty(&s->vram, dirty_start,
+                                dirty_end - dirty_start);
+    }
 }
 
 typedef void *vga_draw_line_func(VGACommonState *s1, uint8_t *d,
@@ -2091,25 +2108,59 @@ static uint64_t vga_mem_read(void *opaque, hwaddr addr,
                              unsigned size)
 {
     VGACommonState *s = opaque;
+    uint64_t value = 0;
+    unsigned i;
 
-    return vga_mem_readb(s, addr);
+    for (i = 0; i < size; i++) {
+        value |= (uint64_t)vga_mem_readb(s, addr + i) << (i * 8);
+    }
+    return value;
 }
 
 static void vga_mem_write(void *opaque, hwaddr addr,
                           uint64_t data, unsigned size)
 {
     VGACommonState *s = opaque;
+    hwaddr dirty_start = 0;
+    hwaddr dirty_end = 0;
+    bool dirty = false;
+    unsigned i;
 
-    vga_mem_writeb(s, addr, data);
+    for (i = 0; i < size; i++) {
+        hwaddr byte_start;
+        hwaddr byte_end;
+
+        if (vga_mem_writeb_internal(s, addr + i, data >> (i * 8),
+                                    &byte_start, &byte_end)) {
+            if (!dirty) {
+                dirty_start = byte_start;
+                dirty_end = byte_end;
+                dirty = true;
+            } else {
+                dirty_start = MIN(dirty_start, byte_start);
+                dirty_end = MAX(dirty_end, byte_end);
+            }
+        }
+    }
+    if (dirty) {
+        memory_region_set_dirty(&s->vram, dirty_start,
+                                dirty_end - dirty_start);
+    }
 }
 
 const MemoryRegionOps vga_mem_ops = {
     .read = vga_mem_read,
     .write = vga_mem_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
+    },
     .impl = {
         .min_access_size = 1,
-        .max_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
     },
 };
 

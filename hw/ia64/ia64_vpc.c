@@ -762,6 +762,13 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
         return;
     }
 
+    if (object_property_find(OBJECT(pci_dev),
+                             "x-vbe-legacy-mode-switch")) {
+        object_property_set_bool(OBJECT(pci_dev),
+                                 "x-vbe-legacy-mode-switch", true,
+                                 &error_abort);
+    }
+
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
                              IA64_VGA_FB_PCI_BASE, 4);
     if (pci_dev->io_regions[1].memory != NULL) {

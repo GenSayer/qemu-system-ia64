@@ -7877,6 +7877,20 @@ static void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value)
     pattern |= pattern << 8;
     pattern |= pattern << 16;
     pattern |= pattern << 32;
+    while (Size >= 64U) {
+        UINT64 *wide = (UINT64 *)p;
+
+        wide[0] = pattern;
+        wide[1] = pattern;
+        wide[2] = pattern;
+        wide[3] = pattern;
+        wide[4] = pattern;
+        wide[5] = pattern;
+        wide[6] = pattern;
+        wide[7] = pattern;
+        p += 64U;
+        Size -= 64U;
+    }
     while (Size >= 8U) {
         *(UINT64 *)p = pattern;
         p += 8;
@@ -7992,13 +8006,8 @@ static void vga_enable_attribute_output(void)
 
 static void graphics_clear_framebuffer(void)
 {
-    volatile UINT32 *fb = (volatile UINT32 *)(UINTN)VGA_FB_BASE;
-    UINTN pixels = (UINTN)mGraphicsWidth * (UINTN)mGraphicsHeight;
-    UINTN i;
-
-    for (i = 0; i < pixels; i++) {
-        fb[i] = 0;
-    }
+    fw_set_mem((VOID *)(UINTN)VGA_FB_BASE,
+               (UINTN)mGraphicsStride * mGraphicsHeight, 0);
 }
 
 static BOOLEAN graphics_mode_matches(UINT32 ModeNumber,
@@ -8225,29 +8234,117 @@ static BOOLEAN graphics_rect_in_bounds(UINTN X, UINTN Y, UINTN Width,
            Height <= (UINTN)mGraphicsHeight - Y;
 }
 
+/* Direct framebuffer mappings require observable device-memory accesses. */
+typedef volatile UINT32 FW_FRAMEBUFFER_UINT32;
+/* Wide framebuffer stores need the same device-memory semantics. */
+typedef volatile UINT64 FW_FRAMEBUFFER_UINT64;
+
 static void graphics_write_pixel(UINTN X, UINTN Y,
                                  EFI_GRAPHICS_OUTPUT_BLT_PIXEL Pixel)
 {
-    volatile UINT8 *p =
-        (volatile UINT8 *)(UINTN)(VGA_FB_BASE + Y * mGraphicsStride + X * 4U);
+    FW_FRAMEBUFFER_UINT32 *p =
+        (FW_FRAMEBUFFER_UINT32 *)(UINTN)(VGA_FB_BASE +
+                                         Y * mGraphicsStride + X * 4U);
 
-    p[0] = Pixel.Blue;
-    p[1] = Pixel.Green;
-    p[2] = Pixel.Red;
-    p[3] = Pixel.Reserved;
+    *p = (UINT32)Pixel.Blue | ((UINT32)Pixel.Green << 8) |
+         ((UINT32)Pixel.Red << 16) | ((UINT32)Pixel.Reserved << 24);
 }
 
 static EFI_GRAPHICS_OUTPUT_BLT_PIXEL graphics_read_pixel(UINTN X, UINTN Y)
 {
-    volatile UINT8 *p =
-        (volatile UINT8 *)(UINTN)(VGA_FB_BASE + Y * mGraphicsStride + X * 4U);
+    FW_FRAMEBUFFER_UINT32 *p =
+        (FW_FRAMEBUFFER_UINT32 *)(UINTN)(VGA_FB_BASE +
+                                         Y * mGraphicsStride + X * 4U);
     EFI_GRAPHICS_OUTPUT_BLT_PIXEL Pixel;
+    UINT32 value = *p;
 
-    Pixel.Blue = p[0];
-    Pixel.Green = p[1];
-    Pixel.Red = p[2];
-    Pixel.Reserved = p[3];
+    Pixel.Blue = (UINT8)value;
+    Pixel.Green = (UINT8)(value >> 8);
+    Pixel.Red = (UINT8)(value >> 16);
+    Pixel.Reserved = (UINT8)(value >> 24);
     return Pixel;
+}
+
+static void graphics_fill_pixels(UINTN X, UINTN Y, UINTN Width, UINTN Height,
+                                 EFI_GRAPHICS_OUTPUT_BLT_PIXEL Pixel)
+{
+    UINT32 value = (UINT32)Pixel.Blue | ((UINT32)Pixel.Green << 8) |
+                   ((UINT32)Pixel.Red << 16) |
+                   ((UINT32)Pixel.Reserved << 24);
+    UINT64 pair = (UINT64)value | ((UINT64)value << 32);
+    UINTN y;
+
+    for (y = 0; y < Height; y++) {
+        FW_FRAMEBUFFER_UINT32 *dst =
+            (FW_FRAMEBUFFER_UINT32 *)(UINTN)(VGA_FB_BASE +
+                                             (Y + y) * mGraphicsStride +
+                                             X * 4U);
+        UINTN remaining = Width;
+
+        if (remaining != 0 && ((UINTN)dst & 7U) != 0) {
+            *dst++ = value;
+            remaining--;
+        }
+        while (remaining >= 16U) {
+            FW_FRAMEBUFFER_UINT64 *wide = (FW_FRAMEBUFFER_UINT64 *)dst;
+
+            wide[0] = pair;
+            wide[1] = pair;
+            wide[2] = pair;
+            wide[3] = pair;
+            wide[4] = pair;
+            wide[5] = pair;
+            wide[6] = pair;
+            wide[7] = pair;
+            dst += 16;
+            remaining -= 16U;
+        }
+        while (remaining >= 2U) {
+            *(FW_FRAMEBUFFER_UINT64 *)dst = pair;
+            dst += 2;
+            remaining -= 2U;
+        }
+        if (remaining != 0) {
+            *dst = value;
+        }
+    }
+}
+
+static BOOLEAN graphics_buffer_rect_valid(UINTN X, UINTN Y,
+                                          UINTN Width, UINTN Height,
+                                          UINTN Delta)
+{
+    UINTN max = ~(UINTN)0;
+    UINTN row_bytes;
+    UINTN last_row;
+
+    if (Width > max / sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL) ||
+        X > max / sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL) - Width) {
+        return 0;
+    }
+    row_bytes = sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL) * (X + Width);
+    if (Delta < row_bytes || Y > max - (Height - 1U)) {
+        return 0;
+    }
+    last_row = Y + Height - 1U;
+    return last_row == 0 || Delta <= (max - row_bytes) / last_row;
+}
+
+static BOOLEAN graphics_pixels_equal(
+    const EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Left,
+    const EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Right, UINTN Count)
+{
+    UINTN i;
+
+    for (i = 0; i < Count; i++) {
+        if (Left[i].Blue != Right[i].Blue ||
+            Left[i].Green != Right[i].Green ||
+            Left[i].Red != Right[i].Red ||
+            Left[i].Reserved != Right[i].Reserved) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static EFI_STATUS graphics_blt(EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer,
@@ -8256,7 +8353,6 @@ static EFI_STATUS graphics_blt(EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer,
                                UINTN DestinationX, UINTN DestinationY,
                                UINTN Width, UINTN Height, UINTN Delta)
 {
-    UINTN x;
     UINTN y;
 
     if ((UINTN)BltOperation >= EfiGraphicsOutputBltOperationMax) {
@@ -8265,10 +8361,6 @@ static EFI_STATUS graphics_blt(EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer,
     if (Width == 0 || Height == 0) {
         return EFI_SUCCESS;
     }
-    if (Delta == 0) {
-        Delta = Width * sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL);
-    }
-
     switch (BltOperation) {
     case EfiBltVideoFill:
         if (BltBuffer == NULL ||
@@ -8276,44 +8368,55 @@ static EFI_STATUS graphics_blt(EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer,
                                      Width, Height)) {
             return EFI_INVALID_PARAMETER;
         }
-        for (y = 0; y < Height; y++) {
-            for (x = 0; x < Width; x++) {
-                graphics_write_pixel(DestinationX + x, DestinationY + y,
-                                     BltBuffer[0]);
-            }
-        }
+        graphics_fill_pixels(DestinationX, DestinationY, Width, Height,
+                             BltBuffer[0]);
         return EFI_SUCCESS;
 
     case EfiBltBufferToVideo:
+        if (Delta == 0) {
+            if (SourceX != 0 || SourceY != 0) {
+                return EFI_INVALID_PARAMETER;
+            }
+            Delta = sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL) * Width;
+        }
         if (BltBuffer == NULL ||
             !graphics_rect_in_bounds(DestinationX, DestinationY,
-                                     Width, Height)) {
+                                     Width, Height) ||
+            !graphics_buffer_rect_valid(SourceX, SourceY, Width, Height,
+                                        Delta)) {
             return EFI_INVALID_PARAMETER;
         }
         for (y = 0; y < Height; y++) {
-            EFI_GRAPHICS_OUTPUT_BLT_PIXEL *src =
-                (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)
-                ((UINT8 *)BltBuffer + (SourceY + y) * Delta) + SourceX;
-            for (x = 0; x < Width; x++) {
-                graphics_write_pixel(DestinationX + x, DestinationY + y,
-                                     src[x]);
-            }
+            VOID *dst = (VOID *)(UINTN)(VGA_FB_BASE +
+                                        (DestinationY + y) * mGraphicsStride +
+                                        DestinationX * 4U);
+            const VOID *src = (UINT8 *)BltBuffer + (SourceY + y) * Delta +
+                              SourceX * 4U;
+
+            fw_copy_mem_fast(dst, src, Width * 4U);
         }
         return EFI_SUCCESS;
 
     case EfiBltVideoToBltBuffer:
+        if (Delta == 0) {
+            if (DestinationX != 0 || DestinationY != 0) {
+                return EFI_INVALID_PARAMETER;
+            }
+            Delta = sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL) * Width;
+        }
         if (BltBuffer == NULL ||
-            !graphics_rect_in_bounds(SourceX, SourceY, Width, Height)) {
+            !graphics_rect_in_bounds(SourceX, SourceY, Width, Height) ||
+            !graphics_buffer_rect_valid(DestinationX, DestinationY,
+                                        Width, Height, Delta)) {
             return EFI_INVALID_PARAMETER;
         }
         for (y = 0; y < Height; y++) {
-            EFI_GRAPHICS_OUTPUT_BLT_PIXEL *dst =
-                (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)
-                ((UINT8 *)BltBuffer + (DestinationY + y) * Delta) +
-                DestinationX;
-            for (x = 0; x < Width; x++) {
-                dst[x] = graphics_read_pixel(SourceX + x, SourceY + y);
-            }
+            VOID *dst = (UINT8 *)BltBuffer + (DestinationY + y) * Delta +
+                        DestinationX * 4U;
+            const VOID *src = (const VOID *)(UINTN)(
+                VGA_FB_BASE + (SourceY + y) * mGraphicsStride + SourceX * 4U);
+
+            fw_copy_mem_fast(dst, src, Width * 4U);
         }
         return EFI_SUCCESS;
 
@@ -8326,22 +8429,25 @@ static EFI_STATUS graphics_blt(EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer,
         if (DestinationY > SourceY ||
             (DestinationY == SourceY && DestinationX > SourceX)) {
             for (y = Height; y > 0; y--) {
-                for (x = Width; x > 0; x--) {
-                    EFI_GRAPHICS_OUTPUT_BLT_PIXEL Pixel =
-                        graphics_read_pixel(SourceX + x - 1,
-                                            SourceY + y - 1);
-                    graphics_write_pixel(DestinationX + x - 1,
-                                         DestinationY + y - 1, Pixel);
-                }
+                VOID *dst = (VOID *)(UINTN)(
+                    VGA_FB_BASE + (DestinationY + y - 1U) * mGraphicsStride +
+                    DestinationX * 4U);
+                const VOID *src = (const VOID *)(UINTN)(
+                    VGA_FB_BASE + (SourceY + y - 1U) * mGraphicsStride +
+                    SourceX * 4U);
+
+                fw_copy_mem(dst, src, Width * 4U);
             }
         } else {
             for (y = 0; y < Height; y++) {
-                for (x = 0; x < Width; x++) {
-                    EFI_GRAPHICS_OUTPUT_BLT_PIXEL Pixel =
-                        graphics_read_pixel(SourceX + x, SourceY + y);
-                    graphics_write_pixel(DestinationX + x, DestinationY + y,
-                                         Pixel);
-                }
+                VOID *dst = (VOID *)(UINTN)(
+                    VGA_FB_BASE + (DestinationY + y) * mGraphicsStride +
+                    DestinationX * 4U);
+                const VOID *src = (const VOID *)(UINTN)(
+                    VGA_FB_BASE + (SourceY + y) * mGraphicsStride +
+                    SourceX * 4U);
+
+                fw_copy_mem(dst, src, Width * 4U);
             }
         }
         return EFI_SUCCESS;
@@ -8499,12 +8605,15 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
 {
     EFI_GRAPHICS_OUTPUT_BLT_PIXEL marker;
     EFI_GRAPHICS_OUTPUT_BLT_PIXEL observed;
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL source[20];
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL output[20];
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mode_info = NULL;
     UINT32 saved_mode = mGopMode.Mode;
     BOOLEAN saved_active = mGraphicsActive;
     BOOLEAN saved_handoff = mGraphicsHandoffClaimed;
     UINTN info_size = 0;
     UINTN expected_size;
+    UINTN i;
     EFI_STATUS st;
     BOOLEAN ok = 1;
 
@@ -8618,6 +8727,47 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
     st = gop_blt(&mGopProto, NULL, EfiBltVideoToVideo,
                  0, 0, 2, 0, 1, 1, 0);
     if (st != EFI_SUCCESS || !mGraphicsHandoffClaimed) {
+        ok = 0;
+    }
+
+    for (i = 0; i < FW_ARRAY_SIZE(source); i++) {
+        source[i].Blue = (UINT8)(i * 3U + 1U);
+        source[i].Green = (UINT8)(i * 5U + 2U);
+        source[i].Red = (UINT8)(i * 7U + 3U);
+        source[i].Reserved = (UINT8)(i * 11U + 4U);
+    }
+    fw_set_mem(output, sizeof(output), 0);
+    st = gop_blt(&mGopProto, source, EfiBltBufferToVideo,
+                 1, 1, 4, 4, 3, 2, 5U * sizeof(source[0]));
+    if (st != EFI_SUCCESS) {
+        ok = 0;
+    }
+    st = gop_blt(&mGopProto, output, EfiBltVideoToBltBuffer,
+                 4, 4, 1, 1, 3, 2, 5U * sizeof(output[0]));
+    if (st != EFI_SUCCESS ||
+        !graphics_pixels_equal(&source[6], &output[6], 3) ||
+        !graphics_pixels_equal(&source[11], &output[11], 3)) {
+        ok = 0;
+    }
+    st = gop_blt(&mGopProto, NULL, EfiBltVideoToVideo,
+                 4, 4, 5, 5, 3, 2, 0);
+    fw_set_mem(output, sizeof(output), 0);
+    if (st != EFI_SUCCESS ||
+        gop_blt(&mGopProto, output, EfiBltVideoToBltBuffer,
+                5, 5, 1, 1, 3, 2, 5U * sizeof(output[0])) != EFI_SUCCESS ||
+        !graphics_pixels_equal(&source[6], &output[6], 3) ||
+        !graphics_pixels_equal(&source[11], &output[11], 3)) {
+        ok = 0;
+    }
+    if (gop_blt(&mGopProto, source, EfiBltBufferToVideo,
+                1, 0, 4, 4, 2, 1, 2U * sizeof(source[0])) !=
+        EFI_INVALID_PARAMETER) {
+        ok = 0;
+    }
+    if (gop_blt(&mGopProto, source, EfiBltBufferToVideo,
+                1, 0, 4, 4, 2, 1, 0) != EFI_INVALID_PARAMETER ||
+        gop_blt(&mGopProto, output, EfiBltVideoToBltBuffer,
+                4, 4, 0, 1, 2, 1, 0) != EFI_INVALID_PARAMETER) {
         ok = 0;
     }
 

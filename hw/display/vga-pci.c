@@ -193,6 +193,21 @@ static void vga_set_big_endian_fb(Object *obj, bool value, Error **errp)
     d->vga.big_endian_fb = value;
 }
 
+static bool vga_get_vbe_legacy_mode_switch(Object *obj, Error **errp)
+{
+    PCIVGAState *d = PCI_VGA(PCI_DEVICE(obj));
+
+    return d->vga.vbe_legacy_mode_switch;
+}
+
+static void vga_set_vbe_legacy_mode_switch(Object *obj, bool value,
+                                           Error **errp)
+{
+    PCIVGAState *d = PCI_VGA(PCI_DEVICE(obj));
+
+    d->vga.vbe_legacy_mode_switch = value;
+}
+
 static const MemoryRegionOps pci_vga_qext_ops = {
     .read = pci_vga_qext_read,
     .write = pci_vga_qext_write,
@@ -389,6 +404,9 @@ static void vga_class_init(ObjectClass *klass, const void *data)
     /* Expose framebuffer byteorder via QOM */
     object_class_property_add_bool(klass, "big-endian-framebuffer",
                                    vga_get_big_endian_fb, vga_set_big_endian_fb);
+    object_class_property_add_bool(klass, "x-vbe-legacy-mode-switch",
+                                   vga_get_vbe_legacy_mode_switch,
+                                   vga_set_vbe_legacy_mode_switch);
 }
 
 static void secondary_class_init(ObjectClass *klass, const void *data)
