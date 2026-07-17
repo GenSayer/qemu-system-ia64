@@ -432,6 +432,7 @@ typedef enum IA64Exception {
     IA64_EXCP_FP_TRAP = 29,
     IA64_EXCP_DISABLED_ISA_TRANSITION = 30,
     IA64_EXCP_DISABLED_FP = 31,
+    IA64_EXCP_UNSUPPORTED_DATA_REFERENCE = 32,
     IA64_EXCP_MAX,
 } IA64Exception;
 
@@ -1219,6 +1220,13 @@ struct ArchCPU {
     CPUIA64State env;
     QEMUTimer *itm_timer;
     bool alat_full;
+    uint32_t socket_id;
+    uint32_t core_id;
+    uint32_t thread_id;
+    uint32_t cores_per_socket;
+    uint32_t threads_per_core;
+    uint32_t package_base;
+    uint32_t package_cpus;
 };
 
 struct IA64CPUClass {
@@ -1226,11 +1234,22 @@ struct IA64CPUClass {
 
     DeviceRealize parent_realize;
     ResettablePhases parent_phases;
+
+    /* Guest-visible processor-model data. */
+    uint64_t cpuid_version;
+    uint64_t cpuid_features;
+    bool has_native_ia32;
+    bool is_montecito;
 };
 
 static inline IA64CPU *ia64_cpu_from_cpu_state(CPUState *cs)
 {
     return container_of(cs, IA64CPU, parent_obj);
+}
+
+static inline IA64CPUClass *ia64_env_cpu_class(CPUIA64State *env)
+{
+    return IA64_CPU_GET_CLASS(ia64_cpu_from_cpu_state(env_cpu(env)));
 }
 
 #endif

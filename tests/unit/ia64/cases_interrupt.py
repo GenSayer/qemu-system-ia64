@@ -47,6 +47,8 @@ CASE_NAMES = (
     'rfi_resumes_at_ipsr_ri_slot',
     'rfi_retries_interrupted_current_frame_fill',
     'rfi_target_rse_fill_fault_uses_restored_psr',
+    'rfi_montecito_native_ia32_disabled_fault',
+    'rfi_montecito_uncollected_transition_preserves_target',
     'rfi_to_ia32_unsupported_aborts_with_byte_ip',
     'sapic_extint_masks_external_until_eoi',
     'sapic_same_class_higher_vector_preempts',

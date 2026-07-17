@@ -1224,9 +1224,22 @@ static void ia64_vpc_init(MachineState *machine)
     ia64_vpc_write_firmware_handoff(machine);
 
     for (i = 0; i < machine->smp.cpus; i++) {
+        uint32_t threads = MAX(machine->smp.threads, 1U);
+        uint32_t cores = MAX(machine->smp.cores, 1U);
+        uint32_t per_socket = threads * cores;
+        uint32_t package_base = (i / per_socket) * per_socket;
+
         cpu = IA64_CPU(object_new(machine->cpu_type));
         cpu->alat_full = ia64_vpc_alat_full;
         cpu->env.alat_full = ia64_vpc_alat_full;
+        cpu->socket_id = i / per_socket;
+        cpu->core_id = (i / threads) % cores;
+        cpu->thread_id = i % threads;
+        cpu->cores_per_socket = cores;
+        cpu->threads_per_core = threads;
+        cpu->package_base = package_base;
+        cpu->package_cpus = MIN(per_socket,
+                                machine->smp.cpus - package_base);
         object_property_set_bool(OBJECT(cpu), "start-powered-off", i != 0,
                                  &error_abort);
         qdev_realize_and_unref(DEVICE(cpu), NULL, &error_fatal);
@@ -1341,7 +1354,8 @@ static void ia64_vpc_machine_init(MachineClass *mc)
     mc->init = ia64_vpc_init;
     mc->max_cpus = IA64_VPC_MAX_CPUS;
     mc->default_cpus = 1;
-    mc->default_cpu_type = IA64_CPU_TYPE_NAME("itanium2");
+    mc->default_cpu_type = IA64_CPU_TYPE_NAME("montecito");
+    mc->smp_props.prefer_sockets = true;
     mc->default_ram_size = 2 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
     mc->default_display = "ati";

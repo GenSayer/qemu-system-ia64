@@ -127,6 +127,7 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
     [IA64_EXCP_FP_TRAP]          = 0x5d00,
     [IA64_EXCP_DISABLED_ISA_TRANSITION] = 0x5400,
     [IA64_EXCP_DISABLED_FP]      = 0x5500,
+    [IA64_EXCP_UNSUPPORTED_DATA_REFERENCE] = 0x5b00,
 };
 
 typedef enum Ia64SlotUnit {
@@ -9083,6 +9084,9 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_check_nat_non_access(insn, insn->r3, false);
             ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 16, false,
                                      false);
+            ia64_gen_sync_ip_for_helper(insn);
+            gen_helper_check_montecito_16byte_access(
+                tcg_env, ia64_gr_src(insn->r3), tcg_constant_i32(0));
             tcg_gen_qemu_ld_i128(
                 pair, ia64_gr_src(insn->r3), ctx->mmu_idx,
                 ia64_data_memop(ctx, MO_UO));
@@ -9107,6 +9111,9 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_check_nat_access(insn, insn->r2, true);
             ia64_gen_check_alignment(insn, ia64_gr_src(insn->r3), 16, false,
                                      true);
+            ia64_gen_sync_ip_for_helper(insn);
+            gen_helper_check_montecito_16byte_access(
+                tcg_env, ia64_gr_src(insn->r3), tcg_constant_i32(1));
             ia64_gen_memory_release(insn);
             gen_helper_read_ar(high, tcg_env, tcg_constant_i32(25));
             if (ctx->be_data) {
@@ -10767,7 +10774,8 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         }
         break;
     case IA64_OP_RFI:
-        gen_helper_rfi(tcg_env);
+        gen_helper_rfi(tcg_env, tcg_constant_i64(insn->address),
+                       tcg_constant_i32(insn->slot));
         tcg_gen_lookup_and_goto_ptr();
         if (skip == NULL) {
             return true;
@@ -11999,6 +12007,7 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
     case IA64_EXCP_DATA_ACCESS_BIT:
     case IA64_EXCP_NAT_CONSUMPTION:
     case IA64_EXCP_UNALIGNED:
+    case IA64_EXCP_UNSUPPORTED_DATA_REFERENCE:
     case IA64_EXCP_PAGE_NOT_PRESENT:
     case IA64_EXCP_UNIMPL_DATA_ADDR:
         return true;
@@ -12056,6 +12065,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     case IA64_EXCP_DATA_ACCESS_BIT:
     case IA64_EXCP_NAT_CONSUMPTION:
     case IA64_EXCP_UNALIGNED:
+    case IA64_EXCP_UNSUPPORTED_DATA_REFERENCE:
     case IA64_EXCP_PAGE_NOT_PRESENT:
     case IA64_EXCP_UNIMPL_DATA_ADDR:
     case IA64_EXCP_UNIMPL_INST_ADDR:
@@ -13509,7 +13519,45 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->gdb_write_register = ia64_cpu_gdb_write_register;
     cc->gdb_num_core_regs = IA64_GDB_NUM_CORE_REGS;
     cc->tcg_ops = &ia64_tcg_ops;
+
+    /* Keep direct instantiation of the base type backward compatible. */
+    icc->cpuid_version = 0x000000001f010504ULL;
+    icc->cpuid_features = 1ULL << 0;
+    icc->has_native_ia32 = true;
+    icc->is_montecito = false;
 }
+
+typedef struct IA64CPUModelDef {
+    uint64_t cpuid_version;
+    uint64_t cpuid_features;
+    bool has_native_ia32;
+    bool is_montecito;
+} IA64CPUModelDef;
+
+static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
+{
+    IA64CPUClass *icc = IA64_CPU_CLASS(oc);
+    const IA64CPUModelDef *model = data;
+
+    icc->cpuid_version = model->cpuid_version;
+    icc->cpuid_features = model->cpuid_features;
+    icc->has_native_ia32 = model->has_native_ia32;
+    icc->is_montecito = model->is_montecito;
+}
+
+static const IA64CPUModelDef ia64_cpu_model_madison = {
+    /* Family 0x1f, model 1, revision 5, CPUID[4] is the last register. */
+    .cpuid_version = 0x000000001f010504ULL,
+    .cpuid_features = 1ULL << 0,
+    .has_native_ia32 = true,
+};
+
+static const IA64CPUModelDef ia64_cpu_model_montecito = {
+    /* Family 0x20, model 0, C2 revision 7, CPUID[4] is the last register. */
+    .cpuid_version = 0x0000000020000704ULL,
+    .cpuid_features = (1ULL << 0) | (1ULL << 2),
+    .is_montecito = true,
+};
 
 static const TypeInfo ia64_cpu_type_info[] = {
     {
@@ -13523,6 +13571,20 @@ static const TypeInfo ia64_cpu_type_info[] = {
     {
         .name = IA64_CPU_TYPE_NAME("itanium2"),
         .parent = TYPE_IA64_CPU,
+        .class_init = ia64_cpu_model_class_init,
+        .class_data = &ia64_cpu_model_madison,
+    },
+    {
+        .name = IA64_CPU_TYPE_NAME("madison"),
+        .parent = TYPE_IA64_CPU,
+        .class_init = ia64_cpu_model_class_init,
+        .class_data = &ia64_cpu_model_madison,
+    },
+    {
+        .name = IA64_CPU_TYPE_NAME("montecito"),
+        .parent = TYPE_IA64_CPU,
+        .class_init = ia64_cpu_model_class_init,
+        .class_data = &ia64_cpu_model_montecito,
     },
 };
 

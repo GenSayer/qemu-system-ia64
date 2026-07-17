@@ -5,6 +5,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/atomic.h"
+#include "qemu/units.h"
 #include "cpu.h"
 #include "fpreg.h"
 #include "exec/helper-proto.h"
@@ -32,6 +33,7 @@
 #define IA64_PTE_MA_UCE 5
 #define IA64_PTE_MA_WC 6
 #define IA64_PTE_MA_NATPAGE 7
+#define IA64_ISR_CODE_DATA_NAT 0x20
 #define IA64_PTE_RESERVED_MASK ((1ULL << 1) | (3ULL << 50))
 #define IA64_ITIR_RESERVED_MASK (3ULL | (0xffffffffULL << 32))
 #define IA64_FP_WRE_BIAS        0x0ffff
@@ -52,8 +54,6 @@
 #define IA64_CPUID_VENDOR0           0x49656e69756e6547ULL /* "GenuineI" */
 #define IA64_CPUID_VENDOR1           0x000000006c65746eULL /* "ntel" */
 #define IA64_CPUID_SERIAL            0x0000000000000000ULL
-#define IA64_CPUID_VERSION_ITANIUM2  0x000000001f010504ULL
-#define IA64_CPUID_FEATURES          ((1ULL << 0) | (1ULL << 32) | (1ULL << 33))
 
 static inline void ia64_fp_backup_bitmap_bit(uint64_t backup[2],
                                              const uint64_t value[2],
@@ -570,11 +570,14 @@ static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr,
 #define PAL_CACHE_PROT_INFO 0x0026
 #define PAL_REGISTER_INFO   0x0027
 #define PAL_PREFETCH_VIS    0x0029
+#define PAL_LOGICAL_TO_PHYSICAL 0x002A
+#define PAL_CACHE_SHARED_INFO 0x002B
 
 #define PAL_COPY_PAL       0x0100
 #define PAL_HALT_INFO       0x0101
 #define PAL_TEST_PROC       0x0102
 #define PAL_VM_TR_READ      0x0105
+#define PAL_BRAND_INFO      0x0112
 
 #define PAL_COPY_BUFFER_SIZE  0x1000ULL
 #define PAL_COPY_BUFFER_ALIGN 0x1000ULL
@@ -600,6 +603,10 @@ static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr,
 #define IA64_L0_CACHE_LINE_SIZE    64ULL
 #define IA64_L1_CACHE_LINE_SIZE    128ULL
 #define IA64_L2_CACHE_LINE_SIZE    128ULL
+#define IA64_MONTECITO_L3_SIZE     (12ULL * MiB)
+#define IA64_MONTECITO_PACKAGE_CACHE_SIZE (24ULL * MiB)
+#define IA64_MONTECITO_FREQUENCY   1600000000ULL
+#define IA64_MONTECITO_BUS_FREQUENCY 533333333ULL
 
 static bool pal_reserved_args_are_zero(CPUIA64State *env);
 
@@ -1520,6 +1527,8 @@ static void ia64_rse_check(CPUIA64State *env, const char *site)
 #define PAL_STATUS_INVALID_ARGUMENT (-2)
 #define PAL_STATUS_ERROR           (-3)
 #define PAL_STATUS_NO_INFORMATION  (-6)
+#define PAL_STATUS_BEYOND_MAX      (-8)
+#define PAL_STATUS_NEXT_HIGHER     1
 
 void helper_raise_exception(CPUIA64State *env, uint32_t exception,
                             uint64_t fault_ip, uint64_t fault_imm,
@@ -1551,6 +1560,15 @@ void helper_ia32_unsupported(CPUIA64State *env)
               "IA-32 instruction set execution is not implemented "
               "(IP=0x%016" PRIx64 " PSR=0x%016" PRIx64 ")\n",
               env->ip, env->psr);
+}
+
+static G_NORETURN void
+ia64_raise_disabled_isa_transition(CPUIA64State *env, uint64_t fault_ip,
+                                   uint32_t fault_slot)
+{
+    env->cr_isr = 4ULL << 4;
+    helper_raise_exception(env, IA64_EXCP_DISABLED_ISA_TRANSITION,
+                           fault_ip, 0, fault_slot);
 }
 
 void helper_raise_unaligned(CPUIA64State *env, uint64_t addr,
@@ -1794,7 +1812,7 @@ uint64_t helper_cmp8xchg16(CPUIA64State *env, uint64_t addr, uint64_t cmp,
 
 
 
-void helper_rfi(CPUIA64State *env)
+void helper_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
 {
     uint64_t old_psr = env->psr;
     uint64_t ipsr = env->cr_ipsr;
@@ -1802,6 +1820,17 @@ void helper_rfi(CPUIA64State *env)
                    (env->cr_iip & UINT32_MAX) :
                    ia64_ip_bundle_addr(env->cr_iip);
     uint64_t ifs = env->cr_ifs;
+
+    /*
+     * Montecito has no native IA-32 execution engine.  An OS must use its
+     * IA-32 execution layer instead of restoring PSR.is.  Keep the rfi
+     * itself as the faulting instruction and do not commit the target PSR,
+     * IP, or RSE state when that transition is requested.
+     */
+    if ((ipsr & IA64_PSR_IS) &&
+        !ia64_env_cpu_class(env)->has_native_ia32) {
+        ia64_raise_disabled_isa_transition(env, fault_ip, fault_slot);
+    }
 
     env->exception = IA64_EXCP_NONE;
     env->fault_ip = 0;
@@ -2233,20 +2262,23 @@ uint64_t helper_validate_cr_access(CPUIA64State *env, uint64_t value,
 
 uint64_t helper_read_cpuid(CPUIA64State *env, uint64_t index)
 {
-    index &= 0xff;
-    static const uint64_t cpuid[] = {
-        IA64_CPUID_VENDOR0,
-        IA64_CPUID_VENDOR1,
-        IA64_CPUID_SERIAL,
-        IA64_CPUID_VERSION_ITANIUM2,
-        IA64_CPUID_FEATURES,
-    };
+    IA64CPUClass *icc = ia64_env_cpu_class(env);
 
-    (void)env;
-    if (index < ARRAY_SIZE(cpuid)) {
-        return cpuid[index];
+    index &= 0xff;
+    switch (index) {
+    case 0:
+        return IA64_CPUID_VENDOR0;
+    case 1:
+        return IA64_CPUID_VENDOR1;
+    case 2:
+        return IA64_CPUID_SERIAL;
+    case 3:
+        return icc->cpuid_version;
+    case 4:
+        return icc->cpuid_features;
+    default:
+        return 0;
     }
-    return 0;
 }
 
 uint64_t helper_read_dahr_indexed(CPUIA64State *env, uint64_t index)
@@ -2710,12 +2742,82 @@ static void pal_vm_page_size(CPUIA64State *env)
     env->gr[11] = 0;
 }
 
+typedef struct IA64PalCacheInfo {
+    bool unified;
+    uint8_t attribute;
+    uint8_t associativity;
+    uint8_t line_shift;
+    uint8_t stride_shift;
+    uint8_t store_latency;
+    uint8_t load_latency;
+    uint8_t tag_lsb;
+    uint8_t tag_msb;
+    uint32_t size;
+} IA64PalCacheInfo;
+
+static bool pal_cache_info_for_model(CPUIA64State *env, uint64_t level,
+                                     uint64_t type, IA64PalCacheInfo *info)
+{
+    bool montecito = ia64_env_cpu_class(env)->is_montecito;
+
+    if (type < 1 || type > 2 || level >= 3) {
+        return false;
+    }
+
+    *info = (IA64PalCacheInfo) {
+        .tag_msb = IA64_IMPL_PA_BITS - 1,
+    };
+
+    switch (level) {
+    case 0:
+        info->attribute = 0;
+        info->associativity = 4;
+        info->line_shift = 6;
+        info->stride_shift = 6;
+        info->store_latency = type == 1 ? 0xff : 1;
+        info->load_latency = 1;
+        info->tag_lsb = 12;
+        info->size = 16 * KiB;
+        return true;
+    case 1:
+        if (!montecito && type != 2) {
+            return false;
+        }
+        info->unified = !montecito;
+        info->attribute = type == 1 ? 0 : 1;
+        info->associativity = 8;
+        info->line_shift = 7;
+        info->stride_shift = 7;
+        info->store_latency = type == 1 ? 0xff : 1;
+        info->load_latency = type == 1 ? 7 : 5;
+        info->tag_lsb = type == 1 ? 17 : 15;
+        info->size = type == 1 ? 1 * MiB : 256 * KiB;
+        return true;
+    case 2:
+        if (type != 2) {
+            return false;
+        }
+        info->unified = true;
+        info->attribute = 1;
+        info->associativity = 12;
+        info->line_shift = 7;
+        info->stride_shift = 7;
+        info->store_latency = 1;
+        info->load_latency = montecito ? 14 : 12;
+        info->tag_lsb = montecito ? 20 : 18;
+        info->size = montecito ? IA64_MONTECITO_L3_SIZE : 3 * MiB;
+        return true;
+    default:
+        g_assert_not_reached();
+    }
+}
+
 static void pal_cache_summary(CPUIA64State *env)
 {
     if (pal_reserved_args_are_zero(env)) {
         env->gr[8] = PAL_STATUS_SUCCESS;
         env->gr[9] = 3;
-        env->gr[10] = 4;
+        env->gr[10] = ia64_env_cpu_class(env)->is_montecito ? 5 : 4;
     } else {
         env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[9] = 0;
@@ -2795,6 +2897,177 @@ static void pal_copy_pal(CPUIA64State *env)
     env->gr[9] = PAL_COPY_PROC_OFFSET;
     env->gr[10] = 0;
     env->gr[11] = 0;
+}
+
+static void pal_brand_info(CPUIA64State *env)
+{
+    static const char montecito_brand[] =
+        "QEMU Montecito-compatible IA-64 CPU 1.60GHz 24MB";
+    static const char madison_brand[] =
+        "QEMU Madison-compatible IA-64 CPU";
+    bool montecito = ia64_env_cpu_class(env)->is_montecito;
+    uint64_t request = pal_stacked_arg(env, 0);
+    uint64_t address = pal_stacked_arg(env, 1);
+    uint64_t reserved = pal_stacked_arg(env, 2);
+    const char *brand = montecito ? montecito_brand : madison_brand;
+    uintptr_t ra = GETPC();
+    size_t length;
+    size_t i;
+
+    env->gr[9] = 0;
+    env->gr[10] = 0;
+    env->gr[11] = 0;
+
+    if (reserved != 0) {
+        env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+        return;
+    }
+
+    switch (request) {
+    case 0:
+        if (address == 0) {
+            env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+            return;
+        }
+        length = strlen(brand);
+        for (i = 0; i <= length; i++) {
+            cpu_stb_data_ra(env, address + i, brand[i], ra);
+        }
+        env->gr[8] = PAL_STATUS_SUCCESS;
+        env->gr[9] = length;
+        break;
+    case 16:
+        env->gr[8] = montecito ? PAL_STATUS_SUCCESS :
+                     PAL_STATUS_NO_INFORMATION;
+        env->gr[9] = montecito ? IA64_MONTECITO_FREQUENCY : 0;
+        break;
+    case 17:
+        env->gr[8] = PAL_STATUS_SUCCESS;
+        env->gr[9] = montecito ? IA64_MONTECITO_PACKAGE_CACHE_SIZE :
+                     3 * MiB;
+        break;
+    case 18:
+        env->gr[8] = montecito ? PAL_STATUS_SUCCESS :
+                     PAL_STATUS_NO_INFORMATION;
+        env->gr[9] = montecito ? IA64_MONTECITO_BUS_FREQUENCY : 0;
+        break;
+    default:
+        env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+        break;
+    }
+}
+
+typedef struct IA64PalTopology {
+    uint32_t socket;
+    uint32_t core;
+    uint32_t thread;
+    uint32_t cores_per_socket;
+    uint32_t threads_per_core;
+    uint32_t package_base;
+    uint32_t package_cpus;
+} IA64PalTopology;
+
+static IA64PalTopology pal_cpu_topology(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+
+    return (IA64PalTopology) {
+        .socket = cpu->socket_id,
+        .core = cpu->core_id,
+        .thread = cpu->thread_id,
+        .cores_per_socket = MAX(cpu->cores_per_socket, 1U),
+        .threads_per_core = MAX(cpu->threads_per_core, 1U),
+        .package_base = cpu->package_base,
+        .package_cpus = MAX(cpu->package_cpus, 1U),
+    };
+}
+
+static void pal_logical_to_physical(CPUIA64State *env)
+{
+    IA64PalTopology topology;
+    int64_t requested = env->gr[29];
+    uint32_t number;
+    uint32_t target;
+    uint32_t target_core;
+    uint32_t target_thread;
+
+    env->gr[9] = 0;
+    env->gr[10] = 0;
+    env->gr[11] = 0;
+
+    if (!ia64_env_cpu_class(env)->is_montecito) {
+        env->gr[8] = PAL_STATUS_NOT_IMPLEMENTED;
+        return;
+    }
+    if (env->gr[30] != 0 || env->gr[31] != 0) {
+        env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+        return;
+    }
+
+    topology = pal_cpu_topology(env);
+    if (requested == -1) {
+        number = env_cpu(env)->cpu_index - topology.package_base;
+    } else if (requested >= 0 && requested < topology.package_cpus) {
+        number = requested;
+    } else {
+        env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+        return;
+    }
+
+    target = topology.package_base + number;
+    target_core = (target / topology.threads_per_core) %
+                  topology.cores_per_socket;
+    target_thread = target % topology.threads_per_core;
+
+    env->gr[8] = PAL_STATUS_SUCCESS;
+    env->gr[9] = topology.package_cpus |
+                 ((uint64_t)topology.threads_per_core << 16) |
+                 ((uint64_t)topology.cores_per_socket << 32) |
+                 ((uint64_t)topology.socket << 48);
+    env->gr[10] = target_thread | ((uint64_t)target_core << 32);
+    env->gr[11] = target;
+}
+
+static void pal_cache_shared_info(CPUIA64State *env)
+{
+    IA64PalTopology topology;
+    IA64PalCacheInfo cache;
+    uint64_t number = env->gr[31];
+    uint32_t core_base;
+    uint32_t shared;
+    uint32_t target;
+
+    env->gr[9] = 0;
+    env->gr[10] = 0;
+    env->gr[11] = 0;
+
+    if (!ia64_env_cpu_class(env)->is_montecito) {
+        env->gr[8] = PAL_STATUS_NOT_IMPLEMENTED;
+        return;
+    }
+    if (!pal_cache_info_for_model(env, env->gr[29], env->gr[30], &cache)) {
+        env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+        return;
+    }
+
+    topology = pal_cpu_topology(env);
+    core_base = topology.package_base +
+                topology.core * topology.threads_per_core;
+    shared = MIN(topology.threads_per_core,
+                 topology.package_cpus -
+                 topology.core * topology.threads_per_core);
+    if (number >= shared) {
+        env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+        return;
+    }
+
+    target = core_base + number;
+    env->gr[8] = PAL_STATUS_SUCCESS;
+    env->gr[9] = shared;
+    env->gr[10] = (target % topology.threads_per_core) |
+                  ((uint64_t)topology.core << 32);
+    env->gr[11] = target;
 }
 
 static void pal_halt_info(CPUIA64State *env)
@@ -2995,16 +3268,31 @@ static void pal_mem_for_test(CPUIA64State *env)
 
 static void pal_proc_get_features(CPUIA64State *env)
 {
-    if (pal_reserved_args_are_zero(env)) {
-        env->gr[8] = PAL_STATUS_SUCCESS;
-        env->gr[9] = 0;
-        env->gr[10] = 0;
-        env->gr[11] = 0;
-    } else {
+    uint64_t feature_set = env->gr[30];
+    bool montecito = ia64_env_cpu_class(env)->is_montecito;
+
+    env->gr[9] = 0;
+    env->gr[10] = 0;
+    env->gr[11] = 0;
+
+    if (env->gr[29] != 0 || env->gr[31] != 0) {
         env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
-        env->gr[9] = 0;
-        env->gr[10] = 0;
-        env->gr[11] = 0;
+        return;
+    }
+
+    if (feature_set == 0) {
+        env->gr[8] = PAL_STATUS_SUCCESS;
+    } else if (feature_set < 16) {
+        env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
+    } else if (!montecito || feature_set > 18) {
+        env->gr[8] = PAL_STATUS_BEYOND_MAX;
+    } else if (feature_set < 18) {
+        env->gr[8] = PAL_STATUS_NEXT_HIGHER;
+    } else {
+        /* Feature set 18, bit 18: Hyper-Threading is implemented. */
+        env->gr[8] = PAL_STATUS_SUCCESS;
+        env->gr[9] = 1ULL << 18;
+        env->gr[10] = 1ULL << 18;
     }
 }
 
@@ -3012,19 +3300,10 @@ static void pal_cache_info(CPUIA64State *env)
 {
     uint64_t level = env->gr[29];
     uint64_t cache_type = env->gr[30];
-    bool unified = level != 0;
-    uint64_t associativity;
-    uint64_t line_size;
-    uint64_t line_shift = 0;
-    uint64_t cache_size;
-    uint64_t tag_msb;
-    uint64_t store_latency;
+    IA64PalCacheInfo info;
 
-    env->gr[8] = PAL_STATUS_SUCCESS;
-
-    if (level >= 3 || env->gr[31] != 0 ||
-        cache_type < 1 || cache_type > 2 ||
-        (level != 0 && cache_type != 2)) {
+    if (env->gr[31] != 0 ||
+        !pal_cache_info_for_model(env, level, cache_type, &info)) {
         env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[9] = 0;
         env->gr[10] = 0;
@@ -3032,55 +3311,19 @@ static void pal_cache_info(CPUIA64State *env)
         return;
     }
 
-    switch (level) {
-    case 0:
-        associativity = 4;
-        line_size = IA64_L0_CACHE_LINE_SIZE;
-        cache_size = 16 * 1024;
-        tag_msb = 31;
-        break;
-    case 1:
-        associativity = 8;
-        line_size = IA64_L1_CACHE_LINE_SIZE;
-        cache_size = 256 * 1024;
-        tag_msb = 35;
-        break;
-    case 2:
-        associativity = 12;
-        line_size = IA64_L2_CACHE_LINE_SIZE;
-        cache_size = 3 * 1024 * 1024;
-        tag_msb = 39;
-        break;
-    default:
-        g_assert_not_reached();
-    }
-
-    while ((1ULL << line_shift) < line_size) {
-        line_shift++;
-    }
-    store_latency = cache_type == 1 ? 0xff : 1;
-
-    env->gr[9] = (unified ? 1ULL : 0ULL) | (1ULL << 1) |
-                 (associativity << 8) | (line_shift << 16) |
-                 (line_shift << 24) | (store_latency << 32) |
-                 (1ULL << 40);
-    env->gr[10] = cache_size | (line_shift << 32) | (12ULL << 40) |
-                  (tag_msb << 48);
+    env->gr[8] = PAL_STATUS_SUCCESS;
+    env->gr[9] = (info.unified ? 1ULL : 0ULL) |
+                 ((uint64_t)info.attribute << 1) |
+                 ((uint64_t)info.associativity << 8) |
+                 ((uint64_t)info.line_shift << 16) |
+                 ((uint64_t)info.stride_shift << 24) |
+                 ((uint64_t)info.store_latency << 32) |
+                 ((uint64_t)info.load_latency << 40);
+    env->gr[10] = info.size |
+                  ((uint64_t)info.line_shift << 32) |
+                  ((uint64_t)info.tag_lsb << 40) |
+                  ((uint64_t)info.tag_msb << 48);
     env->gr[11] = 0;
-}
-
-static uint32_t pal_cache_tag_msb(uint64_t level)
-{
-    switch (level) {
-    case 0:
-        return 31;
-    case 1:
-        return 35;
-    case 2:
-        return 39;
-    default:
-        g_assert_not_reached();
-    }
 }
 
 static void pal_cache_prot_info(CPUIA64State *env)
@@ -3090,9 +3333,10 @@ static void pal_cache_prot_info(CPUIA64State *env)
     uint64_t reserved = env->gr[31];
     uint32_t data_none = 64;
     uint32_t tag_none;
+    IA64PalCacheInfo info;
 
-    if (level >= 3 || cache_type < 1 || cache_type > 2 ||
-        (level != 0 && cache_type != 2) || reserved != 0) {
+    if (reserved != 0 ||
+        !pal_cache_info_for_model(env, level, cache_type, &info)) {
         env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[9] = 0;
         env->gr[10] = 0;
@@ -3100,7 +3344,8 @@ static void pal_cache_prot_info(CPUIA64State *env)
         return;
     }
 
-    tag_none = (1U << 30) | (12U << 8) | (pal_cache_tag_msb(level) << 14);
+    tag_none = (1U << 30) | ((uint32_t)info.tag_lsb << 8) |
+               ((uint32_t)info.tag_msb << 14);
     env->gr[8] = PAL_STATUS_SUCCESS;
     env->gr[9] = data_none | ((uint64_t)tag_none << 32);
     env->gr[10] = 0;
@@ -3207,7 +3452,9 @@ static void pal_freq_ratios(CPUIA64State *env)
     if (pal_reserved_args_are_zero(env)) {
         env->gr[8] = PAL_STATUS_SUCCESS;
         env->gr[9] = (16ULL << 32) | 1ULL; /* processor: 1.6 GHz */
-        env->gr[10] = (4ULL << 32) | 1ULL; /* bus: 400 MHz */
+        env->gr[10] = ia64_env_cpu_class(env)->is_montecito ?
+                      (16ULL << 32) | 3ULL : /* bus: 533.33 MHz */
+                      (4ULL << 32) | 1ULL;   /* bus: 400 MHz */
         env->gr[11] = (2ULL << 32) | 1ULL; /* ITC: 200 MHz */
     } else {
         env->gr[8] = PAL_STATUS_INVALID_ARGUMENT;
@@ -3491,6 +3738,9 @@ uint32_t helper_pal_dispatch(CPUIA64State *env)
     case PAL_CACHE_PROT_INFO:
         pal_cache_prot_info(env);
         break;
+    case PAL_CACHE_SHARED_INFO:
+        pal_cache_shared_info(env);
+        break;
     case PAL_VM_INFO:
         pal_vm_info(env);
         break;
@@ -3533,6 +3783,9 @@ uint32_t helper_pal_dispatch(CPUIA64State *env)
     case PAL_FIXED_ADDR:
         pal_fixed_addr(env);
         break;
+    case PAL_LOGICAL_TO_PHYSICAL:
+        pal_logical_to_physical(env);
+        break;
     case PAL_MC_CLEAR_LOG:
         pal_mc_clear_log(env);
         break;
@@ -3541,6 +3794,9 @@ uint32_t helper_pal_dispatch(CPUIA64State *env)
         break;
     case PAL_COPY_PAL:
         pal_copy_pal(env);
+        break;
+    case PAL_BRAND_INFO:
+        pal_brand_info(env);
         break;
     case PAL_HALT_INFO:
         pal_halt_info(env);
@@ -3933,19 +4189,17 @@ void helper_br_ia(CPUIA64State *env, uint32_t b_reg,
         return;
     }
 
-    if (env->psr & IA64_PSR_DI) {
-        env->cr_isr = 4 << 4;
-        helper_raise_exception(env, IA64_EXCP_DISABLED_ISA_TRANSITION,
-                               fault_ip, 0, fault_slot);
-        return;
+    if ((env->psr & IA64_PSR_DI) ||
+        !ia64_env_cpu_class(env)->has_native_ia32) {
+        ia64_raise_disabled_isa_transition(env, fault_ip, fault_slot);
     }
 
     /*
      * Perform the architectural IA-64 to IA-32 transition: IP takes
      * BR[b1]{31:0} with byte granularity, PSR.is is set, and only the
-     * current (zero-size) frame stays valid.  This CPU model has no
-     * IA-32 execution engine, so report the abort with the
-     * transitioned state visible.
+     * current (zero-size) frame stays valid.  The Madison compatibility
+     * model retains this transition so an attempted IA-32 instruction is
+     * diagnosed with the transitioned state visible.
      */
     env->ip = env->br[b_reg] & UINT32_MAX;
     env->psr |= IA64_PSR_IS;
@@ -7466,7 +7720,7 @@ uint32_t helper_firmware_debug_restore(CPUIA64State *env)
     env->fw_debug_handler_active = false;
     env->fw_debug_context_valid = false;
     env->fw_debug_rse_valid = false;
-    helper_rfi(env);
+    helper_rfi(env, env->ip, 0);
     return 1;
 }
 
@@ -7798,16 +8052,19 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
 typedef struct IA64DataReferenceResult {
     uint64_t pa;
     IA64MemorySpeculation speculation;
+    uint8_t memory_attribute;
     bool valid;
 } IA64DataReferenceResult;
 
 static void ia64_set_data_reference_result(IA64DataReferenceResult *result,
                                            uint64_t pa,
-                                           IA64MemorySpeculation speculation)
+                                           IA64MemorySpeculation speculation,
+                                           uint8_t memory_attribute)
 {
     if (result) {
         result->pa = pa;
         result->speculation = speculation;
+        result->memory_attribute = memory_attribute;
         result->valid = true;
     }
 }
@@ -7839,12 +8096,14 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
         ia64_set_data_reference_result(
             result, pa, (va & IA64_PHYS_UC_BIT) ?
                         IA64_MEM_NON_SPECULATIVE :
-                        IA64_MEM_LIMITED_SPECULATION);
+                        IA64_MEM_LIMITED_SPECULATION,
+            (va & IA64_PHYS_UC_BIT) ? IA64_PTE_MA_UC : IA64_PTE_MA_WB);
         return IA64_EXCP_NONE;
     }
     if (ia64_firmware_identity_pa(env->cr_iva, env->ip, va, &pa) ||
         ia64_sal_boot_virtual_pa(env, va, &pa)) {
-        ia64_set_data_reference_result(result, pa, IA64_MEM_SPECULATIVE);
+        ia64_set_data_reference_result(result, pa, IA64_MEM_SPECULATIVE,
+                                       IA64_PTE_MA_WB);
         return IA64_EXCP_NONE;
     }
 
@@ -7866,7 +8125,9 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
     if (found) {
         ia64_set_data_reference_result(
             result, pa, ia64_pte_memory_speculation(entry ? entry->pte :
-                                                             pte));
+                                                             pte),
+            ((entry ? entry->pte : pte) & IA64_PTE_MA_MASK) >>
+            IA64_PTE_MA_SHIFT);
         if (entry) {
             return ia64_tlb_exception_for_access(env, entry, perm, needed,
                                                 false, is_write || is_rw,
@@ -7878,7 +8139,8 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
                                                      false);
     }
     if (ia64_sal_boot_identity_pa(env, va, &pa)) {
-        ia64_set_data_reference_result(result, pa, IA64_MEM_SPECULATIVE);
+        ia64_set_data_reference_result(result, pa, IA64_MEM_SPECULATIVE,
+                                       IA64_PTE_MA_WB);
         return IA64_EXCP_NONE;
     }
     if (ia64_data_nested_tlb_active(env)) {
@@ -8007,6 +8269,10 @@ static void ia64_raise_data_reference_exception_at(CPUIA64State *env,
         if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
             env->cr_isr = IA64_GENEX_UNIMPL_DATA_ADDR |
                           (is_non_access ? IA64_ISR_NA : 0) |
+                          (is_rw ? (IA64_ISR_R | IA64_ISR_W) :
+                           (is_write ? IA64_ISR_W : IA64_ISR_R));
+        } else if (excp == IA64_EXCP_NAT_CONSUMPTION && !is_non_access) {
+            env->cr_isr = IA64_ISR_CODE_DATA_NAT |
                           (is_rw ? (IA64_ISR_R | IA64_ISR_W) :
                            (is_write ? IA64_ISR_W : IA64_ISR_R));
         } else {
@@ -8149,9 +8415,59 @@ void helper_lfetch_fault(CPUIA64State *env, uint64_t va,
 
 void helper_check_semaphore_access(CPUIA64State *env, uint64_t va)
 {
-    ia64_raise_data_reference_fault_if_needed(env, va, true, true,
-                                              ia64_psr_cpl(env->psr), false,
-                                              0);
+    IA64DataReferenceResult translation = { 0 };
+    IA64Exception excp = ia64_data_reference_exception(
+        env, va, true, true, ia64_psr_cpl(env->psr), true, &translation);
+
+    if (excp != IA64_EXCP_NONE) {
+        ia64_raise_data_reference_exception(
+            env, va, true, true, false, 0, excp, false,
+            ia64_current_code_tlb_ed(env));
+    }
+    if (translation.memory_attribute == IA64_PTE_MA_NATPAGE) {
+        ia64_raise_data_reference_exception(
+            env, va, true, true, false, 0,
+            IA64_EXCP_NAT_CONSUMPTION, false,
+            ia64_current_code_tlb_ed(env));
+    }
+    if (translation.memory_attribute != IA64_PTE_MA_WB) {
+        ia64_raise_data_reference_exception(
+            env, va, true, true, false, 0,
+            IA64_EXCP_UNSUPPORTED_DATA_REFERENCE, false,
+            ia64_current_code_tlb_ed(env));
+    }
+}
+
+void helper_check_montecito_16byte_access(CPUIA64State *env, uint64_t va,
+                                          uint32_t is_write)
+{
+    IA64DataReferenceResult translation = { 0 };
+    IA64Exception excp;
+
+    if (!ia64_env_cpu_class(env)->is_montecito) {
+        return;
+    }
+
+    excp = ia64_data_reference_exception(
+        env, va, is_write, false, ia64_psr_cpl(env->psr), true,
+        &translation);
+    if (excp != IA64_EXCP_NONE) {
+        ia64_raise_data_reference_exception(
+            env, va, is_write, false, false, 0, excp, false,
+            ia64_current_code_tlb_ed(env));
+    }
+    if (translation.memory_attribute == IA64_PTE_MA_NATPAGE) {
+        ia64_raise_data_reference_exception(
+            env, va, is_write, false, false, 0,
+            IA64_EXCP_NAT_CONSUMPTION, false,
+            ia64_current_code_tlb_ed(env));
+    }
+    if (translation.memory_attribute != IA64_PTE_MA_WB) {
+        ia64_raise_data_reference_exception(
+            env, va, is_write, false, false, 0,
+            IA64_EXCP_UNSUPPORTED_DATA_REFERENCE, false,
+            ia64_current_code_tlb_ed(env));
+    }
 }
 
 uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,

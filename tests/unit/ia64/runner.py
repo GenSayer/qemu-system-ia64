@@ -51,6 +51,8 @@ class MicroProgram:
     completion: Completion
     data: tuple[MemoryInitializer, ...] = ()
     machine_args: tuple[str, ...] = ()
+    cpu: str | None = None
+    smp: str = "1"
     expected_exit: ExpectedExit | None = None
 
 
@@ -100,16 +102,19 @@ def _command(qemu: str, program: MicroProgram) -> list[str]:
     machine = "ia64-vpc"
     if program.machine_args:
         machine += "," + ",".join(program.machine_args)
-    return [
+    command = [
         os.path.abspath(qemu),
         "-machine", machine,
-        "-smp", "1",
+        "-smp", program.smp,
         "-display", "none",
         "-serial", "none",
         "-monitor", "none",
         "-qmp", "stdio",
         "-S",
-    ] + _loader_args(program)
+    ]
+    if program.cpu is not None:
+        command += ["-cpu", program.cpu]
+    return command + _loader_args(program)
 
 
 def run_microprogram(qemu: str, program: MicroProgram,

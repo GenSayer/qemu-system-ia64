@@ -34,6 +34,7 @@ IA64_EXCP_PRIVILEGED_REG = 26
 IA64_EXCP_RESERVED_REG_FIELD = 27
 IA64_EXCP_DISABLED_ISA_TRANSITION = 30
 IA64_EXCP_DISABLED_FP = 31
+IA64_EXCP_UNSUPPORTED_DATA_REFERENCE = 32
 IA64_ISR_X = 1 << 32
 IA64_ISR_W = 1 << 33
 IA64_ISR_R = 1 << 34
@@ -110,6 +111,7 @@ IA64_GENERAL_VECTOR = 0x5400
 IA64_DISABLED_FP_VECTOR = 0x5500
 IA64_NAT_CONSUMPTION_VECTOR = 0x5600
 IA64_UNALIGNED_VECTOR = 0x5a00
+IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR = 0x5b00
 IA64_FP_FAULT_VECTOR = 0x5c00
 IA64_FP_TRAP_VECTOR = 0x5d00
 IA64_LOWER_PRIV_TRANSFER_VECTOR = 0x5e00
@@ -172,10 +174,13 @@ PAL_MEM_FOR_TEST = 0x0025
 PAL_CACHE_PROT_INFO = 0x0026
 PAL_REGISTER_INFO = 0x0027
 PAL_PREFETCH_VIS = 0x0029
+PAL_LOGICAL_TO_PHYSICAL = 0x002A
+PAL_CACHE_SHARED_INFO = 0x002B
 PAL_COPY_PAL = 0x0100
 PAL_HALT_INFO = 0x0101
 PAL_TEST_PROC = 0x0102
 PAL_VM_TR_READ = 0x0105
+PAL_BRAND_INFO = 0x0112
 
 PAL_VERSION_VALUE = ((2 << 40) | (0x23 << 32) | (1 << 24) |
                      (2 << 8) | 0x23)
@@ -191,22 +196,30 @@ PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          (2 << 56))
 PAL_VM_SUMMARY_INFO_2 = IA64_PAL_IMPL_VA_MSB | (24 << 8)
 PAL_RATIO_16_1 = (16 << 32) | 1
+PAL_RATIO_16_3 = (16 << 32) | 3
 PAL_RATIO_4_1 = (4 << 32) | 1
 PAL_RATIO_2_1 = (2 << 32) | 1
 PAL_MEM_ATTRIB_WB_UC = (1 << 0) | (1 << 4)
-PAL_CACHE_INFO_L0_I_1 = ((1 << 1) | (4 << 8) | (6 << 16) |
+PAL_CACHE_INFO_L0_I_1 = ((4 << 8) | (6 << 16) |
                          (6 << 24) | (0xff << 32) | (1 << 40))
-PAL_CACHE_INFO_L0_D_1 = ((1 << 1) | (4 << 8) | (6 << 16) |
+PAL_CACHE_INFO_L0_D_1 = ((4 << 8) | (6 << 16) |
                          (6 << 24) | (1 << 32) | (1 << 40))
-PAL_CACHE_INFO_L0_2 = 16384 | (6 << 32) | (12 << 40) | (31 << 48)
-PAL_CACHE_INFO_L1_U_1 = (1 | (1 << 1) | (8 << 8) | (7 << 16) |
-                         (7 << 24) | (1 << 32) | (1 << 40))
-PAL_CACHE_INFO_L1_U_2 = (262144 | (7 << 32) | (12 << 40) | (35 << 48))
+PAL_CACHE_INFO_L0_2 = 16384 | (6 << 32) | (12 << 40) | (49 << 48)
+PAL_CACHE_INFO_L1_I_1 = ((8 << 8) | (7 << 16) | (7 << 24) |
+                         (0xff << 32) | (7 << 40))
+PAL_CACHE_INFO_L1_I_2 = (1048576 | (7 << 32) | (17 << 40) | (49 << 48))
+PAL_CACHE_INFO_L1_D_1 = ((1 << 1) | (8 << 8) | (7 << 16) |
+                         (7 << 24) | (1 << 32) | (5 << 40))
+PAL_CACHE_INFO_L1_D_2 = (262144 | (7 << 32) | (15 << 40) | (49 << 48))
+PAL_CACHE_INFO_L2_U_1 = (1 | (1 << 1) | (12 << 8) | (7 << 16) |
+                         (7 << 24) | (1 << 32) | (14 << 40))
+PAL_CACHE_INFO_L2_U_2 = (12 * 1024 * 1024 | (7 << 32) | (20 << 40) |
+                         (49 << 48))
 PAL_VM_INFO_L0 = 1 | (32 << 8) | (32 << 16)
 PAL_VM_INFO_L1 = (1 | (128 << 8) | (128 << 16) |
                   (1 << 32) | (1 << 34))
 PAL_CACHE_PROT_DATA_NONE = 64
-PAL_CACHE_PROT_TAG_NONE_L0 = (1 << 30) | (12 << 8) | (31 << 14)
+PAL_CACHE_PROT_TAG_NONE_L0 = (1 << 30) | (12 << 8) | (49 << 14)
 PAL_PLATFORM_INTERRUPT_BLOCK = 0
 PAL_PLATFORM_IO_BLOCK = 1
 PAL_INTERRUPT_BLOCK_DEFAULT = 0xfee00000
@@ -236,6 +249,7 @@ PAL_CR_IMPLEMENTED_HIGH = 0x307ff
 PAL_CR_READ_SIDE_EFFECT_HIGH = 0x2
 PAL_PERF_BUFFER = 0x3000
 PAL_HALT_INFO_BUFFER = 0x3800
+PAL_BRAND_BUFFER = 0x3900
 PAL_HALT_LIGHT_INFO = ((1 << 61) | (1 << 60) | (1000 << 32) |
                        (1 << 16) | 1)
 PAL_HALT_STATE1_INFO = ((1 << 60) | (1000 << 32) | (1 << 16) | 1)
@@ -3275,7 +3289,7 @@ def normalized_bundles(bundles):
 def run_program(qemu, bundles, entry=0x10, alat="full",
                 terminal_ip=None, expected=None, timeout=2.0,
                 name="ia64-microprogram", poll_initial_s=0.001,
-                poll_max_s=0.020):
+                poll_max_s=0.020, cpu=None, smp="1"):
     """Run until an explicit architectural terminal state."""
     expected = dict(expected or {})
     if terminal_ip is None:
@@ -3296,25 +3310,31 @@ def run_program(qemu, bundles, entry=0x10, alat="full",
                               poll_max_s=poll_max_s,
                               predicate=predicate),
         machine_args=(() if alat is None else (f"alat={alat}",)),
+        cpu=cpu,
+        smp=smp,
     )
     return run_microprogram(qemu, program)
 
 
-def run_program_expect_failure(qemu, bundles, entry=0x10, timeout=3):
+def run_program_expect_failure(qemu, bundles, entry=0x10, timeout=3,
+                               cpu=None):
     program = MicroProgram(
         name="ia64-expected-qemu-failure",
         bundles=encode_bundles(normalized_bundles(bundles), bundle_words),
         entry=entry,
         expected=StateExpectation(),
         completion=Completion(terminal_ip=None, timeout_s=timeout),
+        cpu=cpu,
         expected_exit=ExpectedExit(),
     )
     return run_expected_exit(qemu, program)
 
 
-def require_qemu_failure(name, bundles, expected_substrings, entry=0x10):
+def require_qemu_failure(name, bundles, expected_substrings, entry=0x10,
+                         cpu=None):
     def tc(qemu):
-        output = run_program_expect_failure(qemu, bundles, entry=entry)
+        output = run_program_expect_failure(qemu, bundles, entry=entry,
+                                            cpu=cpu)
         missing = [s for s in expected_substrings if s not in output]
         if missing:
             raise RuntimeError(
@@ -3356,10 +3376,11 @@ def run_program_jit(qemu, bundles, entry=0x10, terminal_ip=None):
     return parse_jit_stats(output), output
 
 
-def require_registers(name, bundles, expected, entry=0x10, alat="full"):
+def require_registers(name, bundles, expected, entry=0x10, alat="full",
+                      cpu=None, smp="1"):
     def tc(qemu):
         run_program(qemu, bundles, entry=entry, alat=alat,
-                    expected=expected, name=name)
+                    expected=expected, name=name, cpu=cpu, smp=smp)
     return tc
 
 
@@ -3375,11 +3396,13 @@ IA64_EXCEPTION_VECTORS = {
     IA64_EXCP_RESERVED_REG_FIELD: IA64_GENERAL_VECTOR,
     IA64_EXCP_DISABLED_ISA_TRANSITION: IA64_GENERAL_VECTOR,
     IA64_EXCP_DISABLED_FP: IA64_DISABLED_FP_VECTOR,
+    IA64_EXCP_UNSUPPORTED_DATA_REFERENCE:
+        IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR,
 }
 
 
 def require_exception(name, bundles, excp, fault_ip=None, fault_imm=None,
-                      entry=0x10):
+                      entry=0x10, cpu=None):
     def tc(qemu):
         vector = IA64_EXCEPTION_VECTORS.get(excp)
         if vector is None:
@@ -3391,7 +3414,8 @@ def require_exception(name, bundles, excp, fault_ip=None, fault_imm=None,
             # The faulting IP can also be the initial IP.  Complete on the
             # exception state so an early QMP stop cannot observe reset state.
             run_program(
-                qemu, bundles, entry=entry, expected=expected, name=name)
+                qemu, bundles, entry=entry, expected=expected, name=name,
+                cpu=cpu)
             return
 
         setup = 0x100000
@@ -3419,7 +3443,8 @@ def require_exception(name, bundles, excp, fault_ip=None, fault_imm=None,
             expected["fault_ip"] = fault_ip
         if fault_imm is not None:
             expected["fault_imm"] = fault_imm
-        run_program(qemu, wrapped, entry=setup, expected=expected, name=name)
+        run_program(qemu, wrapped, entry=setup, expected=expected, name=name,
+                    cpu=cpu)
     return tc
 
 
@@ -4606,6 +4631,7 @@ PTE_DIRTY = 1 << 6
 PTE_ED = 1 << 52
 DTR_PTE_WB = 0x0010000000000661
 DTR_PTE_UC = 0x0010000000000671
+DTR_PTE_NATPAGE = DTR_PTE_WB | (7 << 2)
 REGION7_SCRATCH_VA = 0xe000000082fd00b0
 REGION7_SCRATCH_PA = 0x4100b0
 KEY_TEST_VA = 0x9000
@@ -7488,6 +7514,52 @@ test_st16_rel_stores_gr_and_csd = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+
+def montecito_uc_memory_fault_test(name, fault_bundle, address,
+                                   expected_isr):
+    return require_registers(name, [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, address)),
+        (0x50, *movl_mlx(4, 0x1122334455667788)),
+        (0x60, *fault_bundle),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR, 0x00,
+         mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(15, 17), nop_i(), nop_i()),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20,
+                 IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_UNSUPPORTED_DATA_REFERENCE,
+        "fault_ip": 0x60,
+        "r14": address,
+        "r15": expected_isr,
+    }, entry=0x10)
+
+
+MONTECITO_UC_16BYTE_ADDRESS = IA64_PHYS_UC_BIT | 0x2000
+
+test_ld16_uc_unsupported_data_reference = montecito_uc_memory_fault_test(
+    "ld16_uc_unsupported_data_reference",
+    (0x00, ld16(8, 3), nop_i(), nop_i()),
+    MONTECITO_UC_16BYTE_ADDRESS, IA64_ISR_R)
+
+test_st16_uc_unsupported_data_reference = montecito_uc_memory_fault_test(
+    "st16_uc_unsupported_data_reference",
+    (0x00, st16(3, 4), nop_i(), nop_i()),
+    MONTECITO_UC_16BYTE_ADDRESS, IA64_ISR_W)
+
+test_cmp8xchg16_uc_unsupported_data_reference = \
+    montecito_uc_memory_fault_test(
+        "cmp8xchg16_uc_unsupported_data_reference",
+        (0x00, cmp8xchg16_acq(8, 3, 4), nop_i(), nop_i()),
+        MONTECITO_UC_16BYTE_ADDRESS + 8, IA64_ISR_R | IA64_ISR_W)
+
 test_memory_order_completers_decode = require_registers(
     "memory_order_completers_decode", [
         (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x300, 0),
@@ -9421,6 +9493,33 @@ test_cmp8xchg16_unaligned = require_exception(
     ],
     IA64_EXCP_UNALIGNED, fault_ip=0x20,
 )
+
+test_cmp8xchg16_natpage_consumption = require_registers(
+    "cmp8xchg16_natpage_consumption", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_NATPAGE),
+        (0x70, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x80, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x90, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(3, HIGH_TR_BASE + 0x208)),
+        (0xb0, *movl_mlx(4, 0x1122334455667788)),
+        (0xc0, 0x00, cmp8xchg16_acq(8, 3, 4), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x00,
+         mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(15, 17), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+                 IA64_NAT_CONSUMPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_NAT_CONSUMPTION,
+        "fault_ip": 0xc0,
+        "r14": HIGH_TR_BASE + 0x208,
+        "r15": 0x20 | IA64_ISR_R | IA64_ISR_W,
+    }, entry=0x10)
 
 test_cmpxchg4_acq_region7_store = require_registers("cmpxchg4_acq_region7_store", [
     *dtr_setup_bundles(0x10, REGION7_SCRATCH_VA, REGION7_SCRATCH_PA),
@@ -12012,7 +12111,7 @@ test_tf_feature_predicate_updates = require_registers(
         "ip": 0x70,
         "r4": 1,
         "r5": 0,
-        "r8": 1,
+        "r8": 0,
         "r9": 0,
         "r10": 0,
         "r11": 0,
@@ -12035,11 +12134,11 @@ test_tf_upper_cpuid_feature_bits = require_registers(
          br_cond(0x60, 0x60)),
     ], {
         "ip": 0x60,
-        "r4": 1,
+        "r4": 0,
         "r5": 0,
         "r6": 1,
         "r7": 0,
-        "r29": 0x0000000300000001,
+        "r29": 0x0000000000000005,
     }, entry=0x10)
 
 test_tf_same_pred_illegal = require_exception(
@@ -17550,10 +17649,22 @@ test_mov_cpuid_indexed_decode = require_registers("mov_cpuid_indexed_decode", [
      br_cond(0x60, 0x60)),
 ], {
     "ip": 0x60,
-    "r28": 0x0000000300000001,
-    "r29": 0x000000001f010504,
+    "r28": 0x0000000000000005,
+    "r29": 0x0000000020000704,
     "r30": 0x49656e69756e6547,
 }, entry=0x10)
+
+test_mov_cpuid_madison_model = require_registers(
+    "mov_cpuid_madison_model", [
+        (0x10, 0x00, nop_m(), addl(31, 3, 0), nop_i()),
+        (0x20, 0x00, mov_cpuid(29, 31), addl(31, 4, 0), nop_i()),
+        (0x30, 0x00, mov_cpuid(28, 31), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "r28": 0x0000000000000001,
+        "r29": 0x000000001f010504,
+    }, entry=0x10, cpu="madison")
 
 test_mov_dahr_indexed_decode = require_registers("mov_dahr_indexed_decode", [
     (0x10, 0x00, addl(18, 2, 0), addl(29, 0x55, 0),
@@ -18470,7 +18581,13 @@ test_pal_vm_summary_reserved_arg = require_registers(
 test_pal_cache_summary = require_registers("pal_cache_summary",
     pal_call_program(PAL_CACHE_SUMMARY),
     {"ip": 0x30, "r28": PAL_CACHE_SUMMARY, "r8": 0,
-    "r9": 3, "r10": 4}, entry=0x10)
+    "r9": 3, "r10": 5}, entry=0x10)
+
+test_pal_cache_summary_madison = require_registers(
+    "pal_cache_summary_madison",
+    pal_call_program(PAL_CACHE_SUMMARY),
+    {"ip": 0x30, "r28": PAL_CACHE_SUMMARY, "r8": 0,
+     "r9": 3, "r10": 4}, entry=0x10, cpu="madison")
 
 test_pal_cache_summary_reserved_arg = require_registers(
     "pal_cache_summary_reserved_arg",
@@ -18491,11 +18608,25 @@ test_pal_cache_info_l0_data = require_registers("pal_cache_info_l0_data",
      "r9": PAL_CACHE_INFO_L0_D_1, "r10": PAL_CACHE_INFO_L0_2,
      "r11": 0}, entry=0x10)
 
-test_pal_cache_info_l1_unified = require_registers(
-    "pal_cache_info_l1_unified",
+test_pal_cache_info_l1_data = require_registers(
+    "pal_cache_info_l1_data",
     pal_call_program(PAL_CACHE_INFO, [(29, 1), (30, 2), (31, 0)]),
     {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
-     "r9": PAL_CACHE_INFO_L1_U_1, "r10": PAL_CACHE_INFO_L1_U_2,
+     "r9": PAL_CACHE_INFO_L1_D_1, "r10": PAL_CACHE_INFO_L1_D_2,
+     "r11": 0}, entry=0x10)
+
+test_pal_cache_info_l1_instruction = require_registers(
+    "pal_cache_info_l1_instruction",
+    pal_call_program(PAL_CACHE_INFO, [(29, 1), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": PAL_CACHE_INFO_L1_I_1, "r10": PAL_CACHE_INFO_L1_I_2,
+     "r11": 0}, entry=0x10)
+
+test_pal_cache_info_l2_unified = require_registers(
+    "pal_cache_info_l2_unified",
+    pal_call_program(PAL_CACHE_INFO, [(29, 2), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": PAL_CACHE_INFO_L2_U_1, "r10": PAL_CACHE_INFO_L2_U_2,
      "r11": 0}, entry=0x10)
 
 test_pal_cache_info_invalid = require_registers("pal_cache_info_invalid",
@@ -18504,9 +18635,9 @@ test_pal_cache_info_invalid = require_registers("pal_cache_info_invalid",
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
-test_pal_cache_info_unified_bad_type = require_registers(
-    "pal_cache_info_unified_bad_type",
-    pal_call_program(PAL_CACHE_INFO, [(29, 1), (30, 1), (31, 0)]),
+test_pal_cache_info_l2_unified_bad_type = require_registers(
+    "pal_cache_info_l2_unified_bad_type",
+    pal_call_program(PAL_CACHE_INFO, [(29, 2), (30, 1), (31, 0)]),
     {"ip": 0x60, "r28": PAL_CACHE_INFO,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
@@ -18526,8 +18657,14 @@ test_pal_freq_base_reserved_arg = require_registers(
 test_pal_freq_ratios = require_registers("pal_freq_ratios",
     pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
-    "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_4_1,
+    "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_16_3,
     "r11": PAL_RATIO_2_1}, entry=0x10)
+
+test_pal_freq_ratios_madison = require_registers(
+    "pal_freq_ratios_madison", pal_call_program(PAL_FREQ_RATIOS),
+    {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
+     "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_4_1,
+     "r11": PAL_RATIO_2_1}, entry=0x10, cpu="madison")
 
 test_pal_freq_ratios_reserved_arg = require_registers(
     "pal_freq_ratios_reserved_arg",
@@ -18781,7 +18918,7 @@ test_pal_cache_prot_info_invalid = require_registers(
 
 test_pal_cache_prot_info_unified_bad_type = require_registers(
     "pal_cache_prot_info_unified_bad_type",
-    pal_call_program(PAL_CACHE_PROT_INFO, [(29, 1), (30, 1), (31, 0)]),
+    pal_call_program(PAL_CACHE_PROT_INFO, [(29, 2), (30, 1), (31, 0)]),
     {"ip": 0x60, "r28": PAL_CACHE_PROT_INFO,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
@@ -18845,6 +18982,107 @@ test_pal_proc_get_features_reserved_arg = require_registers(
     {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+test_pal_proc_get_features_montecito_next_set = require_registers(
+    "pal_proc_get_features_montecito_next_set",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
+     "r8": 1, "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_proc_get_features_montecito_set18 = require_registers(
+    "pal_proc_get_features_montecito_set18",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 18), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
+     "r8": 0, "r9": 1 << 18, "r10": 1 << 18, "r11": 0}, entry=0x10)
+
+test_pal_proc_get_features_montecito_beyond_max = require_registers(
+    "pal_proc_get_features_montecito_beyond_max",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 19), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
+     "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_proc_get_features_madison_beyond_max = require_registers(
+    "pal_proc_get_features_madison_beyond_max",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
+     "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_logical_to_physical_current = require_registers(
+    "pal_logical_to_physical_current",
+    pal_call_program(PAL_LOGICAL_TO_PHYSICAL,
+                     [(29, 0xffffffffffffffff), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_LOGICAL_TO_PHYSICAL, "r8": 0,
+     "r9": 1 | (1 << 16) | (1 << 32), "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_logical_to_physical_multicore_thread = require_registers(
+    "pal_logical_to_physical_multicore_thread",
+    pal_call_program(PAL_LOGICAL_TO_PHYSICAL,
+                     [(29, 3), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_LOGICAL_TO_PHYSICAL, "r8": 0,
+     "r9": 4 | (2 << 16) | (2 << 32),
+     "r10": 1 | (1 << 32), "r11": 3},
+    entry=0x10, alat=None, smp="4,sockets=1,cores=2,threads=2")
+
+test_pal_logical_to_physical_madison_unimplemented = require_registers(
+    "pal_logical_to_physical_madison_unimplemented",
+    pal_call_program(PAL_LOGICAL_TO_PHYSICAL,
+                     [(29, 0xffffffffffffffff), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_LOGICAL_TO_PHYSICAL,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_cache_shared_info_single_thread = require_registers(
+    "pal_cache_shared_info_single_thread",
+    pal_call_program(PAL_CACHE_SHARED_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_SHARED_INFO, "r8": 0,
+     "r9": 1, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_cache_shared_info_sibling_thread = require_registers(
+    "pal_cache_shared_info_sibling_thread",
+    pal_call_program(PAL_CACHE_SHARED_INFO, [(29, 2), (30, 2), (31, 1)]),
+    {"ip": 0x60, "r28": PAL_CACHE_SHARED_INFO, "r8": 0,
+     "r9": 2, "r10": 1, "r11": 1},
+    entry=0x10, alat=None, smp="4,sockets=1,cores=2,threads=2")
+
+test_pal_brand_info_string = require_registers(
+    "pal_brand_info_string", [
+        (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+        (0x20, *movl_mlx(28, PAL_BRAND_INFO)),
+        (0x30, *movl_mlx(32, PAL_BRAND_INFO)),
+        (0x40, *movl_mlx(33, 0)),
+        (0x50, *movl_mlx(34, PAL_BRAND_BUFFER)),
+        (0x60, *movl_mlx(35, 0)),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, *movl_mlx(2, PAL_BRAND_BUFFER)),
+        (0x90, 0x00, ld8(20, 2), nop_i(), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {"ip": 0xa0, "r28": PAL_BRAND_INFO, "r8": 0,
+        "r9": len("QEMU Montecito-compatible IA-64 CPU 1.60GHz 24MB"),
+        "r10": 0, "r11": 0,
+        "r20": int.from_bytes(b"QEMU Mon", "little")}, entry=0x10)
+
+test_pal_brand_info_frequency = require_registers(
+    "pal_brand_info_frequency",
+    pal_stacked_call_program(PAL_BRAND_INFO, [16, 0, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
+     "r9": 1600000000, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_brand_info_cache = require_registers(
+    "pal_brand_info_cache",
+    pal_stacked_call_program(PAL_BRAND_INFO, [17, 0, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
+     "r9": 24 * 1024 * 1024, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_brand_info_bus = require_registers(
+    "pal_brand_info_bus",
+    pal_stacked_call_program(PAL_BRAND_INFO, [18, 0, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
+     "r9": 533333333, "r10": 0, "r11": 0}, entry=0x10)
 
 test_pal_debug_info = require_registers("pal_debug_info",
     pal_call_program(PAL_DEBUG_INFO),
@@ -20434,6 +20672,25 @@ test_br_ia_psr_di_disabled_transition_fault = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+test_br_ia_montecito_native_ia32_disabled_fault = require_registers(
+    "br_ia_montecito_native_ia32_disabled_fault", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17), nop_i(),
+         nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x20,
+                 IA64_GENERAL_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x20,
+        "r8": 0x40,
+        "r9": 0x40 | (2 << IA64_ISR_EI_SHIFT),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_br_ia_ia32_unsupported_aborts_after_state_transition = \
     require_qemu_failure(
         "br_ia_ia32_unsupported_aborts_after_state_transition", [
@@ -20447,7 +20704,7 @@ test_br_ia_ia32_unsupported_aborts_after_state_transition = \
             "IA-32 instruction set execution is not implemented",
             "IP=0x0000000000000043",
             f"PSR=0x{IA64_PSR_IS:016x}",
-        ], entry=0x10)
+        ], entry=0x10, cpu="madison")
 
 test_rfi_to_ia32_unsupported_aborts_with_byte_ip = require_qemu_failure(
     "rfi_to_ia32_unsupported_aborts_with_byte_ip",
@@ -20459,7 +20716,54 @@ test_rfi_to_ia32_unsupported_aborts_with_byte_ip = require_qemu_failure(
         "IA-32 instruction set execution is not implemented",
         "IP=0x0000000000000045",
         f"PSR=0x{IA64_PSR_IS:016x}",
-    ], entry=0x10)
+    ], entry=0x10, cpu="madison")
+
+test_rfi_montecito_native_ia32_disabled_fault = require_registers(
+    "rfi_montecito_native_ia32_disabled_fault", [
+        (0x10, *movl_mlx(2, IA64_PSR_IS)),
+        (0x20, *movl_mlx(3, 0x1234567800000045)),
+        (0x30, 0x00, mov_m_gr_cr(2, 16), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(3, 19), nop_i(), nop_i()),
+        (0x50, *movl_mlx(4, IA64_PSR_IC)),
+        (0x60, 0x00, mov_gr_psr_full(4), nop_i(), nop_i()),
+        (0x70, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x80, 0x11, nop_m(), nop_i(), rfi_b()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17), nop_i(),
+         nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x20,
+                 IA64_GENERAL_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x20,
+        "r8": 0x80,
+        "r9": 0x40 | (2 << IA64_ISR_EI_SHIFT),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_rfi_montecito_uncollected_transition_preserves_target = \
+    require_registers(
+        "rfi_montecito_uncollected_transition_preserves_target", [
+            (0x10, *movl_mlx(5, 0x10000)),
+            (0x20, 0x00, mov_m_gr_cr(5, 2), nop_i(), nop_i()),
+            (0x30, *movl_mlx(2, IA64_PSR_IS)),
+            (0x40, *movl_mlx(3, 0x1234567800000045)),
+            (0x50, 0x00, mov_m_gr_cr(2, 16), nop_i(), nop_i()),
+            (0x60, 0x00, mov_m_gr_cr(3, 19), nop_i(), nop_i()),
+            (0x70, 0x11, nop_m(), nop_i(), rfi_b()),
+            (0x15400, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+            (0x15410, 0x00, mov_m_cr_gr(9, 16), nop_i(), nop_i()),
+            (0x15420, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+            (0x15430, 0x10, nop_m(), nop_i(), br_cond(0x15430, 0x15430)),
+        ], {
+            "ip": 0x15430,
+            "r8": 0x1234567800000045,
+            "r9": IA64_PSR_IS,
+            "r10": 0x40 | IA64_ISR_NI | (2 << IA64_ISR_EI_SHIFT),
+            "fault_code": IA64_EXCP_DISABLED_ISA_TRANSITION,
+            "fault_ip": 0x70,
+            "exception": IA64_EXCP_NONE,
+        }, entry=0x10)
 
 test_reserved_indirect_branch_btype_illegal = require_exception(
     "reserved_indirect_branch_btype_illegal",
@@ -21028,8 +21332,14 @@ TEST_NAMES = {
     "ld8_s_uc_defers": test_ld8_s_uc_defers,
     "ld16_loads_gr_and_csd": test_ld16_loads_gr_and_csd,
     "ld16_acq_hint_decode": test_ld16_acq_hint_decode,
+    "ld16_uc_unsupported_data_reference":
+        test_ld16_uc_unsupported_data_reference,
     "st16_stores_gr_and_csd": test_st16_stores_gr_and_csd,
     "st16_rel_stores_gr_and_csd": test_st16_rel_stores_gr_and_csd,
+    "st16_uc_unsupported_data_reference":
+        test_st16_uc_unsupported_data_reference,
+    "cmp8xchg16_uc_unsupported_data_reference":
+        test_cmp8xchg16_uc_unsupported_data_reference,
     "memory_order_completers_decode": test_memory_order_completers_decode,
     "data_big_endian_load_store": test_data_big_endian_load_store,
     "data_big_endian_cmpxchg4": test_data_big_endian_cmpxchg4,
@@ -21261,6 +21571,8 @@ TEST_NAMES = {
     "cmp8xchg16_rel_mismatch_keeps_pair":
         test_cmp8xchg16_rel_mismatch_keeps_pair,
     "cmp8xchg16_unaligned": test_cmp8xchg16_unaligned,
+    "cmp8xchg16_natpage_consumption":
+        test_cmp8xchg16_natpage_consumption,
     "cmpxchg4_acq_region7_store": test_cmpxchg4_acq_region7_store,
     "andcm_imm_negative_mask_round_trip": test_andcm_imm_negative_mask_round_trip,
     "stf_spill_postinc_decode": test_stf_spill_postinc_decode,
@@ -21575,6 +21887,7 @@ TEST_NAMES = {
     "czx2_l_zero_index": test_czx2_l_zero_index,
     "mov_rr_indexed_decode": test_mov_rr_indexed_decode,
     "mov_cpuid_indexed_decode": test_mov_cpuid_indexed_decode,
+    "mov_cpuid_madison_model": test_mov_cpuid_madison_model,
     "mov_dahr_indexed_decode": test_mov_dahr_indexed_decode,
     "mov_pkr_indexed_decode": test_mov_pkr_indexed_decode,
     "mov_pkr_does_not_alias_interruption_crs":
@@ -21796,10 +22109,12 @@ TEST_NAMES = {
     "pal_vm_summary": test_pal_vm_summary,
     "pal_vm_summary_reserved_arg": test_pal_vm_summary_reserved_arg,
     "pal_cache_summary": test_pal_cache_summary,
+    "pal_cache_summary_madison": test_pal_cache_summary_madison,
     "pal_cache_summary_reserved_arg": test_pal_cache_summary_reserved_arg,
     "pal_freq_base": test_pal_freq_base,
     "pal_freq_base_reserved_arg": test_pal_freq_base_reserved_arg,
     "pal_freq_ratios": test_pal_freq_ratios,
+    "pal_freq_ratios_madison": test_pal_freq_ratios_madison,
     "pal_freq_ratios_reserved_arg": test_pal_freq_ratios_reserved_arg,
     "pal_vm_page_size": test_pal_vm_page_size,
     "pal_vm_page_size_reserved_arg": test_pal_vm_page_size_reserved_arg,
@@ -21829,10 +22144,12 @@ TEST_NAMES = {
     "pal_cache_init_invalid": test_pal_cache_init_invalid,
     "pal_cache_info": test_pal_cache_info,
     "pal_cache_info_l0_data": test_pal_cache_info_l0_data,
-    "pal_cache_info_l1_unified": test_pal_cache_info_l1_unified,
+    "pal_cache_info_l1_data": test_pal_cache_info_l1_data,
+    "pal_cache_info_l1_instruction": test_pal_cache_info_l1_instruction,
+    "pal_cache_info_l2_unified": test_pal_cache_info_l2_unified,
     "pal_cache_info_invalid": test_pal_cache_info_invalid,
-    "pal_cache_info_unified_bad_type":
-        test_pal_cache_info_unified_bad_type,
+    "pal_cache_info_l2_unified_bad_type":
+        test_pal_cache_info_l2_unified_bad_type,
     "pal_cache_prot_info": test_pal_cache_prot_info,
     "pal_cache_prot_info_invalid": test_pal_cache_prot_info_invalid,
     "pal_cache_prot_info_unified_bad_type":
@@ -21847,8 +22164,30 @@ TEST_NAMES = {
     "pal_proc_set_features": test_pal_proc_set_features,
     "pal_proc_set_features_invalid": test_pal_proc_set_features_invalid,
     "pal_proc_get_features": test_pal_proc_get_features,
+    "pal_proc_get_features_montecito_next_set":
+        test_pal_proc_get_features_montecito_next_set,
+    "pal_proc_get_features_montecito_set18":
+        test_pal_proc_get_features_montecito_set18,
+    "pal_proc_get_features_montecito_beyond_max":
+        test_pal_proc_get_features_montecito_beyond_max,
+    "pal_proc_get_features_madison_beyond_max":
+        test_pal_proc_get_features_madison_beyond_max,
     "pal_proc_get_features_reserved_arg":
         test_pal_proc_get_features_reserved_arg,
+    "pal_logical_to_physical_current":
+        test_pal_logical_to_physical_current,
+    "pal_logical_to_physical_multicore_thread":
+        test_pal_logical_to_physical_multicore_thread,
+    "pal_logical_to_physical_madison_unimplemented":
+        test_pal_logical_to_physical_madison_unimplemented,
+    "pal_cache_shared_info_single_thread":
+        test_pal_cache_shared_info_single_thread,
+    "pal_cache_shared_info_sibling_thread":
+        test_pal_cache_shared_info_sibling_thread,
+    "pal_brand_info_string": test_pal_brand_info_string,
+    "pal_brand_info_frequency": test_pal_brand_info_frequency,
+    "pal_brand_info_cache": test_pal_brand_info_cache,
+    "pal_brand_info_bus": test_pal_brand_info_bus,
     "pal_debug_info": test_pal_debug_info,
     "pal_debug_info_reserved_arg": test_pal_debug_info_reserved_arg,
     "pal_register_info_application_implemented":
@@ -21965,10 +22304,16 @@ TEST_NAMES = {
         test_br_ia_bspstore_mismatch_illegal,
     "br_ia_psr_di_disabled_transition_fault":
         test_br_ia_psr_di_disabled_transition_fault,
+    "br_ia_montecito_native_ia32_disabled_fault":
+        test_br_ia_montecito_native_ia32_disabled_fault,
     "br_ia_ia32_unsupported_aborts_after_state_transition":
         test_br_ia_ia32_unsupported_aborts_after_state_transition,
     "rfi_to_ia32_unsupported_aborts_with_byte_ip":
         test_rfi_to_ia32_unsupported_aborts_with_byte_ip,
+    "rfi_montecito_native_ia32_disabled_fault":
+        test_rfi_montecito_native_ia32_disabled_fault,
+    "rfi_montecito_uncollected_transition_preserves_target":
+        test_rfi_montecito_uncollected_transition_preserves_target,
     "reserved_indirect_branch_btype_illegal":
         test_reserved_indirect_branch_btype_illegal,
     "reserved_ip_relative_branch_btype_illegal":
