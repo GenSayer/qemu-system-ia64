@@ -150,7 +150,7 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
 #define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
 #define FW_HANDOFF_MAGIC  0x4d41523436414951ULL /* "QIA64RAM" */
-#define FW_HANDOFF_VERSION 8ULL
+#define FW_HANDOFF_VERSION 9ULL
 #define FW_HANDOFF_DEBUG_PORT_PRESENT 1ULL
 #define FW_CONSOLE_POLICY_SERIAL 0ULL
 #define FW_CONSOLE_POLICY_VGA    1ULL
@@ -2197,11 +2197,14 @@ typedef struct {
     UINT64 DebugPortBase;
     UINT64 I8042Enabled;
     UINT64 ProcessorCount;
+    UINT64 NvramPersistent;
 } FW_HANDOFF;
 
-FW_STATIC_ASSERT(sizeof(FW_HANDOFF) == 72, fw_handoff_size);
+FW_STATIC_ASSERT(sizeof(FW_HANDOFF) == 80, fw_handoff_size);
 FW_STATIC_ASSERT(__builtin_offsetof(FW_HANDOFF, ProcessorCount) == 64,
                  fw_handoff_processor_count_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(FW_HANDOFF, NvramPersistent) == 72,
+                 fw_handoff_nvram_persistent_offset);
 
 static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
 {
@@ -2421,6 +2424,19 @@ static UINTN fw_handoff_processor_count(void)
         return 1;
     }
     return (UINTN)count;
+}
+
+static BOOLEAN fw_handoff_nvram_persistent(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
+    FW_HANDOFF *handoff;
+
+    if (!fw_handoff_valid(header) || header->Version < 9) {
+        return 0;
+    }
+    handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    return handoff->NvramPersistent != 0;
 }
 
 UINT64 fw_ap_stack_top(UINT64 ProcessorId)
@@ -6472,6 +6488,31 @@ static BOOLEAN conin_uart_read_wait(UINT8 *ch)
     return 0;
 }
 
+static UINT16 conin_ansi_numeric_scan(UINTN Number)
+{
+    switch (Number) {
+    case 1:  return EFI_SCAN_HOME;
+    case 2:  return EFI_SCAN_INSERT;
+    case 3:  return EFI_SCAN_DELETE;
+    case 4:  return EFI_SCAN_END;
+    case 5:  return EFI_SCAN_PAGE_UP;
+    case 6:  return EFI_SCAN_PAGE_DOWN;
+    case 11: return EFI_SCAN_F1;
+    case 12: return EFI_SCAN_F2;
+    case 13: return EFI_SCAN_F3;
+    case 14: return EFI_SCAN_F4;
+    case 15: return EFI_SCAN_F5;
+    case 17: return EFI_SCAN_F6;
+    case 18: return EFI_SCAN_F7;
+    case 19: return EFI_SCAN_F8;
+    case 20: return EFI_SCAN_F9;
+    case 21: return EFI_SCAN_F10;
+    case 23: return EFI_SCAN_F11;
+    case 24: return EFI_SCAN_F12;
+    default: return 0;
+    }
+}
+
 static EFI_STATUS conin_read_device_key(EFI_INPUT_KEY *Key)
 {
     UINT8 ch;
@@ -6507,24 +6548,40 @@ static EFI_STATUS conin_read_device_key(EFI_INPUT_KEY *Key)
                     case 'D': Key->ScanCode = EFI_SCAN_LEFT;  return EFI_SUCCESS;
                     case 'H': Key->ScanCode = EFI_SCAN_HOME;  return EFI_SUCCESS;
                     case 'F': Key->ScanCode = EFI_SCAN_END;   return EFI_SUCCESS;
-                    case '1': case '2': case '3':
-                    case '4': case '5': case '6': {
-                        /* ESC '[' n '~' : Home/Ins/Del/End/PgUp/PgDn. */
-                        UINT8 b3;
-
-                        switch (b2) {
-                        case '1': Key->ScanCode = EFI_SCAN_HOME;      break;
-                        case '2': Key->ScanCode = EFI_SCAN_INSERT;    break;
-                        case '3': Key->ScanCode = EFI_SCAN_DELETE;    break;
-                        case '4': Key->ScanCode = EFI_SCAN_END;       break;
-                        case '5': Key->ScanCode = EFI_SCAN_PAGE_UP;   break;
-                        case '6': Key->ScanCode = EFI_SCAN_PAGE_DOWN; break;
-                        default:  break;
-                        }
-                        (void)conin_uart_read_wait(&b3); /* consume trailing '~' */
+                    default:
+                        break;
+                    }
+                    if (b1 == 'O' && b2 >= 'P' && b2 <= 'S') {
+                        Key->ScanCode = (UINT16)(EFI_SCAN_F1 + b2 - 'P');
                         return EFI_SUCCESS;
                     }
-                    default: break;
+                    if (b1 == '[' && b2 == '[' &&
+                        conin_uart_read_wait(&b2) &&
+                        b2 >= 'A' && b2 <= 'E') {
+                        Key->ScanCode = (UINT16)(EFI_SCAN_F1 + b2 - 'A');
+                        return EFI_SUCCESS;
+                    }
+                    if (b1 == '[' && b2 >= '0' && b2 <= '9') {
+                        UINTN number = b2 - '0';
+                        UINTN digits;
+
+                        for (digits = 1; digits < 3U; digits++) {
+                            if (!conin_uart_read_wait(&b2)) {
+                                break;
+                            }
+                            if (b2 == '~') {
+                                Key->ScanCode =
+                                    conin_ansi_numeric_scan(number);
+                                if (Key->ScanCode != 0) {
+                                    return EFI_SUCCESS;
+                                }
+                                break;
+                            }
+                            if (b2 < '0' || b2 > '9') {
+                                break;
+                            }
+                            number = number * 10U + b2 - '0';
+                        }
                     }
                 }
                 /* Unrecognized sequence: surface ESC rather than lose it. */
@@ -33317,12 +33374,30 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_boot_order(void)
     static CHAR16 boot_order_name[] = {
         'B', 'o', 'o', 't', 'O', 'r', 'd', 'e', 'r', 0
     };
+    static CHAR16 boot_next_name[] = {
+        'B', 'o', 'o', 't', 'N', 'e', 'x', 't', 0
+    };
     UINT16 order[16];
+    UINT16 boot_next;
     UINTN order_size = sizeof(order);
+    UINTN boot_next_size = sizeof(boot_next);
     UINT32 attributes = 0;
     EFI_STATUS st;
     EFI_STATUS last = EFI_NOT_FOUND;
     UINTN i;
+
+    st = rs_get_variable(boot_next_name, (void *)mEfiGlobalVariableGuid,
+                         &attributes, &boot_next_size, &boot_next);
+    if (st == EFI_SUCCESS && boot_next_size == sizeof(boot_next) &&
+        (attributes & EFI_VARIABLE_BOOTSERVICE_ACCESS) != 0) {
+        /* BootNext is a one-shot request and must be consumed before use. */
+        (void)rs_set_variable(boot_next_name,
+                              (void *)mEfiGlobalVariableGuid, 0, 0, NULL);
+        last = boot_image_from_boot_option(boot_next);
+        if (last == EFI_SUCCESS || mBootServicesExited) {
+            return last;
+        }
+    }
 
     st = rs_get_variable(boot_order_name, (void *)mEfiGlobalVariableGuid,
                          &attributes, &order_size, order);
@@ -33407,6 +33482,8 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
     }
     return st;
 }
+
+#include "boot_shell.c"
 
 /* --- Firmware Entry Point (updated) --------------------------------------- */
 
@@ -33971,6 +34048,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("NVRAM Variable Test:  ");
     uart_puts(nvram_variable_selftest_ok ? "contract checks verified\r\n" :
               "verification failed\r\n");
+    uart_puts("EFI Boot Shell:       ");
+    uart_puts(fw_boot_shell_selftest() ?
+              "command parsing and hotkeys verified\r\n" :
+              "verification failed\r\n");
     uart_puts("ResetSystem:          enabled\r\n");
     uart_puts("SAL System Table:     published\r\n");
     uart_puts("SMBIOS Table:         published\r\n");
@@ -34032,7 +34113,16 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "registers/stack/TR verified\r\n" :
               "verification failed\r\n");
     uart_puts("BOOT path:            SCSI/SATA/ATA Block I/O + FAT resolver\r\n");
-    uart_puts("\r\nFirmware ready. Attempting disk boot...\r\n");
+    uart_puts("\r\nFirmware ready.\r\n");
+
+    if (fw_shell_hotkey_window()) {
+        fw_boot_shell_run();
+    }
+    if (mBootServicesExited) {
+        while (1) {
+        }
+    }
+    uart_puts("Attempting disk boot...\r\n");
 
     {
         EFI_STATUS st = boot_image_from_boot_order();

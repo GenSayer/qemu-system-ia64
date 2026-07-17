@@ -13,7 +13,7 @@ PC profile intended for firmware, boot loader, and operating-system bring-up:
 - 1 vCPU by default, configurable from 1 to 4 vCPUs; MTTCG is supported with `-accel tcg,thread=multi`
 - 2 GiB default RAM
 - project-owned IA-64 EFI firmware built from source under `roms/ia64-firmware/`
-- EFI boot/runtime services, PE/COFF and EBC image loading, decompression, filesystems, graphics, storage, USB/input, and debug-support protocols
+- EFI boot/runtime services, an interactive pre-boot shell, PE/COFF and EBC image loading, decompression, filesystems, graphics, storage, USB/input, and debug-support protocols
 - local SAPIC, I/O SAPIC, ACPI platform tables, RTC, watchdog, persistent NVRAM, and serial/debug ports
 - PCI root bus with LSI53C895A SCSI boot storage, ICH9 AHCI, OHCI/UHCI USB, and optional CMD646 IDE/ATAPI
 - ATI-compatible PCI graphics by default, with standard VGA available as an alternative
@@ -74,8 +74,27 @@ Omitting `-vga` selects the default ATI-compatible display. This is recommended 
 Use `-serial stdio` to view serial output. 
 The `-debug-port` option publishes the guest debug transport described by the ACPI DBGP table; for example, `-debug-port tcp::4444,server=on,wait=on,nodelay=on`.
 
-EFI variables are persistent. By default, `ia64-vpc` loads and saves a 64 KiB file named `nvram` in the directory containing  the firmware selected by `-bios`. Use a separate file for each virtual machine with
+EFI variables are persistent. By default, `ia64-vpc` loads and saves a 64 KiB file named `nvram` in the directory containing the firmware selected by `-bios`. Use a separate file for each virtual machine with
 `-machine ia64-vpc,nvram=<path>`, or specify `nvram=none` for volatile EFI variables. Relative paths are resolved from QEMU's current working directory.
+
+At each startup, the firmware waits three seconds for F2, F12, or Delete before continuing normal boot. Any of these keys opens the embedded EFI shell on the graphical and serial consoles. The shell can inspect the machine and its filesystems, launch an EFI application, select a boot target, update the boot order, and set the real-time clock. For example:
+
+```text
+info
+map
+ls fs0:\EFI\BOOT
+run fs0:\EFI\BOOT\TOOL.EFI argument
+boot
+boot Boot0001
+boot fs0:
+bootorder Boot0001 Boot0000
+bootnext Boot0001
+date 2026-07-17
+time 12:34:56
+exit
+```
+
+`boot fsN:` launches `\EFI\BOOT\BOOTIA64.EFI` from that filesystem. `bootnext` is consumed by the next automatic boot attempt. Boot order, next-boot selection, and clock changes survive a reset when the machine has NVRAM backing; with `nvram=none`, they remain valid only for the current process.
 
 An installed EFI system can be attached with an ordinary disk drive:
 
@@ -105,16 +124,16 @@ It is the same version selected by QEMU's configure process; a host `meson` of a
  
 Plain `meson test` from the source directory is not valid because the Meson build data lives under `build`.
 
-The TCG registry currently contains 875 architectural microprograms divided between core, memory/NaT, floating-point, 
+The TCG registry currently contains 900 architectural microprograms divided between core, memory/NaT, floating-point,
 RSE, MMU, interruption, and PAL groups. Machine tests cover platform wiring and display behavior.
 
-The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media.
+The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media. It also exercises the firmware shell through PS/2, USB, and serial input, including direct application execution and NVRAM persistence across restarts.
 
 See [`docs/devel/testing/ia64.rst`](docs/devel/testing/ia64.rst) for focused runs and test-authoring rules.
 
 ## Status
 
-The current implementation boots several IA-64 operating-system installers and supports up to four guest processors. .
+The current implementation boots several IA-64 operating-system installers and supports up to four guest processors.
 Instruction coverage, privileged behavior, floating-point corner cases, and device compatibility still 
 require validation against the IA-64, EFI, SAL, and ACPI specifications.
 

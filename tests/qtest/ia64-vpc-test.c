@@ -37,7 +37,7 @@
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL
-#define IA64_FW_HANDOFF_VERSION      8ULL
+#define IA64_FW_HANDOFF_VERSION      9ULL
 #define IA64_FW_HANDOFF_RAM_SIZE     0x10ULL
 #define IA64_FW_HANDOFF_CONSOLE      0x18ULL
 #define IA64_FW_HANDOFF_IDE_DMA      0x20ULL
@@ -45,6 +45,7 @@
 #define IA64_FW_HANDOFF_DEBUG_BASE   0x30ULL
 #define IA64_FW_HANDOFF_I8042        0x38ULL
 #define IA64_FW_HANDOFF_CPUS         0x40ULL
+#define IA64_FW_HANDOFF_NVRAM        0x48ULL
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 
 typedef struct ExpectedPCIDevice {
@@ -81,7 +82,7 @@ static void test_acpi_reset_register(void)
 }
 
 static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
-                                    uint64_t cpus)
+                                    uint64_t cpus, uint64_t nvram)
 {
     g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR), ==,
                     IA64_FW_HANDOFF_MAGIC);
@@ -102,13 +103,15 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                                IA64_FW_HANDOFF_I8042), ==, i8042);
     g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
                                IA64_FW_HANDOFF_CPUS), ==, cpus);
+    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
+                               IA64_FW_HANDOFF_NVRAM), ==, nvram);
 }
 
 static void test_firmware_handoff_defaults(void)
 {
     QTestState *qts = ia64_vpc_start(NULL);
 
-    assert_firmware_handoff(qts, 1, 1);
+    assert_firmware_handoff(qts, 1, 1, 0);
     qtest_quit(qts);
 }
 
@@ -117,7 +120,7 @@ static void test_firmware_handoff_i8042_off(void)
     QTestState *qts = qtest_init("-machine ia64-vpc,i8042=off "
                                  "-m 256M -S");
 
-    assert_firmware_handoff(qts, 0, 1);
+    assert_firmware_handoff(qts, 0, 1, 0);
     qtest_quit(qts);
 }
 
@@ -129,7 +132,7 @@ static void test_smp_topology(gconstpointer opaque)
     g_autoptr(QDict) response = NULL;
     QList *cpus;
 
-    assert_firmware_handoff(qts, 1, count);
+    assert_firmware_handoff(qts, 1, count, 0);
     response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(response, "return"));
     cpus = qdict_get_qlist(response, "return");

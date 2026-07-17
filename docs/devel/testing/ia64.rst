@@ -39,7 +39,9 @@ Test layers
 
   Success requires one result for every required case, ``failed=0``, a valid
   ``DONE`` count, and a live QEMU process.  Merely keeping QEMU alive or finding
-  a firmware message is not success.
+  a firmware message is not success.  ``test_shell.py`` additionally drives
+  the pre-boot shell through QMP and the serial console, then reuses its NVRAM
+  file to verify persistent variables, clock state, and one-shot ``BootNext``.
 
 Running the tests
 -----------------
@@ -74,6 +76,10 @@ Run machine tests and project-owned firmware tests::
   build/pyvenv/bin/meson test -C build --suite qtest-ia64 --print-errorlogs
   build/pyvenv/bin/meson test -C build --suite func-ia64 --print-errorlogs
   build/pyvenv/bin/meson test -C build --suite func-ia64-thorough --print-errorlogs
+
+Run only the pre-boot shell scenarios::
+
+  build/pyvenv/bin/meson test -C build 'qemu:func-ia64-shell' --print-errorlogs
 
 The EFI applications require ``ia64-linux-gnu-gcc``, ``ld``, and ``objcopy``.
 Meson builds each application once; functional tests consume those outputs and

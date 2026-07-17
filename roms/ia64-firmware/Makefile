@@ -26,7 +26,7 @@ all: ia64-firmware.bin
 entry.o: entry.S
 	$(AS) $(ASFLAGS) -o $@ $<
 
-firmware.o: firmware.c linker-symbols.h
+firmware.o: firmware.c boot_shell.c linker-symbols.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 ia64-firmware.elf: $(OBJS)

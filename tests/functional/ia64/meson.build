@@ -70,6 +70,7 @@ test_ia64_system_deps = ia64_functional_test_apps + [ia64_firmware_bin]
 tests_ia64_system_quick = [
   'host',
   'smoke',
+  'shell',
   'services',
   'tables',
   'smp',
@@ -83,6 +84,7 @@ tests_ia64_system_thorough = [
 test_ia64_timeouts = {
   'host': 30,
   'smoke': 120,
+  'shell': 180,
   'services': 90,
   'tables': 90,
   'smp': 120,

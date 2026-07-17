@@ -86,7 +86,7 @@
 #define IA64_ACPI_SCI_IRQ       9
 #define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION      8ULL
+#define IA64_FW_HANDOFF_VERSION      9ULL
 #define IA64_FW_CONSOLE_SERIAL       0ULL
 #define IA64_FW_CONSOLE_VGA          1ULL
 #define IA64_FW_DEBUG_PORT_PRESENT   1ULL
@@ -778,7 +778,7 @@ static void ia64_vpc_map_ram(MachineState *machine)
 
 static void ia64_vpc_write_firmware_handoff(MachineState *machine)
 {
-    uint8_t handoff[72] = { 0 };
+    uint8_t handoff[80] = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
     stq_le_p(handoff, IA64_FW_HANDOFF_MAGIC);
@@ -791,6 +791,7 @@ static void ia64_vpc_write_firmware_handoff(MachineState *machine)
     stq_le_p(handoff + 48, debug_port_present ? IA64_DEBUG_UART_BASE : 0);
     stq_le_p(handoff + 56, ia64_vpc_i8042_enabled);
     stq_le_p(handoff + 64, machine->smp.cpus);
+    stq_le_p(handoff + 72, ia64_vpc_nvram_resolved_path != NULL);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
 }
 
