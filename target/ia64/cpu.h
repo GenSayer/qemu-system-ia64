@@ -172,6 +172,20 @@ static inline uint64_t ia64_physical_address(uint64_t addr)
     return addr & ~IA64_PHYS_UC_BIT;
 }
 
+static inline bool ia64_pa_is_implemented(uint64_t addr)
+{
+    uint64_t implemented_mask = (1ULL << IA64_IMPL_PA_BITS) - 1;
+
+    return (addr & ~(IA64_PHYS_UC_BIT | implemented_mask)) == 0;
+}
+
+static inline uint64_t ia64_pa_canonicalize(uint64_t addr)
+{
+    uint64_t implemented_mask = (1ULL << IA64_IMPL_PA_BITS) - 1;
+
+    return addr & (IA64_PHYS_UC_BIT | implemented_mask);
+}
+
 static inline uint64_t ia64_ip_bundle_addr(uint64_t ip)
 {
     return ip & IA64_IP_BUNDLE_MASK;

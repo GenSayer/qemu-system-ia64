@@ -11695,7 +11695,19 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     uint8_t access_level;
     bool virt_translation_enabled;
 
+    rid = ia64_region_rid(&cpu->env, addr);
     if (mmu_idx == MMU_PHYS_IDX) {
+        if (!ia64_pa_is_implemented(addr)) {
+            if (probe) {
+                return false;
+            }
+            excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
+                   IA64_EXCP_UNIMPL_DATA_ADDR;
+            if (is_ifetch) {
+                cpu->env.ip = ia64_pa_canonicalize(addr);
+            }
+            goto raise_exception;
+        }
         pa = ia64_physical_address(addr);
         ia64_tlb_set_entry_page(
             cs, addr, pa, TARGET_PAGE_SIZE,
@@ -11714,7 +11726,6 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         access_level = mmu_idx - MMU_IDX_VIRT_CPL0;
     }
 
-    rid = ia64_region_rid(&cpu->env, addr);
     /* A translated MMU index is itself the serialized translation state. */
     virt_translation_enabled = true;
     if (virt_translation_enabled && !ia64_va_is_implemented(addr)) {
@@ -12487,7 +12498,9 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
         fault_addr = cpu->env.fault_ip;
         break;
     case IA64_EXCP_UNIMPL_INST_ADDR:
-        cpu->env.ip = ia64_va_canonicalize(cpu->env.ip);
+        cpu->env.ip = cpu->env.psr & IA64_PSR_IT ?
+                      ia64_va_canonicalize(cpu->env.ip) :
+                      ia64_pa_canonicalize(cpu->env.ip);
         fault_addr = cpu->env.ip;
         break;
     case IA64_EXCP_EXTINT:

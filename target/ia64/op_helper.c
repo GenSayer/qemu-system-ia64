@@ -1563,6 +1563,11 @@ void helper_ia32_unsupported(CPUIA64State *env)
 }
 
 static G_NORETURN void
+ia64_raise_unimplemented_data_address(CPUIA64State *env, uint64_t va,
+                                      uint64_t access, bool is_non_access,
+                                      bool is_speculative, bool itlb_ed);
+
+static G_NORETURN void
 ia64_raise_disabled_isa_transition(CPUIA64State *env, uint64_t fault_ip,
                                    uint32_t fault_slot)
 {
@@ -1574,6 +1579,22 @@ ia64_raise_disabled_isa_transition(CPUIA64State *env, uint64_t fault_ip,
 void helper_raise_unaligned(CPUIA64State *env, uint64_t addr,
                             uint64_t isr_access, uint64_t fault_info)
 {
+    bool unimplemented = env->psr & IA64_PSR_DT ?
+                         !ia64_va_is_implemented(addr) :
+                         !ia64_pa_is_implemented(addr);
+
+    /*
+     * An unimplemented address precludes a concurrent unaligned-reference
+     * condition (SDM Vol. 2, Table 5-3).  Alignment is checked in generated
+     * code before a normal memory access reaches the MMU, so preserve that
+     * qualification here as well.
+     */
+    if (unimplemented) {
+        ia64_raise_unimplemented_data_address(
+            env, addr, isr_access, false, false,
+            ia64_current_code_tlb_ed(env));
+    }
+
     env->cr_ifa = addr;
     env->cr_isr = isr_access;
     if (ia64_current_code_tlb_ed(env)) {
@@ -1592,12 +1613,10 @@ void helper_raise_nat_consumption(CPUIA64State *env, uint64_t isr_access,
                            fault_info & ~3ULL, 0, fault_info & 3);
 }
 
-static void ia64_raise_unimplemented_data_address(CPUIA64State *env,
-                                                  uint64_t va,
-                                                  uint64_t access,
-                                                  bool is_non_access,
-                                                  bool is_speculative,
-                                                  bool itlb_ed)
+static G_NORETURN void
+ia64_raise_unimplemented_data_address(CPUIA64State *env, uint64_t va,
+                                      uint64_t access, bool is_non_access,
+                                      bool is_speculative, bool itlb_ed)
 {
     uint64_t isr = IA64_GENEX_UNIMPL_DATA_ADDR | access;
 
@@ -8094,6 +8113,9 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
         result->valid = false;
     }
     if (!(env->psr & IA64_PSR_DT)) {
+        if (!ia64_pa_is_implemented(va)) {
+            return IA64_EXCP_UNIMPL_DATA_ADDR;
+        }
         pa = ia64_physical_address(va);
         ia64_set_data_reference_result(
             result, pa, (va & IA64_PHYS_UC_BIT) ?
@@ -8477,6 +8499,7 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
                                   uint32_t is_write, uint32_t is_ifetch,
                                   uint32_t size)
 {
+    bool alignment_fault;
     bool itlb_ed;
     IA64Exception excp;
     IA64DataReferenceResult translation;
@@ -8486,9 +8509,12 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
     }
 
     itlb_ed = ia64_current_code_tlb_ed(env);
-    if (ia64_speculative_alignment_fault(env, va, size)) {
-        excp = IA64_EXCP_UNALIGNED;
-    } else if (is_ifetch) {
+    alignment_fault = ia64_speculative_alignment_fault(env, va, size);
+    if (is_ifetch) {
+        if (alignment_fault) {
+            excp = IA64_EXCP_UNALIGNED;
+            goto qualify;
+        }
         return ia64_probe_address(env, va, is_write, is_ifetch,
                                   ia64_psr_cpl(env->psr), false);
     } else {
@@ -8501,21 +8527,37 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
             (env->psr & IA64_PSR_IC) != 0, &translation);
     }
 
-    if (excp == IA64_EXCP_NONE) {
-        if (!is_ifetch && translation.valid &&
-            !ia64_memory_allows_control_speculation(
-                translation.speculation)) {
-            return 0;
-        }
-        return 1;
+qualify:
+    /*
+     * An unimplemented address precludes an unaligned-reference condition.
+     * Other data-reference conditions retain their architectural priority;
+     * only a condition that is itself deferred permits a lower-priority
+     * unaligned condition to be considered.
+     */
+    if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
+        alignment_fault = false;
     }
-    if (ia64_speculative_exception_deferrable(env, excp, itlb_ed)) {
+    if (excp != IA64_EXCP_NONE &&
+        !ia64_speculative_exception_deferrable(env, excp, itlb_ed)) {
+        ia64_raise_data_reference_exception(
+            env, va, is_write, false, false, 0, excp, true, itlb_ed);
+    }
+    if (alignment_fault &&
+        !ia64_speculative_exception_deferrable(
+            env, IA64_EXCP_UNALIGNED, itlb_ed)) {
+        ia64_raise_data_reference_exception(
+            env, va, is_write, false, false, 0, IA64_EXCP_UNALIGNED, true,
+            itlb_ed);
+    }
+    if (excp != IA64_EXCP_NONE || alignment_fault) {
         return 0;
     }
 
-    ia64_raise_data_reference_exception(env, va, is_write, false, false, 0,
-                                        excp, true, itlb_ed);
-    g_assert_not_reached();
+    if (!is_ifetch && translation.valid &&
+        !ia64_memory_allows_control_speculation(translation.speculation)) {
+        return 0;
+    }
+    return 1;
 }
 
 uint64_t helper_advanced_load_allowed(CPUIA64State *env, uint64_t va)

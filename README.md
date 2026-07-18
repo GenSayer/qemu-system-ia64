@@ -105,7 +105,8 @@ An installed EFI system can be attached with an ordinary disk drive:
 The firmware supports persistent EFI boot entries, including short-form hard
 drive device paths, and can boot supported loaders from FAT partitions.
 
-<img width="692" height="595" alt="Windows Server 2008 R2 graphical setup running on qemu-system-ia64 with four vCPUs and 8 GiB of memory." src="https://github.com/user-attachments/assets/14d48987-664a-47cb-8c41-e065d8d67a9d" />
+<img width="692" height="598" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, showing winver and task manager." src="https://github.com/user-attachments/assets/cbf318e6-1202-4a11-95ed-a62f105a8f64" />
+<img width="692" height="598" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, executing systeminfo" src="https://github.com/user-attachments/assets/ce893757-a4b0-4003-8ba8-87fad23d739c" />
 
 ## Tests
 

@@ -55,6 +55,7 @@ CASE_NAMES = (
     'timer_interrupt_exits_chained_loop_after_virtual_deadline',
     'tpr_mmi_masks_timer_until_cleared',
     'tpr_preserves_mmi_and_mic',
+    'unimplemented_physical_instruction_traps',
 )
 
 CASES = {name: TEST_NAMES[name] for name in CASE_NAMES}

@@ -8325,6 +8325,89 @@ test_speculative_unaligned_no_recovery_faults = require_registers(
         "r31": IA64_ISR_R | IA64_ISR_SP,
     }, entry=0x10)
 
+test_speculative_unimplemented_physical_unaligned_defers = require_registers(
+    "speculative_unimplemented_physical_unaligned_defers", [
+        (0x10, *movl_mlx(3, 0x76520ec5b2369f9e)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_AC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8_s(4, 3), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r4_nat": 1,
+    }, entry=0x10)
+
+test_unimplemented_physical_load_faults = require_registers(
+    "unimplemented_physical_load_faults", [
+        (0x10, *movl_mlx(3, 1 << IA64_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(10, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
+        "r10": 1 << IA64_IMPL_PA_BITS,
+    }, entry=0x10)
+
+test_unimplemented_physical_precludes_unaligned = require_registers(
+    "unimplemented_physical_precludes_unaligned", [
+        (0x10, *movl_mlx(3, (1 << IA64_IMPL_PA_BITS) | 1)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_AC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(10, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
+        "r10": (1 << IA64_IMPL_PA_BITS) | 1,
+    }, entry=0x10)
+
+test_unimplemented_physical_instruction_traps = require_registers(
+    "unimplemented_physical_instruction_traps", [
+        (0x10, *movl_mlx(3, 1 << IA64_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 3), nop_i()),
+        (0x60, 0x11, nop_m(), nop_i(), br_indirect(7)),
+        (IA64_LOWER_PRIV_TRANSFER_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x20,
+                 IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r9": IA64_GENEX_UNIMPL_INST_ADDR | IA64_ISR_X,
+    }, entry=0x10)
+
 test_speculative_recovery_dcr_dm_defers_tlb_miss = require_registers(
     "speculative_recovery_dcr_dm_defers_tlb_miss", [
         (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | PTE_ED)),
@@ -21512,6 +21595,14 @@ TEST_NAMES = {
         test_speculative_load_handler_psr_ed_defers_retry,
     "speculative_unaligned_no_recovery_faults":
         test_speculative_unaligned_no_recovery_faults,
+    "speculative_unimplemented_physical_unaligned_defers":
+        test_speculative_unimplemented_physical_unaligned_defers,
+    "unimplemented_physical_load_faults":
+        test_unimplemented_physical_load_faults,
+    "unimplemented_physical_precludes_unaligned":
+        test_unimplemented_physical_precludes_unaligned,
+    "unimplemented_physical_instruction_traps":
+        test_unimplemented_physical_instruction_traps,
     "speculative_recovery_dcr_dm_defers_tlb_miss":
         test_speculative_recovery_dcr_dm_defers_tlb_miss,
     "speculative_recovery_dcr_da_defers_access_bit":
