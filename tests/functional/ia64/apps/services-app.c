@@ -2026,7 +2026,7 @@ static BOOLEAN test_dsdt_prt(const TEST_TABLE_CONTEXT *Context)
             break;
         }
     }
-    if (content == NULL || content >= end || *content != 24U) {
+    if (content == NULL || content >= end || *content != 28U) {
         return 0;
     }
     position = content + 1U;
@@ -2054,14 +2054,14 @@ static BOOLEAN test_dsdt_prt(const TEST_TABLE_CONTEXT *Context)
             return 0;
         }
         device = (UINTN)(address >> 16);
-        if (device > 5U || gsi != 16U + ((device + pin) & 3U)) {
+        if (device > 6U || gsi != 16U + ((device + pin) & 3U)) {
             return 0;
         }
         seen |= 1U << (device * 4U + (UINTN)pin);
         entry_count++;
         position = inner_end;
     }
-    return entry_count == 24U && seen == 0x00ffffffU;
+    return entry_count == 28U && seen == 0x0fffffffU;
 }
 
 static BOOLEAN gas_matches(const UINT8 *Gas, UINT8 SpaceId, UINT8 Width,

@@ -15,3 +15,4 @@ config IA64_VPC
     select IDE_CMD646
     select IDE_PCI
     select LSI_SCSI_PCI
+    select E1000_PCI

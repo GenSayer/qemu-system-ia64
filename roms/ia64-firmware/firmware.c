@@ -1303,7 +1303,7 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[501];
+    UINT8 Aml[551];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
@@ -1868,7 +1868,7 @@ FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 537, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 587, acpi_dsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 398, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
@@ -1994,7 +1994,7 @@ static ACPI_DSDT               mDsdt = {
     .Aml = {
     /* Name (_S5, Package (0x04) { Zero, Zero, Zero, Zero }) */
     0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
-    0x10, 0x48, 0x1e, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x4f, 0x1d,
+    0x10, 0x4a, 0x21, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x41, 0x21,
     0x50, 0x43, 0x49, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50, 0x4e,
     0x50, 0x30, 0x41, 0x30, 0x33, 0x00, 0x08, 0x5f, 0x43, 0x49, 0x44, 0x0d,
     0x50, 0x4e, 0x50, 0x30, 0x41, 0x30, 0x33, 0x00, 0x08, 0x5f, 0x53, 0x45,
@@ -2010,7 +2010,7 @@ static ACPI_DSDT               mDsdt = {
     0x00, 0xc1, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xd0, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x79, 0x00, 0x08, 0x5f, 0x50, 0x52,
-    0x54, 0x12, 0x47, 0x12, 0x18, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x00,
+    0x54, 0x12, 0x49, 0x15, 0x1c, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x00,
     0x00, 0x0a, 0x10, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x01, 0x00, 0x0a,
     0x11, 0x12, 0x0a, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x02, 0x00, 0x0a, 0x12,
     0x12, 0x0a, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x03, 0x00, 0x0a, 0x13, 0x12,
@@ -2035,6 +2035,11 @@ static ACPI_DSDT               mDsdt = {
     0xff, 0x05, 0x00, 0x01, 0x00, 0x0a, 0x12, 0x12, 0x0c, 0x04, 0x0c, 0xff,
     0xff, 0x05, 0x00, 0x0a, 0x02, 0x00, 0x0a, 0x13, 0x12, 0x0c, 0x04, 0x0c,
     0xff, 0xff, 0x05, 0x00, 0x0a, 0x03, 0x00, 0x0a, 0x10,
+    0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x06, 0x00, 0x00, 0x00, 0x0a, 0x12,
+    0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x06, 0x00, 0x01, 0x00, 0x0a, 0x13,
+    0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x06, 0x00, 0x0a, 0x02, 0x00, 0x0a,
+    0x10, 0x12, 0x0c, 0x04, 0x0c, 0xff, 0xff, 0x06, 0x00, 0x0a, 0x03, 0x00,
+    0x0a, 0x11,
     },
 };
 static ACPI_SSDT               mSsdt = {
@@ -21498,6 +21503,11 @@ typedef struct {
     UINT8 SignatureType;
 } __attribute__((packed)) FW_HARD_DRIVE_DEVICE_PATH_NODE;
 
+FW_STATIC_ASSERT(sizeof(FW_HARD_DRIVE_DEVICE_PATH_NODE) == 42U,
+                 hard_drive_device_path_size);
+
+#define FW_IA64_ABI_HARD_DRIVE_DEVICE_PATH_SIZE 48U
+
 typedef struct {
     FW_DEVICE_PATH_NODE Header;
     UINT32 Hid;
@@ -22223,6 +22233,23 @@ static UINTN fw_device_path_prefix_length(const FW_DEVICE_PATH_NODE *prefix,
     return matched;
 }
 
+static BOOLEAN fw_hard_drive_path_node_supported(
+    const FW_DEVICE_PATH_NODE *Node)
+{
+    if (Node == NULL || Node->Type != 0x04U || Node->SubType != 0x01U) {
+        return 0;
+    }
+
+    /*
+     * EFI 1.10 specifies a 42-byte packed node.  Early IA-64 software also
+     * persisted the naturally aligned 48-byte ABI form, including its six
+     * tail-padding bytes.  In either form the defined fields have identical
+     * offsets; callers advance by the advertised length and ignore the tail.
+     */
+    return Node->Length == sizeof(FW_HARD_DRIVE_DEVICE_PATH_NODE) ||
+           Node->Length == FW_IA64_ABI_HARD_DRIVE_DEVICE_PATH_SIZE;
+}
+
 static BOOLEAN fw_short_hard_drive_path_matches(
     const FW_HARD_DRIVE_DEVICE_PATH_NODE *HardDrive,
     const FW_PARTITION_RECORD *Partition)
@@ -22231,9 +22258,7 @@ static BOOLEAN fw_short_hard_drive_path_matches(
     UINTN i;
 
     if (HardDrive == NULL || Partition == NULL || !Partition->in_use ||
-        HardDrive->Header.Type != 0x04U ||
-        HardDrive->Header.SubType != 0x01U ||
-        HardDrive->Header.Length != sizeof(*HardDrive) ||
+        !fw_hard_drive_path_node_supported(&HardDrive->Header) ||
         HardDrive->PartitionNumber != Partition->partition_number ||
         HardDrive->MbrType != Partition->mbr_type ||
         HardDrive->SignatureType != Partition->signature_type) {
@@ -22265,9 +22290,7 @@ static EFI_HANDLE fw_locate_short_hard_drive_path(
     const FW_HARD_DRIVE_DEVICE_PATH_NODE *hard_drive;
     UINTN i;
 
-    if (Path == NULL || Protocol == NULL || Path->Type != 0x04U ||
-        Path->SubType != 0x01U ||
-        Path->Length != sizeof(FW_HARD_DRIVE_DEVICE_PATH_NODE)) {
+    if (Protocol == NULL || !fw_hard_drive_path_node_supported(Path)) {
         return NULL;
     }
     hard_drive = (const FW_HARD_DRIVE_DEVICE_PATH_NODE *)Path;
@@ -23160,8 +23183,7 @@ static EFI_STATUS partition_driver_supported(
     if (This != &mPartitionDriverBinding || ControllerHandle == NULL ||
         (remaining != NULL &&
          (((UINTN)remaining & 3U) != 0 ||
-          remaining->Type != 0x04U || remaining->SubType != 0x01U ||
-          remaining->Length != sizeof(FW_HARD_DRIVE_DEVICE_PATH_NODE) ||
+          !fw_hard_drive_path_node_supported(remaining) ||
           fw_device_path_size(remaining) == 0 ||
           ((FW_HARD_DRIVE_DEVICE_PATH_NODE *)remaining)->PartitionNumber ==
               0 ||

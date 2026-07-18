@@ -15,7 +15,7 @@ PC profile intended for firmware, boot loader, and operating-system bring-up:
 - project-owned IA-64 EFI firmware built from source under `roms/ia64-firmware/`
 - EFI boot/runtime services, an interactive pre-boot shell, PE/COFF and EBC image loading, decompression, filesystems, graphics, storage, USB/input, and debug-support protocols
 - local SAPIC, I/O SAPIC, ACPI platform tables, RTC, watchdog, persistent NVRAM, and serial/debug ports
-- PCI root bus with LSI53C895A SCSI boot storage, ICH9 AHCI, OHCI/UHCI USB, and optional CMD646 IDE/ATAPI
+- PCI root bus with LSI53C895A SCSI boot storage, ICH9 AHCI, e1000 Ethernet, OHCI/UHCI USB, and optional CMD646 IDE/ATAPI
 - ATI-compatible PCI graphics by default, with standard VGA available as an alternative
 - PS/2 input by default, or an automatically attached USB keyboard and absolute USB tablet when `i8042=off` is selected
 
@@ -70,6 +70,22 @@ controller:
 
 The machine automatically attaches a USB keyboard and absolute USB tablet when `i8042=off` is used, so `-usb` is not required.
 Omitting `-vga` selects the default ATI-compatible display. This is recommended for graphical guests; use `-vga std` only when standard VGA compatibility is specifically needed.
+
+An e1000 (82540EM-compatible) PCI network controller is attached by default.
+When QEMU is built with libslirp, connect it to user-mode networking with:
+
+```sh
+-nic user,model=e1000
+```
+
+For a host TAP interface, use:
+
+```sh
+-nic tap,model=e1000,ifname=tap0,script=no,downscript=no
+```
+
+Use `-nic none` to omit the controller. EFI network boot is not currently
+provided; the controller is available to the guest operating system.
 
 Use `-serial stdio` to view serial output. 
 The `-debug-port` option publishes the guest debug transport described by the ACPI DBGP table; for example, `-debug-port tcp::4444,server=on,wait=on,nodelay=on`.

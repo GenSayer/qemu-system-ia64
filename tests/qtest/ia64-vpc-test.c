@@ -7,6 +7,8 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
+#include "qemu/sockets.h"
+#include "qemu/timer.h"
 #include "qemu/units.h"
 #include "qobject/qdict.h"
 #include "qobject/qlist.h"
@@ -15,6 +17,7 @@
 #include "libqos/pci.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
+#include "hw/net/e1000_regs.h"
 
 #define IA64_LEGACY_IO_BASE          0x000000800010000000ULL
 #define IA64_PCI_CONFIG_BASE         0x0000007ff0000000ULL
@@ -72,6 +75,17 @@
 #define IA64_LSI_SCRIPT_MOVE(phase, count) \
     (((phase) << 24) | (count))
 
+#define IA64_E1000_MMIO_BASE         0x00000000c1040000ULL
+#define IA64_E1000_IO_BASE           0x0000c400U
+#define IA64_E1000_SLOT              6U
+#define IA64_E1000_GSI               18U
+#define IA64_E1000_TX_DESC_ADDR      0x00120000U
+#define IA64_E1000_TX_BUFFER_ADDR    0x00121000U
+#define IA64_E1000_RX_DESC_ADDR      0x00122000U
+#define IA64_E1000_RX_BUFFER_ADDR    0x00123000U
+#define IA64_E1000_RING_SIZE         128U
+#define IA64_E1000_TEST_TIMEOUT_MS   5000
+
 typedef struct ExpectedPCIDevice {
     unsigned slot;
     uint16_t vendor;
@@ -81,6 +95,22 @@ typedef struct ExpectedPCIDevice {
     uint8_t irq_pin;
     uint32_t bars[6];
 } ExpectedPCIDevice;
+
+static const ExpectedPCIDevice expected_e1000 = {
+    .slot = IA64_E1000_SLOT,
+    .vendor = PCI_VENDOR_ID_INTEL,
+    .device = E1000_DEV_ID_82540EM,
+    .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
+    .irq_line = IA64_E1000_GSI,
+    .irq_pin = 1,
+    .bars = {
+        [0] = IA64_E1000_MMIO_BASE,
+        [1] = IA64_E1000_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO,
+    },
+};
+
+static uint32_t iosapic_read(QTestState *qts, uint32_t reg);
+static void iosapic_write(QTestState *qts, uint32_t reg, uint32_t value);
 
 static QTestState *ia64_vpc_start(const char *extra_args)
 {
@@ -339,7 +369,179 @@ static void test_pci_default_layout(void)
     for (i = 0; i < ARRAY_SIZE(devices); i++) {
         assert_pci_device(&gbus.bus, &devices[i]);
     }
+    assert_pci_device(&gbus.bus, &expected_e1000);
     qtest_quit(qts);
+}
+
+static void test_e1000_resources_survive_reset(void)
+{
+    QTestState *qts = ia64_vpc_start(NULL);
+    QGenericPCIBus gbus;
+
+    ia64_qpci_init(&gbus, qts);
+    assert_pci_device(&gbus.bus, &expected_e1000);
+    qtest_system_reset(qts);
+    assert_pci_device(&gbus.bus, &expected_e1000);
+    qtest_quit(qts);
+}
+
+static void test_e1000_intx_route(void)
+{
+    const uint8_t vector = 0x52;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + IA64_E1000_GSI * 2;
+    QTestState *qts = ia64_vpc_start(NULL);
+
+    iosapic_write(qts, rte_low, vector | IA64_IOSAPIC_RTE_LEVEL);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_IMC, UINT32_MAX);
+    (void)qtest_readl(qts, IA64_E1000_MMIO_BASE + E1000_ICR);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_IMS,
+                 E1000_IMS_TXDW);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_ICS,
+                 E1000_ICS_TXDW);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+
+    g_assert_cmphex(qtest_readl(qts, IA64_E1000_MMIO_BASE + E1000_ICR) &
+                    E1000_ICR_TXDW, !=, 0);
+    qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_EOI, vector);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, ==, 0);
+    qtest_quit(qts);
+}
+
+static bool e1000_wait_tx_done(QTestState *qts, struct e1000_tx_desc *desc)
+{
+    int i;
+
+    for (i = 0; i < IA64_E1000_TEST_TIMEOUT_MS; i++) {
+        qtest_memread(qts, IA64_E1000_TX_DESC_ADDR, desc, sizeof(*desc));
+        if (le32_to_cpu(desc->upper.data) & E1000_TXD_STAT_DD) {
+            return true;
+        }
+        qtest_clock_step(qts, 1000);
+        g_usleep(1000);
+    }
+    return false;
+}
+
+static bool e1000_wait_rx_done(QTestState *qts, struct e1000_rx_desc *desc)
+{
+    int i;
+
+    for (i = 0; i < IA64_E1000_TEST_TIMEOUT_MS; i++) {
+        qtest_memread(qts, IA64_E1000_RX_DESC_ADDR, desc, sizeof(*desc));
+        if (desc->status & E1000_RXD_STAT_DD) {
+            return true;
+        }
+        qtest_clock_step(qts, 1000);
+        g_usleep(1000);
+    }
+    return false;
+}
+
+static bool socket_receive_all(int fd, void *buffer, size_t length)
+{
+    uint8_t *next = buffer;
+
+    while (length != 0) {
+        GPollFD poll_fd = {
+            .fd = fd,
+            .events = G_IO_IN,
+        };
+        ssize_t received;
+
+        if (g_poll(&poll_fd, 1, IA64_E1000_TEST_TIMEOUT_MS) != 1 ||
+            !(poll_fd.revents & G_IO_IN)) {
+            return false;
+        }
+        received = recv(fd, next, length, 0);
+        if (received <= 0) {
+            return false;
+        }
+        next += received;
+        length -= received;
+    }
+    return true;
+}
+
+static void test_e1000_packet_transfer(void)
+{
+    static const uint8_t packet[64] = {
+        0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+        0x52, 0x54, 0x00, 0x65, 0x43, 0x21,
+        0x08, 0x00, 0x45, 0x00, 0x00, 0x32,
+        0x12, 0x34, 0x00, 0x00, 0x40, 0x11,
+        0x00, 0x00, 0x0a, 0x00, 0x02, 0x0f,
+        0x0a, 0x00, 0x02, 0x02,
+    };
+    struct e1000_tx_desc tx_desc = { 0 };
+    struct e1000_rx_desc rx_desc = { 0 };
+    uint32_t frame_length;
+    uint8_t received[sizeof(packet)];
+    uint8_t rx_buffer[sizeof(packet)];
+    g_autofree char *args = NULL;
+    QTestState *qts;
+    int sockets[2];
+
+    g_assert_cmpint(qemu_socketpair(PF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    qemu_clear_cloexec(sockets[1]);
+    args = g_strdup_printf("-nic socket,fd=%d,model=e1000,"
+                           "mac=52:54:00:12:34:56", sockets[1]);
+    qts = qtest_initf("-machine ia64-vpc -m 256M %s", args);
+    close(sockets[1]);
+
+    qtest_memwrite(qts, IA64_E1000_TX_BUFFER_ADDR, packet, sizeof(packet));
+    tx_desc.buffer_addr = cpu_to_le64(IA64_E1000_TX_BUFFER_ADDR);
+    tx_desc.lower.data = cpu_to_le32(sizeof(packet) | E1000_TXD_CMD_EOP |
+                                    E1000_TXD_CMD_IFCS |
+                                    E1000_TXD_CMD_RS);
+    qtest_memwrite(qts, IA64_E1000_TX_DESC_ADDR,
+                   &tx_desc, sizeof(tx_desc));
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_TDBAL,
+                 IA64_E1000_TX_DESC_ADDR);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_TDBAH, 0);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_TDLEN,
+                 IA64_E1000_RING_SIZE);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_TDH, 0);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_TCTL,
+                 E1000_TCTL_EN | E1000_TCTL_PSP);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_TDT, 1);
+
+    g_assert_true(e1000_wait_tx_done(qts, &tx_desc));
+    g_assert_true(socket_receive_all(sockets[0], &frame_length,
+                                     sizeof(frame_length)));
+    g_assert_cmpuint(ntohl(frame_length), ==, sizeof(packet));
+    g_assert_true(socket_receive_all(sockets[0], received, sizeof(received)));
+    g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+
+    rx_desc.buffer_addr = cpu_to_le64(IA64_E1000_RX_BUFFER_ADDR);
+    qtest_memwrite(qts, IA64_E1000_RX_DESC_ADDR,
+                   &rx_desc, sizeof(rx_desc));
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_RDBAL,
+                 IA64_E1000_RX_DESC_ADDR);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_RDBAH, 0);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_RDLEN,
+                 IA64_E1000_RING_SIZE);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_RDH, 0);
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_RCTL,
+                 E1000_RCTL_EN | E1000_RCTL_UPE | E1000_RCTL_MPE |
+                 E1000_RCTL_BAM | E1000_RCTL_SECRC);
+    frame_length = htonl(sizeof(packet));
+    g_assert_cmpint(qemu_write_full(sockets[0], &frame_length,
+                                    sizeof(frame_length)), ==,
+                    sizeof(frame_length));
+    g_assert_cmpint(qemu_write_full(sockets[0], packet, sizeof(packet)), ==,
+                    sizeof(packet));
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_RDT, 1);
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+    g_assert_true(e1000_wait_rx_done(qts, &rx_desc));
+    g_assert_cmpuint(le16_to_cpu(rx_desc.length), ==, sizeof(packet));
+    qtest_memread(qts, IA64_E1000_RX_BUFFER_ADDR,
+                  rx_buffer, sizeof(rx_buffer));
+    g_assert_cmpmem(rx_buffer, sizeof(rx_buffer), packet, sizeof(packet));
+
+    qtest_quit(qts);
+    close(sockets[0]);
 }
 
 static void test_pci_explicit_cmd646_slot0(void)
@@ -611,6 +813,12 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/default-layout", test_pci_default_layout);
     qtest_add_func("/ia64-vpc/pci/explicit-cmd646-slot0",
                    test_pci_explicit_cmd646_slot0);
+    qtest_add_func("/ia64-vpc/network/resources-survive-reset",
+                   test_e1000_resources_survive_reset);
+    qtest_add_func("/ia64-vpc/network/intx-route",
+                   test_e1000_intx_route);
+    qtest_add_func("/ia64-vpc/network/packet-transfer",
+                   test_e1000_packet_transfer);
     qtest_add_func("/ia64-vpc/lsi/async-nodata-command",
                    test_lsi_async_nodata_command);
     qtest_add_func("/ia64-vpc/iosapic/level-remote-irr",

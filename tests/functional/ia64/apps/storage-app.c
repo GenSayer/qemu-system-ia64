@@ -382,20 +382,14 @@ static BOOLEAN probe_short_form_hard_drive_path(
     EFI_BOOT_SERVICES *bs, EFI_HANDLE image_handle,
     EFI_HANDLE loaded_handle, UINT32 block_size)
 {
-    struct {
-        TEST_HARD_DRIVE_DEVICE_PATH_NODE HardDrive;
-        TEST_DEVICE_PATH_NODE FileHeader;
-        CHAR16 PathName[
-            sizeof(short_form_app_path) / sizeof(short_form_app_path[0])];
-        TEST_DEVICE_PATH_NODE End;
-    } __attribute__((packed, aligned(8))) short_path;
+    static const UINT16 hard_drive_lengths[] = {
+        sizeof(TEST_HARD_DRIVE_DEVICE_PATH_NODE), 48U,
+    };
+    UINT8 short_path[
+        48U + sizeof(TEST_DEVICE_PATH_NODE) + sizeof(short_form_app_path) +
+        sizeof(TEST_DEVICE_PATH_NODE)] __attribute__((aligned(8)));
     TEST_HARD_DRIVE_DEVICE_PATH_NODE *source;
-    EFI_LOADED_IMAGE_PROTOCOL *child_loaded = NULL;
-    EFI_HANDLE located_handle = NULL;
-    EFI_HANDLE child_image = NULL;
-    VOID *remaining;
-    EFI_STATUS status;
-    BOOLEAN valid = 0;
+    UINTN variant;
 
     source = find_hard_drive_path_node(bs, loaded_handle);
     if (source == NULL || block_size == 0 ||
@@ -404,47 +398,66 @@ static BOOLEAN probe_short_form_hard_drive_path(
         return 0;
     }
 
-    bs->SetMem(&short_path, sizeof(short_path), 0);
-    bs->CopyMem(&short_path.HardDrive, source, sizeof(*source));
-    /*
-     * Short-form matching uses the signature and partition number.  Keep
-     * deliberately byte-scaled geometry here to cover boot variables whose
-     * otherwise valid partition identity carries non-LBA geometry values.
-     */
-    short_path.HardDrive.PartitionStart *= block_size;
-    short_path.HardDrive.PartitionSize *= block_size;
-    short_path.FileHeader.Type = 0x04U;
-    short_path.FileHeader.SubType = 0x04U;
-    short_path.FileHeader.Length =
-        sizeof(short_path.FileHeader) + sizeof(short_path.PathName);
-    bs->CopyMem(short_path.PathName, short_form_app_path,
-                sizeof(short_path.PathName));
-    short_path.End.Type = 0x7fU;
-    short_path.End.SubType = 0xffU;
-    short_path.End.Length = sizeof(short_path.End);
+    for (variant = 0; variant < sizeof(hard_drive_lengths) /
+                                     sizeof(hard_drive_lengths[0]);
+         variant++) {
+        TEST_HARD_DRIVE_DEVICE_PATH_NODE *hard_drive =
+            (TEST_HARD_DRIVE_DEVICE_PATH_NODE *)short_path;
+        TEST_DEVICE_PATH_NODE *file_header;
+        TEST_DEVICE_PATH_NODE *end;
+        EFI_LOADED_IMAGE_PROTOCOL *child_loaded = NULL;
+        EFI_HANDLE located_handle = NULL;
+        EFI_HANDLE child_image = NULL;
+        CHAR16 *path_name;
+        VOID *remaining;
+        EFI_STATUS status;
 
-    remaining = &short_path.HardDrive;
-    status = bs->LocateDevicePath(simple_fs_guid, &remaining,
-                                  &located_handle);
-    if (status != EFI_SUCCESS || located_handle != loaded_handle ||
-        remaining != &short_path.FileHeader ||
-        bs->LoadImage(1, image_handle, &short_path.HardDrive,
-                      NULL, 0, &child_image) != EFI_SUCCESS ||
-        child_image == NULL ||
-        bs->HandleProtocol(child_image, loaded_image_guid,
-                           (VOID **)&child_loaded) != EFI_SUCCESS ||
-        child_loaded == NULL ||
-        child_loaded->DeviceHandle != loaded_handle ||
-        child_loaded->FilePath == NULL) {
-        goto out;
-    }
-    valid = 1;
+        bs->SetMem(short_path, sizeof(short_path), 0x5a);
+        bs->CopyMem(hard_drive, source, sizeof(*source));
+        hard_drive->Header.Length = hard_drive_lengths[variant];
+        /*
+         * Short-form matching uses the signature and partition number.  Keep
+         * deliberately byte-scaled geometry here to cover boot variables
+         * whose otherwise valid partition identity carries non-LBA values.
+         */
+        hard_drive->PartitionStart *= block_size;
+        hard_drive->PartitionSize *= block_size;
+        file_header = (TEST_DEVICE_PATH_NODE *)(short_path +
+                                                hard_drive->Header.Length);
+        file_header->Type = 0x04U;
+        file_header->SubType = 0x04U;
+        file_header->Length = sizeof(*file_header) +
+                              sizeof(short_form_app_path);
+        path_name = (CHAR16 *)((UINT8 *)file_header + sizeof(*file_header));
+        bs->CopyMem(path_name, short_form_app_path,
+                    sizeof(short_form_app_path));
+        end = (TEST_DEVICE_PATH_NODE *)((UINT8 *)file_header +
+                                        file_header->Length);
+        end->Type = 0x7fU;
+        end->SubType = 0xffU;
+        end->Length = sizeof(*end);
 
-out:
-    if (child_image != NULL && bs->UnloadImage(child_image) != EFI_SUCCESS) {
-        valid = 0;
+        remaining = hard_drive;
+        status = bs->LocateDevicePath(simple_fs_guid, &remaining,
+                                      &located_handle);
+        if (status != EFI_SUCCESS || located_handle != loaded_handle ||
+            remaining != file_header ||
+            bs->LoadImage(1, image_handle, hard_drive,
+                          NULL, 0, &child_image) != EFI_SUCCESS ||
+            child_image == NULL ||
+            bs->HandleProtocol(child_image, loaded_image_guid,
+                               (VOID **)&child_loaded) != EFI_SUCCESS ||
+            child_loaded == NULL ||
+            child_loaded->DeviceHandle != loaded_handle ||
+            child_loaded->FilePath == NULL ||
+            bs->UnloadImage(child_image) != EFI_SUCCESS) {
+            if (child_image != NULL) {
+                (void)bs->UnloadImage(child_image);
+            }
+            return 0;
+        }
     }
-    return valid;
+    return 1;
 }
 
 static BOOLEAN probe_partition_driver_contracts(

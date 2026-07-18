@@ -5,7 +5,8 @@
  *
  * Provides RAM, a bootstrap CPU, a memory-mapped serial console,
  * firmware ROM loading via -bios, a PCI host bridge, SCSI and AHCI storage
- * controllers, OHCI/UHCI USB, local SAPIC/I/O SAPIC wiring,
+ * controllers, an Ethernet controller, OHCI/UHCI USB,
+ * local SAPIC/I/O SAPIC wiring,
  * and ACPI fixed power-management registers.
  */
 
@@ -27,6 +28,7 @@
 #include "hw/acpi/acpi.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bus.h"
+#include "net/net.h"
 #include "hw/isa/isa.h"
 #include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
@@ -69,10 +71,14 @@
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
 #define IA64_LSI_IO_BASE        0x0000c200U
 #define IA64_VGA_IO_BASE        0x0000c300U
+#define IA64_E1000_IO_BASE      0x0000c400U
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
 #define IA64_LSI_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x00030000ULL)
 #define IA64_LSI_RAM_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x00032000ULL)
+#define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
+#define IA64_E1000_MMIO_SIZE    0x00020000ULL
+#define IA64_E1000_IO_SIZE      0x00000040U
 #define IA64_VGA_FB_PCI_BASE    0x00000000c4000000ULL
 #define IA64_VGA_MMIO_PCI_BASE  0x00000000c8000000ULL
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
@@ -94,6 +100,7 @@
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
 #define IA64_VPC_MAX_CPUS           4
+#define IA64_VPC_NIC_SLOT           6
 #define IA64_VPC_RSE_STACK_SIZE     0x8000ULL
 #define IA64_VPC_EARLY_STACK_TOP    0x08000000ULL
 #define IA64_VPC_AP_EARLY_STACK_TOP 0x00100000ULL
@@ -108,6 +115,8 @@ static PCIDevice *ia64_vpc_ohci_dev;
 static PCIDevice *ia64_vpc_uhci_dev;
 static PCIDevice *ia64_vpc_lsi_dev;
 static PCIDevice *ia64_vpc_vga_dev;
+static PCIDevice *ia64_vpc_nic_devs[MAX_NICS];
+static unsigned int ia64_vpc_nic_count;
 static MemoryRegion *ia64_vpc_vga_fb_alias;
 static MemoryRegion *ia64_vpc_vga_mmio_alias;
 static MemoryRegion *ia64_vpc_vga_legacy_alias;
@@ -893,6 +902,25 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
 
 }
 
+static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
+{
+    uint64_t mmio_base;
+    uint32_t io_base;
+
+    if (pci_dev == NULL || index >= MAX_NICS) {
+        return;
+    }
+
+    mmio_base = IA64_E1000_MMIO_PCI_BASE +
+                index * IA64_E1000_MMIO_SIZE;
+    io_base = IA64_E1000_IO_BASE + index * IA64_E1000_IO_SIZE;
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0, mmio_base, 4);
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1, io_base, 4);
+    pci_default_write_config(pci_dev, PCI_COMMAND,
+                             PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
+                             PCI_COMMAND_MASTER, 2);
+}
+
 static void ia64_vpc_configure_platform_pci(void)
 {
     ia64_vpc_configure_ahci(ia64_vpc_ahci_dev);
@@ -900,11 +928,58 @@ static void ia64_vpc_configure_platform_pci(void)
     ia64_vpc_configure_uhci(ia64_vpc_uhci_dev);
     ia64_vpc_configure_lsi(ia64_vpc_lsi_dev);
     ia64_vpc_configure_vga(ia64_vpc_vga_dev);
+    for (unsigned int i = 0; i < ia64_vpc_nic_count; i++) {
+        ia64_vpc_configure_nic(ia64_vpc_nic_devs[i], i);
+    }
     ia64_vpc_configure_pci_irq(ia64_vpc_ahci_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_ohci_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_uhci_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_lsi_dev);
     ia64_vpc_configure_pci_irq(ia64_vpc_vga_dev);
+    for (unsigned int i = 0; i < ia64_vpc_nic_count; i++) {
+        ia64_vpc_configure_pci_irq(ia64_vpc_nic_devs[i]);
+    }
+}
+
+static void ia64_vpc_record_nic(PCIBus *bus, PCIDevice *pci_dev)
+{
+    uint16_t class;
+
+    if (pci_dev == NULL || ia64_vpc_nic_count >= MAX_NICS) {
+        return;
+    }
+
+    class = pci_get_word(pci_dev->config + PCI_CLASS_DEVICE);
+    if (class != PCI_CLASS_NETWORK_ETHERNET ||
+        pci_dev->io_regions[0].size != IA64_E1000_MMIO_SIZE ||
+        pci_dev->io_regions[1].size != IA64_E1000_IO_SIZE ||
+        pci_get_bus(pci_dev) != bus) {
+        return;
+    }
+
+    ia64_vpc_nic_devs[ia64_vpc_nic_count] = pci_dev;
+    ia64_vpc_configure_nic(pci_dev, ia64_vpc_nic_count);
+    ia64_vpc_configure_pci_irq(pci_dev);
+    ia64_vpc_nic_count++;
+}
+
+static void ia64_vpc_init_network(MachineState *machine, PCIBus *pci_bus)
+{
+    MachineClass *mc = MACHINE_GET_CLASS(machine);
+    unsigned int slot;
+
+    ia64_vpc_nic_count = 0;
+    memset(ia64_vpc_nic_devs, 0, sizeof(ia64_vpc_nic_devs));
+
+    /* Keep the default adapter at a stable BDF after the built-in devices. */
+    pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL,
+                         stringify(IA64_VPC_NIC_SLOT));
+    pci_init_nic_devices(pci_bus, mc->default_nic);
+
+    for (slot = IA64_VPC_NIC_SLOT; slot < PCI_SLOT_MAX; slot++) {
+        ia64_vpc_record_nic(pci_bus,
+                            pci_find_device(pci_bus, 0, PCI_DEVFN(slot, 0)));
+    }
 }
 
 #define TYPE_IA64_PCI_FIXUP_RESET "ia64-pci-fixup-reset"
@@ -1337,6 +1412,7 @@ static void ia64_vpc_init(MachineState *machine)
     ia64_vpc_vga_dev = pci_vga_init(pci_bus);
     ia64_vpc_configure_vga(ia64_vpc_vga_dev);
     ia64_vpc_map_vga_fixed_windows(ia64_vpc_vga_dev);
+    ia64_vpc_init_network(machine, pci_bus);
     pci_bus_clear_slot_reserved_mask(pci_bus, 1U << 0);
 
     ia64_vpc_powerdown_notifier.notify = ia64_vpc_powerdown_req;
@@ -1360,6 +1436,7 @@ static void ia64_vpc_machine_init(MachineClass *mc)
     mc->default_ram_size = 2 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
     mc->default_display = "ati";
+    mc->default_nic = "e1000";
     mc->block_default_type = IF_SCSI;
     mc->no_serial = 0;
     mc->no_parallel = 1;
