@@ -208,6 +208,7 @@ enum {
     LSI_DMA_SCRIPTS, /* processing DMA from lsi_execute_script */
     LSI_DMA_IN_PROGRESS, /* DMA operation is in progress */
     LSI_WAIT_SCRIPTS, /* SCRIPTS stopped because of instruction count limit */
+    LSI_WAIT_COMMAND, /* wait for an asynchronous command without data */
 };
 
 enum {
@@ -598,10 +599,10 @@ static int lsi_bad_phase(LSIState *s, int out, int new_phase)
 }
 
 
-/* Resume SCRIPTS execution after a DMA operation.  */
+/* Resume SCRIPTS execution after an asynchronous SCSI operation. */
 static void lsi_resume_script(LSIState *s)
 {
-    if (s->waiting != 2) {
+    if (s->waiting != LSI_DMA_SCRIPTS) {
         s->waiting = LSI_NOWAIT;
         lsi_execute_script(s);
     } else {
@@ -818,7 +819,8 @@ static void lsi_command_complete(SCSIRequest *req, size_t resid)
     trace_lsi_command_complete(req->status);
     s->status = req->status;
     s->command_complete = 2;
-    if (s->waiting && s->dbc != 0) {
+    if ((s->waiting == LSI_DMA_SCRIPTS ||
+         s->waiting == LSI_DMA_IN_PROGRESS) && s->dbc != 0) {
         /* Raise phase mismatch for short transfers.  */
         stop = lsi_bad_phase(s, out, PHASE_ST);
         if (stop) {
@@ -924,8 +926,9 @@ static void lsi_do_command(LSIState *s)
                 lsi_queue_command(s);
             }
         } else {
-            /* wait command complete */
+            /* Stop SCRIPTS until the no-data command completes. */
             lsi_set_phase(s, PHASE_DI);
+            s->waiting = LSI_WAIT_COMMAND;
         }
     }
 }

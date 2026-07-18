@@ -3873,7 +3873,8 @@ static bool ia64_data_address_to_mapped_phys_attr(CPUIA64State *env,
     uint32_t rid;
     const IA64TlbEntry *entry;
 
-    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, va, pa)) {
+    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, env->psr, va,
+                                  pa)) {
         if (spec) {
             *spec = IA64_MEM_SPECULATIVE;
         }
@@ -8002,7 +8003,8 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
         return 0;
     }
 
-    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, va, &pa)) {
+    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, env->psr, va,
+                                  &pa)) {
         return 1;
     }
 
@@ -8100,7 +8102,8 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
             (va & IA64_PHYS_UC_BIT) ? IA64_PTE_MA_UC : IA64_PTE_MA_WB);
         return IA64_EXCP_NONE;
     }
-    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, va, &pa) ||
+    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, env->psr, va,
+                                  &pa) ||
         ia64_sal_boot_virtual_pa(env, va, &pa)) {
         ia64_set_data_reference_result(result, pa, IA64_MEM_SPECULATIVE,
                                        IA64_PTE_MA_WB);
@@ -8843,8 +8846,8 @@ static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
     uint8_t perm;
     uint32_t rid;
 
-    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, entry_va,
-                                  entry_pa)) {
+    if (ia64_firmware_identity_pa(env->cr_iva, env->ip, env->psr,
+                                  entry_va, entry_pa)) {
         return IA64_VHPT_ENTRY_TRANSLATED;
     }
 

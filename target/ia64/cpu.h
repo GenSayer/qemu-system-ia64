@@ -148,12 +148,14 @@ static inline bool ia64_firmware_owns_iva(uint64_t iva)
 }
 
 static inline bool ia64_firmware_identity_pa(uint64_t iva, uint64_t ip,
-                                             uint64_t va, uint64_t *pa)
+                                             uint64_t psr, uint64_t va,
+                                             uint64_t *pa)
 {
     bool firmware_context =
-        ia64_firmware_owns_iva(iva) ||
-        (ip >= IA64_FW_IDENTITY_BASE &&
-         ip < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE);
+        (psr & IA64_PSR_CPL_MASK) == 0 &&
+        (ia64_firmware_owns_iva(iva) ||
+         (ip >= IA64_FW_IDENTITY_BASE &&
+          ip < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE));
 
     if (firmware_context &&
         va >= IA64_FW_IDENTITY_BASE &&

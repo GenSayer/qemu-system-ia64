@@ -48,6 +48,30 @@
 #define IA64_FW_HANDOFF_NVRAM        0x48ULL
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 
+#define IA64_LSI_MMIO_BASE           0x00000000c1030000ULL
+#define IA64_LSI_SCRIPT_ADDR         0x00100000U
+#define IA64_LSI_MSGOUT_ADDR         0x00110000U
+#define IA64_LSI_CDB_ADDR            0x00110010U
+#define IA64_LSI_STATUS_ADDR         0x00110020U
+#define IA64_LSI_COMPLETE_ADDR       0x00110030U
+#define IA64_LSI_REG_DSTAT           0x0c
+#define IA64_LSI_REG_ISTAT0          0x14
+#define IA64_LSI_REG_DSP             0x2c
+#define IA64_LSI_REG_SIST0           0x42
+#define IA64_LSI_REG_SIST1           0x43
+#define IA64_LSI_ISTAT0_DIP          0x01
+#define IA64_LSI_ISTAT0_INTF         0x04
+#define IA64_LSI_DSTAT_SIR           0x04
+#define IA64_LSI_PHASE_CMD           2
+#define IA64_LSI_PHASE_ST            3
+#define IA64_LSI_PHASE_MO            6
+#define IA64_LSI_PHASE_MI            7
+#define IA64_LSI_SCRIPT_SELECT       0x40000008U
+#define IA64_LSI_SCRIPT_DISCONNECT   0x48000000U
+#define IA64_LSI_SCRIPT_INTERRUPT    0x98080000U
+#define IA64_LSI_SCRIPT_MOVE(phase, count) \
+    (((phase) << 24) | (count))
+
 typedef struct ExpectedPCIDevice {
     unsigned slot;
     uint16_t vendor;
@@ -336,6 +360,93 @@ static void test_pci_explicit_cmd646_slot0(void)
     qtest_quit(qts);
 }
 
+static void lsi_write_script_insn(QTestState *qts, uint32_t *addr,
+                                  uint32_t insn, uint32_t arg)
+{
+    qtest_writel(qts, *addr, insn);
+    qtest_writel(qts, *addr + 4, arg);
+    *addr += 8;
+}
+
+static bool lsi_run_nodata_command(QTestState *qts, const uint8_t *cdb,
+                                   size_t cdb_len, uint8_t *status)
+{
+    const uint8_t identify = 0x80;
+    uint32_t addr = IA64_LSI_SCRIPT_ADDR;
+    uint8_t dstat = 0;
+    unsigned int i;
+
+    lsi_write_script_insn(qts, &addr, IA64_LSI_SCRIPT_SELECT, 0);
+    lsi_write_script_insn(qts, &addr,
+                          IA64_LSI_SCRIPT_MOVE(IA64_LSI_PHASE_MO, 1),
+                          IA64_LSI_MSGOUT_ADDR);
+    lsi_write_script_insn(qts, &addr,
+                          IA64_LSI_SCRIPT_MOVE(IA64_LSI_PHASE_CMD,
+                                               cdb_len),
+                          IA64_LSI_CDB_ADDR);
+    lsi_write_script_insn(qts, &addr,
+                          IA64_LSI_SCRIPT_MOVE(IA64_LSI_PHASE_ST, 1),
+                          IA64_LSI_STATUS_ADDR);
+    lsi_write_script_insn(qts, &addr,
+                          IA64_LSI_SCRIPT_MOVE(IA64_LSI_PHASE_MI, 1),
+                          IA64_LSI_COMPLETE_ADDR);
+    lsi_write_script_insn(qts, &addr, IA64_LSI_SCRIPT_DISCONNECT, 0);
+    lsi_write_script_insn(qts, &addr, IA64_LSI_SCRIPT_INTERRUPT, 0);
+
+    qtest_memwrite(qts, IA64_LSI_MSGOUT_ADDR, &identify, sizeof(identify));
+    qtest_memwrite(qts, IA64_LSI_CDB_ADDR, cdb, cdb_len);
+    qtest_writeb(qts, IA64_LSI_STATUS_ADDR, 0xff);
+    qtest_writeb(qts, IA64_LSI_COMPLETE_ADDR, 0xff);
+
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSTAT);
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_SIST0);
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_SIST1);
+    qtest_writeb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_ISTAT0,
+                 IA64_LSI_ISTAT0_INTF);
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSP,
+                 IA64_LSI_SCRIPT_ADDR);
+
+    for (i = 0; i < 1000; i++) {
+        if (qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_ISTAT0) &
+            IA64_LSI_ISTAT0_DIP) {
+            dstat = qtest_readb(qts,
+                                IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSTAT);
+            if (dstat & IA64_LSI_DSTAT_SIR) {
+                break;
+            }
+        }
+        g_usleep(1000);
+    }
+
+    *status = qtest_readb(qts, IA64_LSI_STATUS_ADDR);
+    return (dstat & IA64_LSI_DSTAT_SIR) != 0;
+}
+
+static void test_lsi_async_nodata_command(void)
+{
+    const uint8_t test_unit_ready[6] = { 0 };
+    const uint8_t synchronize_cache[10] = { 0x35 };
+    QTestState *qts;
+    uint8_t status;
+    unsigned int i;
+
+    qts = ia64_vpc_start(
+        "-blockdev driver=null-co,read-zeroes=on,"
+                  "node-name=disk0,size=1048576 "
+        "-device scsi-hd,drive=disk0,bus=scsi.0,scsi-id=0");
+
+    /* Consume the initial unit attention before testing async completion. */
+    g_assert_true(lsi_run_nodata_command(qts, test_unit_ready,
+                                         sizeof(test_unit_ready), &status));
+    for (i = 0; i < 8; i++) {
+        g_assert_true(lsi_run_nodata_command(qts, synchronize_cache,
+                                             sizeof(synchronize_cache),
+                                             &status));
+        g_assert_cmpuint(status, ==, 0);
+    }
+    qtest_quit(qts);
+}
+
 static void iosapic_select(QTestState *qts, uint32_t reg)
 {
     qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_IOREGSEL, reg);
@@ -500,6 +611,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/default-layout", test_pci_default_layout);
     qtest_add_func("/ia64-vpc/pci/explicit-cmd646-slot0",
                    test_pci_explicit_cmd646_slot0);
+    qtest_add_func("/ia64-vpc/lsi/async-nodata-command",
+                   test_lsi_async_nodata_command);
     qtest_add_func("/ia64-vpc/iosapic/level-remote-irr",
                    test_iosapic_level_remote_irr);
     qtest_add_func("/ia64-vpc/sparse-io/pm-register",

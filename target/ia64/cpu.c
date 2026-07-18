@@ -818,7 +818,8 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
         return address == entry_pa;
     }
 
-    if (ia64_firmware_identity_pa(env->cr_iva, address, address, &pa) ||
+    if (ia64_firmware_identity_pa(env->cr_iva, address, env->psr,
+                                  address, &pa) ||
         ia64_sal_boot_virtual_pa(env, address, &pa)) {
         return pa == entry_pa;
     }
@@ -11655,7 +11656,8 @@ static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
         return addr;
     }
 
-    if (ia64_firmware_identity_pa(cpu->env.cr_iva, addr, addr, &pa)) {
+    if (ia64_firmware_identity_pa(cpu->env.cr_iva, addr, cpu->env.psr,
+                                  addr, &pa)) {
         return pa & TARGET_PAGE_MASK;
     }
 
@@ -11729,7 +11731,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
     if (ia64_firmware_identity_pa(cpu->env.cr_iva,
                                   is_ifetch ? addr : cpu->env.ip,
-                                  addr, &pa)) {
+                                  cpu->env.psr, addr, &pa)) {
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
         ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,

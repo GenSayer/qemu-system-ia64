@@ -82,8 +82,10 @@ IA64_PSR_IS = 1 << 34
 IA64_PSR_MC = 1 << 35
 IA64_PSR_IT = 1 << 36
 IA64_PSR_ED = 1 << 43
+IA64_PSR_BN = 1 << 44
 IA64_PSR_VM = 1 << 46
 IA64_PHYS_UC_BIT = 1 << 63
+IA64_FW_IDENTITY_BASE = 0x100000
 IA64_CR_ITM = 1
 IA64_CR_SAPIC_IVR = 65
 IA64_CR_SAPIC_TPR = 66
@@ -17053,6 +17055,82 @@ test_interruption_serializes_pending_ptr_d = require_registers(
         "r31": ITC_DATA_LOW,
     }, entry=0x10)
 
+test_rfi_serializes_pending_ptr_d = require_registers(
+    "rfi_serializes_pending_ptr_d", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(20, HIGH_TR_BASE)),
+        (0x30, 0x00, adds(7, 0x68, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(20, 20), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itr_d(5, 18), nop_i(),
+         nop_i()),
+        (0x70, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x80, *movl_mlx(2, HIGH_TR_BASE + 0x9000)),
+        (0x90, *movl_mlx(3, HIGH_TR_BASE)),
+        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0xb0, *movl_mlx(21, 0x100)),
+        (0xc0, 0x00, ptr_d(3, 7), nop_i(),
+         nop_i()),
+        *rfi_to_gr(0xd0, 19, 21),
+        (0x100, 0x00, ld8(31, 2), nop_i(),
+         nop_i()),
+        (0x110, 0x10, nop_m(), adds(29, 0x76, 0),
+         br_cond(0x110, 0x120)),
+        (0x120, 0x10, nop_m(), nop_i(),
+         br_cond(0x120, 0x120)),
+        (IA64_ALT_DTLB_VECTOR, 0x10, nop_m(), adds(29, 0x77, 0),
+         br_cond(IA64_ALT_DTLB_VECTOR,
+                 IA64_ALT_DTLB_VECTOR + 0x10)),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10,
+                 IA64_ALT_DTLB_VECTOR + 0x10)),
+        ITC_DATA_BUNDLE,
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x77,
+    }, entry=0x10)
+
+test_rfi_serializes_pending_ptr_i = require_registers(
+    "rfi_serializes_pending_ptr_i", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_IT | IA64_PSR_BN)),
+        (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), adds(5, 0, 0),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(0, 20), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itr_i(5, 18), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(18, LOW_VECTOR_TR_PTE + 0x10000)),
+        (0x80, *movl_mlx(20, 0x10000)),
+        (0x90, 0x00, mov_m_gr_cr(20, 20), adds(5, 5, 0),
+         nop_i()),
+        (0xa0, 0x00, itr_i(5, 18), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(3, 0x10000)),
+        (0xc0, 0x00, ptr_i(3, 7), nop_i(),
+         nop_i()),
+        *rfi_to_gr(0xd0, 19, 20),
+        (0x4000c00, 0x10, nop_m(), adds(31, 0x78, 0),
+         br_cond(0x4000c00, 0x0c10)),
+        (0x4000c10, 0x10, nop_m(), nop_i(),
+         br_cond(0x4000c10, 0x0c10)),
+        (0x4010000, 0x10, nop_m(), adds(31, 0x44, 0),
+         br_cond(0x4010000, 0x10010)),
+        (0x4010010, 0x10, nop_m(), nop_i(),
+         br_cond(0x4010010, 0x10010)),
+    ], {
+        "ip": 0x0c10,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x78,
+    }, entry=0x10)
+
 test_mov_pkr_indexed_decode = require_registers("mov_pkr_indexed_decode", [
     (0x10, 0x00, addl(2, 0x5501, 0), adds(3, 0x103, 0),
      nop_i()),
@@ -17489,6 +17567,43 @@ test_firmware_runtime_identity_after_iva_handoff = require_registers(
         "ip": 0x100010,
         "exception": IA64_EXCP_NONE,
         "r31": FW_IDENTITY_DATA,
+    }, entry=0x10)
+
+test_firmware_identity_does_not_override_user_mapping = require_registers(
+    "firmware_identity_does_not_override_user_mapping", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | (3 << 7))),
+        (0x20, *movl_mlx(19, (1 << 36) | IA64_PSR_CPL3)),
+        (0x30, *movl_mlx(20, IA64_FW_IDENTITY_BASE)),
+        (0x40, *movl_mlx(21, 0x4000000)),
+        (0x50, 0x00, adds(7, LOW_VECTOR_ITIR, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(20, 20), nop_i(),
+         nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x80, 0x00, itr_i(5, 18), nop_i(),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(21, 2), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, srlz_i(), nop_i(),
+         nop_i()),
+        *rfi_to_gr(0xb0, 19, 20),
+        (IA64_FW_IDENTITY_BASE, 0x10, nop_m(), adds(31, 0x66, 0),
+         br_cond(IA64_FW_IDENTITY_BASE,
+                 IA64_FW_IDENTITY_BASE + 0x10)),
+        (IA64_FW_IDENTITY_BASE + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FW_IDENTITY_BASE + 0x10,
+                 IA64_FW_IDENTITY_BASE + 0x10)),
+        (0x4000000, 0x10, nop_m(), adds(31, 0x55, 0),
+         br_cond(IA64_FW_IDENTITY_BASE,
+                 IA64_FW_IDENTITY_BASE + 0x10)),
+        (0x4000010, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FW_IDENTITY_BASE + 0x10,
+                 IA64_FW_IDENTITY_BASE + 0x10)),
+    ], {
+        "ip": IA64_FW_IDENTITY_BASE + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x55,
     }, entry=0x10)
 
 
@@ -21872,9 +21987,13 @@ TEST_NAMES = {
     "firmware_identity_under_translation": test_firmware_identity_under_translation,
     "firmware_identity_ends_after_iva_handoff":
         test_firmware_identity_ends_after_iva_handoff,
+    "firmware_identity_does_not_override_user_mapping":
+        test_firmware_identity_does_not_override_user_mapping,
     "firmware_runtime_identity_after_iva_handoff":
         test_firmware_runtime_identity_after_iva_handoff,
     "rfi_restores_translation_bits": test_rfi_restores_translation_bits,
+    "rfi_serializes_pending_ptr_d": test_rfi_serializes_pending_ptr_d,
+    "rfi_serializes_pending_ptr_i": test_rfi_serializes_pending_ptr_i,
     "rfi_resumes_at_ipsr_ri_slot": test_rfi_resumes_at_ipsr_ri_slot,
     "mov_from_psr_does_not_copy_execution_slot_to_rfi":
         test_mov_from_psr_does_not_copy_execution_slot_to_rfi,
