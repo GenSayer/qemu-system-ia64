@@ -35,6 +35,7 @@
 #define IA64_IOSAPIC_IOWIN           0x10ULL
 #define IA64_IOSAPIC_EOI             0x40ULL
 #define IA64_IOSAPIC_RTE_BASE        0x10U
+#define IA64_IOSAPIC_RTE_LOWEST      BIT(8)
 #define IA64_IOSAPIC_RTE_DELIVERY    BIT(12)
 #define IA64_IOSAPIC_RTE_REMOTE_IRR  BIT(14)
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
@@ -368,6 +369,16 @@ static void test_pci_default_layout(void)
     }
     for (i = 0; i < ARRAY_SIZE(devices); i++) {
         assert_pci_device(&gbus.bus, &devices[i]);
+    }
+    {
+        QPCIDevice *lsi = qpci_device_find(&gbus.bus, QPCI_DEVFN(4, 0));
+
+        g_assert_nonnull(lsi);
+        g_assert_cmphex(qpci_config_readw(lsi, PCI_SUBSYSTEM_VENDOR_ID), ==,
+                        PCI_VENDOR_ID_LSI_LOGIC);
+        g_assert_cmphex(qpci_config_readw(lsi, PCI_SUBSYSTEM_ID), ==,
+                        PCI_VENDOR_ID_LSI_LOGIC);
+        g_free(lsi);
     }
     assert_pci_device(&gbus.bus, &expected_e1000);
     qtest_quit(qts);
@@ -764,6 +775,27 @@ static void test_iosapic_level_remote_irr(void)
     qtest_quit(qts);
 }
 
+static void test_iosapic_lowest_priority(void)
+{
+    const unsigned pin = 22;
+    const uint8_t vector = 0x52;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
+    QTestState *qts = ia64_vpc_start(NULL);
+    g_autofree char *iosapic_path =
+        find_unattached_child(qts, "ia64-iosapic");
+
+    iosapic_write(qts, rte_low,
+                  vector | IA64_IOSAPIC_RTE_LOWEST |
+                  IA64_IOSAPIC_RTE_LEVEL);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 0);
+    qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_EOI, vector);
+    qtest_quit(qts);
+}
+
 static void test_sparse_io_pm_register(void)
 {
     const uint32_t port = IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM1_CNT_OFFSET;
@@ -823,6 +855,8 @@ int main(int argc, char **argv)
                    test_lsi_async_nodata_command);
     qtest_add_func("/ia64-vpc/iosapic/level-remote-irr",
                    test_iosapic_level_remote_irr);
+    qtest_add_func("/ia64-vpc/iosapic/lowest-priority",
+                   test_iosapic_lowest_priority);
     qtest_add_func("/ia64-vpc/sparse-io/pm-register",
                    test_sparse_io_pm_register);
 

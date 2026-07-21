@@ -2494,6 +2494,7 @@ static void lsi_class_init(ObjectClass *klass, const void *data)
     k->vendor_id = PCI_VENDOR_ID_LSI_LOGIC;
     k->device_id = PCI_DEVICE_ID_LSI_53C895A;
     k->class_id = PCI_CLASS_STORAGE_SCSI;
+    k->subsystem_vendor_id = PCI_VENDOR_ID_LSI_LOGIC;
     k->subsystem_id = 0x1000;
     device_class_set_legacy_reset(dc, lsi_scsi_reset);
     device_class_set_props(dc, lsi_properties);

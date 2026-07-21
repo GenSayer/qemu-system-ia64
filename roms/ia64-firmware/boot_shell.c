@@ -798,15 +798,11 @@ static EFI_STATUS fw_shell_execute_path(const CHAR8 *Specification,
     if (ArgumentCount != 0) {
         status = fw_shell_set_image_arguments(image, ArgumentCount,
                                               Arguments, &load_options);
-    } else if (BootPolicy &&
-               ((mShellFileSystems[fs_index].handle == mRawBlockIoHandle &&
-                 storage_is_cd(&mRawStorageDevice)) ||
-                (mShellFileSystems[fs_index].handle == mBlockIoHandle &&
-                 storage_is_cd(&mBootStorageDevice)))) {
-        status = fw_copy_loaded_image_load_options(
-            image, &mOpticalSetupOsOptions, sizeof(mOpticalSetupOsOptions),
-            &load_options);
     }
+    /*
+     * Booting optical media from the shell uses empty load options, matching
+     * standard OS-agnostic EFI removable-media boot (no injected payload).
+     */
     if (status != EFI_SUCCESS) {
         (void)mBootServices.UnloadImage(image);
         return status;

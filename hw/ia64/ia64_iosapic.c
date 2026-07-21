@@ -26,8 +26,9 @@
 #define RTE_TRIGGER_LEVEL    0x0000000000008000ULL
 #define RTE_RO_BITS          (RTE_DELIVERY_STATUS | RTE_REMOTE_IRR)
 
-#define IOSAPIC_DELIVERY_INT   0
-#define IOSAPIC_DELIVERY_NMI   4
+#define IOSAPIC_DELIVERY_FIXED  0
+#define IOSAPIC_DELIVERY_LOWEST 1
+#define IOSAPIC_DELIVERY_NMI    4
 #define IOSAPIC_DELIVERY_EXTINT 7
 
 struct IA64IOSapicState {
@@ -54,7 +55,14 @@ static void iosapic_update(IA64IOSapicState *s, int pin)
     }
 
     switch (delivery) {
-    case IOSAPIC_DELIVERY_INT:
+    case IOSAPIC_DELIVERY_FIXED:
+    case IOSAPIC_DELIVERY_LOWEST:
+        /*
+         * Lowest-priority delivery is a redirection hint.  A platform may
+         * ignore the hint and deliver to the valid ID/EID programmed in the
+         * RTE.  The firmware advertises no external interrupt redirection,
+         * so use that architected fallback.
+         */
         vector = rte & RTE_VECTOR_MASK;
         if (!ia64_external_interrupt_vector_valid(vector)) {
             return;

@@ -53,6 +53,7 @@ class MicroProgram:
     machine_args: tuple[str, ...] = ()
     cpu: str | None = None
     smp: str = "1"
+    memory: str | None = None
     expected_exit: ExpectedExit | None = None
 
 
@@ -112,6 +113,8 @@ def _command(qemu: str, program: MicroProgram) -> list[str]:
         "-qmp", "stdio",
         "-S",
     ]
+    if program.memory is not None:
+        command += ["-m", program.memory]
     if program.cpu is not None:
         command += ["-cpu", program.cpu]
     return command + _loader_args(program)

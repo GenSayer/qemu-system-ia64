@@ -3614,17 +3614,26 @@ static UINT64 pci_config_all_ones(UINTN Size)
     return (1ULL << (Size * 8U)) - 1U;
 }
 
-static UINT64 __attribute__((noinline))
-pci_config_ecam_addr(UINT64 Segment, UINT64 Bus, UINT64 Device,
-                     UINT64 Function, UINT64 Offset)
+static UINT64 pci_config_ecam_addr_from_base(UINT64 Base, UINT64 Segment,
+                                             UINT64 Bus, UINT64 Device,
+                                             UINT64 Function, UINT64 Offset)
 {
     if (Segment != 0 || Bus > 0xff || Device > 0x1f || Function > 7 ||
         Offset >= 0x1000) {
         return 0;
     }
 
-    return pci_config_cpu_base() | (Bus << 20) | (Device << 15) |
-           (Function << 12) | Offset;
+    /* EFI virtual mappings are page-aligned, not ECAM-aperture-aligned. */
+    return Base + (Bus << 20) + (Device << 15) +
+           (Function << 12) + Offset;
+}
+
+static UINT64 __attribute__((noinline))
+pci_config_ecam_addr(UINT64 Segment, UINT64 Bus, UINT64 Device,
+                     UINT64 Function, UINT64 Offset)
+{
+    return pci_config_ecam_addr_from_base(pci_config_cpu_base(), Segment, Bus,
+                                          Device, Function, Offset);
 }
 
 static UINT64 pci_config_read_value(UINT64 Segment, UINT64 Bus, UINT64 Device,
@@ -3773,7 +3782,7 @@ static BOOLEAN __attribute__((noinline)) sal_pci_config_selftest(void)
     SAL_RETURN_VALUE bad_alignment;
     UINTN saved_runtime_ecam = mRuntimePciConfigEcam;
     BOOLEAN saved_virtual_map_applied = mVirtualAddressMapApplied;
-    UINTN virtual_ecam = 0xe0000000d0000000ULL;
+    UINTN virtual_ecam = 0xe0000000d0018000ULL;
 
     mVirtualAddressMapApplied = 0;
     if (pci_config_cpu_base_for_mode(0) != PCI_CONFIG_ECAM_BASE ||
@@ -3785,7 +3794,11 @@ static BOOLEAN __attribute__((noinline)) sal_pci_config_selftest(void)
     }
     mRuntimePciConfigEcam = virtual_ecam;
     mVirtualAddressMapApplied = 1;
-    if (pci_config_cpu_base_for_mode(1) != virtual_ecam) {
+    if (pci_config_cpu_base_for_mode(1) != virtual_ecam ||
+        pci_config_ecam_addr_from_base(virtual_ecam, 0, 0, 4, 0, 0) !=
+            virtual_ecam + (4U << 15) ||
+        pci_config_ecam_addr_from_base(virtual_ecam, 0, 0, 7, 0, 0) !=
+            virtual_ecam + (7U << 15)) {
         mRuntimePciConfigEcam = saved_runtime_ecam;
         mVirtualAddressMapApplied = saved_virtual_map_applied;
         return 0;
@@ -14284,8 +14297,7 @@ static void efi_init_platform_tables(void)
     for (i = 0; i < sizeof(mSalSystemTable.Entrypoint.Reserved0); i++) {
         mSalSystemTable.Entrypoint.Reserved0[i] = 0;
     }
-    mSalSystemTable.Entrypoint.PalProc =
-        (UINTN)pal_proc_entry;
+    mSalSystemTable.Entrypoint.PalProc = (UINTN)pal_proc_entry;
     mSalSystemTable.Entrypoint.SalProc =
         fw_function_entry((UINTN)sal_proc_entry);
     mSalSystemTable.Entrypoint.SalGp = fw_current_gp();
@@ -14352,12 +14364,12 @@ static void efi_init_platform_tables(void)
     mFadt.AcpiDisable = 0;
     mFadt.S4BiosRequest = 0;
     mFadt.PStateControl = 0;
-    mFadt.Pm1aEventBlock = 0;
+    mFadt.Pm1aEventBlock = ACPI_PM_IO_BASE + ACPI_PM1_EVT_OFFSET;
     mFadt.Pm1bEventBlock = 0;
-    mFadt.Pm1aControlBlock = 0;
+    mFadt.Pm1aControlBlock = ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET;
     mFadt.Pm1bControlBlock = 0;
     mFadt.Pm2ControlBlock = 0;
-    mFadt.PmTimerBlock = 0;
+    mFadt.PmTimerBlock = ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET;
     mFadt.Gpe0Block = 0;
     mFadt.Gpe1Block = 0;
     mFadt.Pm1EventLength = 4;
@@ -14825,6 +14837,12 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiFadt->XFirmwareCtrl != (UINT64)(UINTN)mAcpiFacs ||
         mAcpiFadt->XDsdt != (UINT64)(UINTN)mAcpiDsdt ||
         mAcpiFadt->SciInterrupt != ACPI_SCI_IRQ ||
+        mAcpiFadt->Pm1aEventBlock !=
+            ACPI_PM_IO_BASE + ACPI_PM1_EVT_OFFSET ||
+        mAcpiFadt->Pm1aControlBlock !=
+            ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET ||
+        mAcpiFadt->PmTimerBlock !=
+            ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET ||
         !acpi_gas_matches(&mAcpiFadt->XPm1aEventBlock,
                           ACPI_GAS_SYSTEM_IO, 32, ACPI_PM_IO_BASE) ||
         !acpi_gas_matches(&mAcpiFadt->XPm1aControlBlock,
@@ -21857,32 +21875,6 @@ typedef struct {
     FW_ATAPI_DEVICE_PATH_NODE Atapi;
     FW_CDROM_DEVICE_PATH_NODE Cdrom;
     FW_DEVICE_PATH_NODE FileHeader;
-    CHAR16 PathName[6];
-    FW_DEVICE_PATH_NODE End;
-} __attribute__((packed)) FW_OPTICAL_SETUP_SOURCE_DEVICE_PATH;
-
-typedef struct {
-    UINT32 Version;
-    UINT32 Length;
-    UINT32 Type;
-    FW_OPTICAL_SETUP_SOURCE_DEVICE_PATH FilePath;
-} __attribute__((packed)) FW_OPTICAL_OS_LOADER_PATH;
-
-typedef struct {
-    CHAR8 Signature[8];
-    UINT32 Version;
-    UINT32 Length;
-    UINT32 OsLoadPathOffset;
-    CHAR16 OsLoadOptions[1];
-    FW_OPTICAL_OS_LOADER_PATH OsLoaderFilePath;
-} __attribute__((packed)) FW_OPTICAL_OS_OPTIONS;
-
-typedef struct {
-    FW_ACPI_HID_DEVICE_PATH_NODE Acpi;
-    FW_PCI_DEVICE_PATH_NODE Pci;
-    FW_ATAPI_DEVICE_PATH_NODE Atapi;
-    FW_CDROM_DEVICE_PATH_NODE Cdrom;
-    FW_DEVICE_PATH_NODE FileHeader;
     CHAR16 PathName[23];
     FW_DEVICE_PATH_NODE End;
 } __attribute__((packed)) FW_OPTICAL_SETUP_LOADER_DEVICE_PATH;
@@ -21892,77 +21884,12 @@ typedef struct {
     UINT16 FilePathListLength;
     CHAR16 Description[14];
     FW_OPTICAL_SETUP_LOADER_DEVICE_PATH FilePath;
-    FW_OPTICAL_OS_OPTIONS OptionalData;
 } __attribute__((packed)) FW_EFI_BOOT_OPTION;
 
 static const CHAR16 mDefaultBootDescription[14] = {
     'O', 'p', 't', 'i', 'c', 'a', 'l', ' ', 'S', 'e', 't', 'u', 'p', 0,
 };
 
-static FW_OPTICAL_OS_OPTIONS mOpticalSetupOsOptions = {
-    .Signature = { 'W', 'I', 'N', 'D', 'O', 'W', 'S', 0 },
-    .Version = 1,
-    .Length = sizeof(FW_OPTICAL_OS_OPTIONS),
-    .OsLoadPathOffset =
-        __builtin_offsetof(FW_OPTICAL_OS_OPTIONS, OsLoaderFilePath),
-    .OsLoadOptions = { 0 },
-    .OsLoaderFilePath = {
-        .Version = 1,
-        .Length = sizeof(FW_OPTICAL_SETUP_SOURCE_DEVICE_PATH),
-        .Type = 4,
-        .FilePath = {
-            .Acpi = {
-                .Header = {
-                    .Type = 0x02,
-                    .SubType = 0x01,
-                    .Length = sizeof(FW_ACPI_HID_DEVICE_PATH_NODE),
-                },
-                .Hid = 0x0A0341D0,
-                .Uid = 0,
-            },
-            .Pci = {
-                .Header = {
-                    .Type = 0x01,
-                    .SubType = 0x01,
-                    .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
-                },
-                .Function = 0,
-                .Device = 4,
-            },
-            .Atapi = {
-                .Header = {
-                    .Type = 0x03,
-                    .SubType = 0x02,
-                    .Length = sizeof(FW_ATAPI_DEVICE_PATH_NODE),
-                },
-                .PrimarySecondary = 0,
-                .SlaveMaster = 0,
-                .Lun = 0,
-            },
-            .Cdrom = {
-                .Header = {
-                    .Type = 0x04,
-                    .SubType = 0x02,
-                    .Length = sizeof(FW_CDROM_DEVICE_PATH_NODE),
-                },
-                .BootEntry = 0,
-                .PartitionStart = 0,
-                .PartitionSize = 0,
-            },
-            .FileHeader = {
-                .Type = 0x04,
-                .SubType = 0x04,
-                .Length = sizeof(FW_DEVICE_PATH_NODE) + 6 * sizeof(CHAR16),
-            },
-            .PathName = { '\\', 'I', 'A', '6', '4', 0 },
-            .End = {
-                .Type = 0x7f,
-                .SubType = 0xff,
-                .Length = 4,
-            },
-        },
-    },
-};
 
 static FW_OPTICAL_SETUP_LOADER_DEVICE_PATH mOpticalSetupLoaderDevicePath = {
     .Acpi = {
@@ -22154,10 +22081,6 @@ static void fw_update_storage_device_paths(VOID)
     mBootFullDevicePath.Pci.Device = boot_pci;
     fw_set_storage_path_node(&mBootFullDevicePath.Atapi, &mBootStorageDevice);
 
-    mOpticalSetupOsOptions.OsLoaderFilePath.FilePath.Pci.Device = boot_pci;
-    fw_set_storage_path_node(
-        &mOpticalSetupOsOptions.OsLoaderFilePath.FilePath.Atapi,
-        &mBootStorageDevice);
     mOpticalSetupLoaderDevicePath.Pci.Device = boot_pci;
     fw_set_storage_path_node(&mOpticalSetupLoaderDevicePath.Atapi,
                              &mBootStorageDevice);
@@ -23644,9 +23567,6 @@ out:
 static BOOLEAN __attribute__((noinline)) optical_setup_boot_option_selftest(void)
 {
     FW_EFI_BOOT_OPTION option;
-    FW_OPTICAL_OS_OPTIONS *options;
-    FW_OPTICAL_OS_LOADER_PATH *loader;
-    FW_OPTICAL_SETUP_SOURCE_DEVICE_PATH *source;
     UINTN size = sizeof(option);
     UINT32 attributes = 0;
 
@@ -23654,7 +23574,7 @@ static BOOLEAN __attribute__((noinline)) optical_setup_boot_option_selftest(void
         attributes != (EFI_VARIABLE_NON_VOLATILE |
                        EFI_VARIABLE_BOOTSERVICE_ACCESS |
                        EFI_VARIABLE_RUNTIME_ACCESS) ||
-        size != sizeof(option)) {
+        size != sizeof(FW_EFI_BOOT_OPTION)) {
         return 0;
     }
 
@@ -23690,47 +23610,12 @@ static BOOLEAN __attribute__((noinline)) optical_setup_boot_option_selftest(void
         }
     }
 
-    options = &option.OptionalData;
-    loader = &options->OsLoaderFilePath;
-    source = &loader->FilePath;
-    if (!fw_bytes_eq((const UINT8 *)options->Signature, "WINDOWS", 7) ||
-        options->Signature[7] != 0 ||
-        options->Version != 1 ||
-        options->Length != sizeof(*options) ||
-        options->OsLoadPathOffset !=
-            __builtin_offsetof(FW_OPTICAL_OS_OPTIONS, OsLoaderFilePath) ||
-        options->OsLoadOptions[0] != 0 ||
-        loader->Version != 1 ||
-        loader->Length != sizeof(*source) ||
-        loader->Type != 4) {
-        return 0;
-    }
-
-    {
-        void *remaining = source;
-        EFI_HANDLE source_device = NULL;
-
-        if (bs_locate_device_path((void *)mBlockIoProtocolGuid,
-                                  &remaining, &source_device) != EFI_SUCCESS ||
-            source_device != mRawBlockIoHandle ||
-            remaining != &source->FileHeader ||
-            fw_loaded_image_file_path(source) != &source->FileHeader) {
-            return 0;
-        }
-    }
-
-    return fw_storage_path_node_matches(&source->Atapi,
-                                        &mBootStorageDevice) &&
-           source->Cdrom.Header.Type == 0x04 &&
-           source->Cdrom.Header.SubType == 0x02 &&
-           source->Cdrom.PartitionStart == 0 &&
-           source->Cdrom.PartitionSize == mCdromBlocks &&
-           source->FileHeader.Type == 0x04 &&
-           source->FileHeader.SubType == 0x04 &&
-           source->End.Type == 0x7f &&
-           source->End.SubType == 0xff &&
-           fw_device_path_file_name_eq_ascii(
-               (const FW_DEVICE_PATH_NODE *)source, "ia64");
+    /*
+     * The synthetic optical boot option now carries empty load options: it
+     * ends at the device path with no OptionalData, so there is no injected
+     * OS loader payload to validate.
+     */
+    return 1;
 }
 
 static BOOLEAN __attribute__((noinline)) optical_raw_device_path_selftest(void)
@@ -32574,13 +32459,20 @@ static EFI_STATUS rs_get_boot0000_variable(UINT32 *Attributes,
                 sizeof(option.Description));
     fw_copy_mem(&option.FilePath, &mOpticalSetupLoaderDevicePath,
                 sizeof(option.FilePath));
-    fw_copy_mem(&option.OptionalData, &mOpticalSetupOsOptions,
-                sizeof(option.OptionalData));
 
+    /*
+     * A generic "boot from optical media" entry is OS-agnostic: launch the
+     * media's \EFI\BOOT\BOOTIA64.EFI with EMPTY load options, matching
+     * standard EFI removable-media boot.  Report the option without any
+     * OptionalData so the loader receives no injected payload.  (An OS's own
+     * NVRAM Boot#### entry still carries its load options verbatim; only this
+     * synthetic firmware entry drops the previously Windows-specific blob.)
+     */
     return rs_copy_variable(
         EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
             EFI_VARIABLE_RUNTIME_ACCESS,
-        &option, sizeof(option), Attributes, DataSize, Data);
+        &option, sizeof(FW_EFI_BOOT_OPTION),
+        Attributes, DataSize, Data);
 }
 
 static EFI_STATUS rs_get_firmware_variable(UINTN Index, UINT32 *Attributes,
@@ -33451,7 +33343,6 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
     UINT8 *file_buf = (UINT8 *)(UINTN)0x00600000ULL;
     UINT32 file_size = 0;
     EFI_HANDLE image = NULL;
-    VOID *load_options = NULL;
     EFI_STATUS st;
 
     uart_puts("Block I/O: locating \\EFI\\BOOT\\BOOTIA64.EFI...\r\n");
@@ -33486,20 +33377,12 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
         return st;
     }
 
-    st = fw_copy_loaded_image_load_options(
-        image, &mOpticalSetupOsOptions, sizeof(mOpticalSetupOsOptions),
-        &load_options);
-    if (st != EFI_SUCCESS) {
-        (void)mBootServices.UnloadImage(image);
-        return st;
-    }
-
+    /* Generic optical boot: launch with empty load options (OS-agnostic). */
     mSalLoaderHandoffPending = 1;
     st = mBootServices.StartImage(image, NULL, NULL);
     mSalLoaderHandoffPending = 0;
     uart_puts("Block I/O: StartImage returned\r\n");
     if (!mBootServicesExited) {
-        (void)fw_release_loaded_image_load_options(image, load_options);
         (void)mBootServices.UnloadImage(image);
     }
     return st;
@@ -33689,11 +33572,6 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
             mBootImageStartLba;
         mOpticalSetupLoaderDevicePath.Cdrom.PartitionSize =
             cdrom_partition_blocks;
-        mOpticalSetupOsOptions.OsLoaderFilePath.FilePath.Cdrom.BootEntry = 0;
-        mOpticalSetupOsOptions.OsLoaderFilePath.FilePath.Cdrom.PartitionStart =
-            0;
-        mOpticalSetupOsOptions.OsLoaderFilePath.FilePath.Cdrom.PartitionSize =
-            mCdromBlocks;
         uart_puts("Block I/O: El Torito FAT image mapped\r\n");
     }
     mBlockIoMedia.MediaId = 1;

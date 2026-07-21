@@ -42,9 +42,19 @@
 #define IA64_PMD_COUNT   64
 #define IA64_PKR_COUNT   16
 #define IA64_MSR_COUNT   1024
-/* Per translation-register bank: 16 instruction TRs and 16 data TRs. */
-#define IA64_TR_COUNT    16
+/* Maximum translation-register count implemented by a supported CPU model. */
+#define IA64_TR_MAX      64
 #define IA64_TLB_MAX     128
+
+/*
+ * CPUID register 4 general features/capability bits.  A model advertises
+ * only what it implements, and the translator refuses the corresponding
+ * instructions on models that do not.
+ */
+#define IA64_CPUID4_LB   (1ULL << 0)  /* brl, long branch */
+#define IA64_CPUID4_SD   (1ULL << 1)  /* spontaneous deferral */
+#define IA64_CPUID4_AO   (1ULL << 2)  /* ld16/st16/cmp8xchg16 atomics */
+
 #define IA64_MICRO_TLB_SIZE 4
 #define IA64_SUPPRESSED_TLB_MAX 4
 
@@ -283,7 +293,9 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_ISR_EI_MASK     (3ULL << 41)
 #define IA64_ISR_EI_SHIFT    41
 #define IA64_ISR_ED          (1ULL << 43)
-#define IA64_ISR_CODE_REG_NAT 0x10
+#define IA64_ISR_CODE_REG_NAT  0x10
+/* NaT Consumption ISR.code{5:4} = 2 for a NaTPage reference. */
+#define IA64_ISR_CODE_NAT_PAGE 0x20
 
 /* ---- ITIR fields ---- */
 #define IA64_ITIR_PS_MASK    0x3f
@@ -317,6 +329,18 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_PTE_ACCESSED (1ULL << 5)
 #define IA64_PTE_DIRTY    (1ULL << 6)
 #define IA64_PTE_ED       (1ULL << 52)
+#define IA64_PTE_MA_SHIFT 2
+#define IA64_PTE_MA_MASK  (7ULL << IA64_PTE_MA_SHIFT)
+#define IA64_PTE_MA_WB      0
+#define IA64_PTE_MA_UC      4
+#define IA64_PTE_MA_UCE     5
+#define IA64_PTE_MA_WC      6
+#define IA64_PTE_MA_NATPAGE 7
+
+static inline uint8_t ia64_pte_ma(uint64_t pte)
+{
+    return (pte & IA64_PTE_MA_MASK) >> IA64_PTE_MA_SHIFT;
+}
 
 /* ---- PTA fields ---- */
 #define IA64_PTA_VE          (1ULL << 0)
@@ -449,6 +473,7 @@ typedef enum IA64Exception {
     IA64_EXCP_DISABLED_ISA_TRANSITION = 30,
     IA64_EXCP_DISABLED_FP = 31,
     IA64_EXCP_UNSUPPORTED_DATA_REFERENCE = 32,
+    IA64_EXCP_VIRTUALIZATION = 33,
     IA64_EXCP_MAX,
 } IA64Exception;
 
@@ -467,17 +492,24 @@ ia64_pte_exception_for_access(uint64_t pte, uint8_t perm, uint8_t needed,
         return is_ifetch ? IA64_EXCP_INST_ACCESS : IA64_EXCP_DATA_ACCESS;
     }
 
+    /*
+     * The Data Dirty Bit fault outranks the Data Access Bit fault, so a
+     * store to a page with both bits clear reports the dirty-bit vector.
+     * That is what lets an operating system resolve both bits from the one
+     * handler (Linux's dirty_bit vector sets _PAGE_D|_PAGE_A) instead of
+     * taking a second fault.
+     */
     if (is_ifetch) {
         if (!(pte & IA64_PTE_ACCESSED) && !(psr & IA64_PSR_IA)) {
             return IA64_EXCP_INST_ACCESS_BIT;
         }
     } else {
-        if (!(pte & IA64_PTE_ACCESSED) && !(psr & IA64_PSR_DA)) {
-            return IA64_EXCP_DATA_ACCESS_BIT;
-        }
         if (is_write && !(pte & IA64_PTE_DIRTY) &&
             !(psr & IA64_PSR_DA)) {
             return IA64_EXCP_DATA_DIRTY;
+        }
+        if (!(pte & IA64_PTE_ACCESSED) && !(psr & IA64_PSR_DA)) {
+            return IA64_EXCP_DATA_ACCESS_BIT;
         }
     }
 
@@ -852,17 +884,18 @@ static inline bool ia64_key_check_enabled(const CPUIA64State *env,
     return env->psr & translation_bit;
 }
 
+/*
+ * Raw protection-key lookup, gated only by the caller.  Used directly by
+ * probe, whose key checks depend on PSR.pk alone: the probe query is a
+ * virtual DTLB lookup even while PSR.dt is 0.
+ */
 static inline IA64Exception
-ia64_key_exception_for_access(const CPUIA64State *env, uint32_t key,
-                              uint8_t needed, bool is_ifetch, bool is_rse)
+ia64_key_exception_for_key(const CPUIA64State *env, uint32_t key,
+                           uint8_t needed, bool is_ifetch)
 {
     const uint64_t pkr_key = (uint64_t)key << IA64_PKR_KEY_SHIFT;
     uint64_t disable_bits = 0;
     bool matched = false;
-
-    if (!ia64_key_check_enabled(env, is_ifetch, is_rse)) {
-        return IA64_EXCP_NONE;
-    }
 
     for (uint32_t i = 0; i < IA64_PKR_COUNT; i++) {
         uint64_t pkr = env->pkr[i];
@@ -890,6 +923,17 @@ ia64_key_exception_for_access(const CPUIA64State *env, uint32_t key,
 }
 
 static inline IA64Exception
+ia64_key_exception_for_access(const CPUIA64State *env, uint32_t key,
+                              uint8_t needed, bool is_ifetch, bool is_rse)
+{
+    if (!ia64_key_check_enabled(env, is_ifetch, is_rse)) {
+        return IA64_EXCP_NONE;
+    }
+
+    return ia64_key_exception_for_key(env, key, needed, is_ifetch);
+}
+
+static inline IA64Exception
 ia64_translation_exception_for_access(const CPUIA64State *env, uint64_t pte,
                                       uint32_t key, uint8_t perm,
                                       uint8_t needed, bool is_ifetch,
@@ -897,8 +941,23 @@ ia64_translation_exception_for_access(const CPUIA64State *env, uint64_t pte,
 {
     IA64Exception excp;
 
+    /*
+     * Once a translation is found the remaining faults are checked in the
+     * architected order: Page Not Present, NaT Page Consumption, Key Miss,
+     * Key Permission, Access Rights, Dirty Bit, Access Bit.
+     */
     if (!(pte & IA64_PTE_PRESENT)) {
         return IA64_EXCP_PAGE_NOT_PRESENT;
+    }
+
+    /*
+     * A NaTPage translation prevents every non-speculative reference:
+     * instruction fetches, loads, stores and semaphores all raise NaT Page
+     * Consumption.  Control-speculative loads instead defer the fault, which
+     * the speculative probe helper decides before the access is attempted.
+     */
+    if (ia64_pte_ma(pte) == IA64_PTE_MA_NATPAGE) {
+        return IA64_EXCP_NAT_CONSUMPTION;
     }
 
     excp = ia64_key_exception_for_access(env, key, needed, is_ifetch, is_rse);
@@ -1042,19 +1101,6 @@ static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
 static inline bool ia64_data_nested_tlb_active(const CPUIA64State *env)
 {
     return !(env->psr & IA64_PSR_IC) && !env->psr_ic_inflight;
-}
-
-static inline bool
-ia64_vhpt_walk_miss_reports_data_tlb(const CPUIA64State *env,
-                                     bool vhpt_enabled)
-{
-    /*
-     * A data-TLB miss encountered by the VHPT walker is converted into a
-     * VHPT Translation fault only for a serialized PSR.ic=1 state.  While
-     * PSR.ic is in-flight, data-reference faults use the Data TLB vector
-     * with ISR.ni set by interruption delivery.
-     */
-    return vhpt_enabled && env->psr_ic_inflight;
 }
 
 static inline bool ia64_sal_boot_virtual_pa(const CPUIA64State *env,
@@ -1254,7 +1300,9 @@ struct IA64CPUClass {
     /* Guest-visible processor-model data. */
     uint64_t cpuid_version;
     uint64_t cpuid_features;
+    uint8_t tr_count;
     bool has_native_ia32;
+    bool has_virtualization;
     bool is_montecito;
 };
 

@@ -169,7 +169,7 @@ def validate_registry() -> None:
         "rsm_ic_inflight_dtlb_not_data_nested",
         "short_vhpt_walker_rejects_pending_table_purge",
         "ssm_ic_inflight_dtlb_sets_ni",
-        "ssm_ic_inflight_short_vhpt_entry_miss_raises_dtlb",
+        "ssm_ic_inflight_short_vhpt_entry_miss_raises_vhpt",
     }
     effect_at_terminal_cases: list[str] = []
     effect_self_loop_cases: list[str] = []

@@ -128,6 +128,13 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
     [IA64_EXCP_DISABLED_ISA_TRANSITION] = 0x5400,
     [IA64_EXCP_DISABLED_FP]      = 0x5500,
     [IA64_EXCP_UNSUPPORTED_DATA_REFERENCE] = 0x5b00,
+    /*
+     * The virtualization extensions post-date the reference SDM revision,
+     * which leaves 0x6100 through 0x6800 reserved.  0x6100 is the first
+     * reserved slot after the single-step trap and is where the Virtualization
+     * fault vector was subsequently defined.
+     */
+    [IA64_EXCP_VIRTUALIZATION]   = 0x6100,
 };
 
 typedef enum Ia64SlotUnit {
@@ -240,9 +247,6 @@ typedef enum Ia64Opcode {
     IA64_OP_LD2SA,
     IA64_OP_LD4SA,
     IA64_OP_LD8SA,
-    IA64_OP_LD1FILL,
-    IA64_OP_LD2FILL,
-    IA64_OP_LD4FILL,
     IA64_OP_LD8FILL,
     IA64_OP_ST1,
     IA64_OP_ST2,
@@ -253,9 +257,6 @@ typedef enum Ia64Opcode {
     IA64_OP_ST2REL,
     IA64_OP_ST4REL,
     IA64_OP_ST8REL,
-    IA64_OP_ST1SPILL,
-    IA64_OP_ST2SPILL,
-    IA64_OP_ST4SPILL,
     IA64_OP_ST8SPILL,
     IA64_OP_BR_COND,
     IA64_OP_BR_INDIRECT,
@@ -868,6 +869,15 @@ static bool ia64_is_firmware_debug_break(uint64_t address, uint64_t imm)
     return false;
 }
 
+/*
+ * Integer load/store x6 opcode extensions, SDM Vol 3 Table 4-29 (and the
+ * matching +reg/+imm forms in Tables 4-30/4-31).  Values absent from that
+ * table are reserved and must decode as an Illegal Operation fault; in
+ * particular spill/fill exist only as 8-byte forms (ld8.fill x6=0x1b,
+ * st8.spill x6=0x3b), so 0x18-0x1a and 0x38-0x3a fall through to the
+ * default.  0x28-0x2b are the ld.c.clr.acq forms; their acquire semantics
+ * come from ia64_memory_x6a_is_acquire_load() at the decode call sites.
+ */
 static Ia64Opcode ia64_memory_opcode_from_x6a(uint64_t x6a)
 {
     switch (x6a) {
@@ -919,12 +929,6 @@ static Ia64Opcode ia64_memory_opcode_from_x6a(uint64_t x6a)
         return IA64_OP_LD4;
     case 0x17:
         return IA64_OP_LD8;
-    case 0x18:
-        return IA64_OP_LD1FILL;
-    case 0x19:
-        return IA64_OP_LD2FILL;
-    case 0x1a:
-        return IA64_OP_LD4FILL;
     case 0x1b:
         return IA64_OP_LD8FILL;
     case 0x20:
@@ -967,12 +971,6 @@ static Ia64Opcode ia64_memory_opcode_from_x6a(uint64_t x6a)
         return IA64_OP_ST4REL;
     case 0x37:
         return IA64_OP_ST8REL;
-    case 0x38:
-        return IA64_OP_ST1SPILL;
-    case 0x39:
-        return IA64_OP_ST2SPILL;
-    case 0x3a:
-        return IA64_OP_ST4SPILL;
     case 0x3b:
         return IA64_OP_ST8SPILL;
     default:
@@ -1311,12 +1309,10 @@ static MemOp ia64_memop_for_opcode(Ia64Opcode opcode)
     case IA64_OP_LD1S:
     case IA64_OP_LD1A:
     case IA64_OP_LD1SA:
-    case IA64_OP_LD1FILL:
     case IA64_OP_LD1C_CLR:
     case IA64_OP_LD1C_NC:
     case IA64_OP_ST1:
     case IA64_OP_ST1REL:
-    case IA64_OP_ST1SPILL:
     case IA64_OP_XCHG1:
     case IA64_OP_CMPXCHG1:
         return MO_UB;
@@ -1324,12 +1320,10 @@ static MemOp ia64_memop_for_opcode(Ia64Opcode opcode)
     case IA64_OP_LD2S:
     case IA64_OP_LD2A:
     case IA64_OP_LD2SA:
-    case IA64_OP_LD2FILL:
     case IA64_OP_LD2C_CLR:
     case IA64_OP_LD2C_NC:
     case IA64_OP_ST2:
     case IA64_OP_ST2REL:
-    case IA64_OP_ST2SPILL:
     case IA64_OP_XCHG2:
     case IA64_OP_CMPXCHG2:
         return MO_LEUW;
@@ -1337,12 +1331,10 @@ static MemOp ia64_memop_for_opcode(Ia64Opcode opcode)
     case IA64_OP_LD4S:
     case IA64_OP_LD4A:
     case IA64_OP_LD4SA:
-    case IA64_OP_LD4FILL:
     case IA64_OP_LD4C_CLR:
     case IA64_OP_LD4C_NC:
     case IA64_OP_ST4:
     case IA64_OP_ST4REL:
-    case IA64_OP_ST4SPILL:
     case IA64_OP_XCHG4:
     case IA64_OP_CMPXCHG4:
     case IA64_OP_FETCHADD4:
@@ -1397,9 +1389,6 @@ static bool ia64_opcode_is_store(Ia64Opcode opcode)
     case IA64_OP_ST2REL:
     case IA64_OP_ST4REL:
     case IA64_OP_ST8REL:
-    case IA64_OP_ST1SPILL:
-    case IA64_OP_ST2SPILL:
-    case IA64_OP_ST4SPILL:
     case IA64_OP_ST8SPILL:
         return true;
     default:
@@ -1439,9 +1428,6 @@ static bool ia64_opcode_is_load(Ia64Opcode opcode)
     case IA64_OP_LD2SA:
     case IA64_OP_LD4SA:
     case IA64_OP_LD8SA:
-    case IA64_OP_LD1FILL:
-    case IA64_OP_LD2FILL:
-    case IA64_OP_LD4FILL:
     case IA64_OP_LD8FILL:
     case IA64_OP_LD1C_CLR:
     case IA64_OP_LD2C_CLR:
@@ -1488,9 +1474,6 @@ static bool ia64_opcode_has_firmware_unaligned_load_assist(Ia64Opcode opcode)
     case IA64_OP_LD2SA:
     case IA64_OP_LD4SA:
     case IA64_OP_LD8SA:
-    case IA64_OP_LD1FILL:
-    case IA64_OP_LD2FILL:
-    case IA64_OP_LD4FILL:
     case IA64_OP_LD8FILL:
     case IA64_OP_LD1C_CLR:
     case IA64_OP_LD2C_CLR:
@@ -1593,9 +1576,6 @@ static bool ia64_opcode_is_check_load(Ia64Opcode opcode)
 static bool ia64_opcode_is_fill_load(Ia64Opcode opcode)
 {
     switch (opcode) {
-    case IA64_OP_LD1FILL:
-    case IA64_OP_LD2FILL:
-    case IA64_OP_LD4FILL:
     case IA64_OP_LD8FILL:
         return true;
     default:
@@ -7557,9 +7537,6 @@ static void ia64_gen_native_integer_write(const Ia64Instruction *insn)
     case IA64_OP_LD2SA:
     case IA64_OP_LD4SA:
     case IA64_OP_LD8SA:
-    case IA64_OP_LD1FILL:
-    case IA64_OP_LD2FILL:
-    case IA64_OP_LD4FILL:
     case IA64_OP_LD8FILL:
     case IA64_OP_ST1:
     case IA64_OP_ST2:
@@ -7569,9 +7546,6 @@ static void ia64_gen_native_integer_write(const Ia64Instruction *insn)
     case IA64_OP_ST2REL:
     case IA64_OP_ST4REL:
     case IA64_OP_ST8REL:
-    case IA64_OP_ST1SPILL:
-    case IA64_OP_ST2SPILL:
-    case IA64_OP_ST4SPILL:
     case IA64_OP_ST8SPILL:
     case IA64_OP_BR_COND:
     case IA64_OP_BR_INDIRECT:
@@ -7996,6 +7970,19 @@ static void ia64_gen_check_disabled_fp(const Ia64Instruction *insn)
     gen_set_label(done);
 }
 
+/* Instructions gated by the CPUID[4].ao 16-byte atomic capability bit. */
+static bool ia64_insn_needs_16byte_atomics(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_LD16:
+    case IA64_OP_ST16:
+    case IA64_OP_CMP8XCHG16:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                           bool record_iipa)
 {
@@ -8062,6 +8049,20 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                        offsetof(CPUIA64State, cr_isr));
         ia64_gen_raise_exception(IA64_EXCP_RESERVED_REG_FIELD,
                                   insn->address, insn->raw, insn->slot);
+        if (skip == NULL) {
+            return true;
+        }
+        ia64_gen_predicate_end(skip);
+        return false;
+    }
+    if (ia64_insn_needs_16byte_atomics(insn) &&
+        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_AO)) {
+        /*
+         * The encoding is reserved on a model that clears CPUID[4].ao, so
+         * refuse it the same way an unimplemented opcode is refused.
+         */
+        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
+                                  insn->raw, insn->slot);
         if (skip == NULL) {
             return true;
         }
@@ -8146,10 +8147,23 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         }
         break;
     case IA64_OP_VMSW:
-        gen_helper_vmsw(tcg_env, tcg_constant_i64(insn->imm));
-        ia64_gen_exit_to_completed(ctx, next_ip, insn->address,
-                                   record_iipa,
-                                   track_psr_suppression);
+        /*
+         * Models without the virtualization extensions do not decode vmsw
+         * at all: the encoding is reserved and raises an Illegal Operation
+         * fault regardless of privilege.  Models with the extensions treat
+         * vmsw as a privileged instruction, so PSR.cpl > 0 raises a
+         * Privileged Operation fault first; at cpl 0 a Virtualization
+         * fault is reported because this implementation provides no
+         * virtual-machine environment.
+         */
+        if (ia64_env_cpu_class(ctx->env)->has_virtualization) {
+            ia64_gen_check_privileged(insn);
+            ia64_gen_raise_exception(IA64_EXCP_VIRTUALIZATION,
+                                      insn->address, insn->raw, insn->slot);
+        } else {
+            ia64_gen_raise_exception(IA64_EXCP_ILLEGAL,
+                                      insn->address, insn->raw, insn->slot);
+        }
         if (skip == NULL) {
             return true;
         }
@@ -8982,9 +8996,6 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_LD8SA:
         ia64_gen_speculative_load(ctx, insn, true);
         break;
-    case IA64_OP_LD1FILL:
-    case IA64_OP_LD2FILL:
-    case IA64_OP_LD4FILL:
     case IA64_OP_LD8FILL:
         {
             TCGv_i64 addr = tcg_temp_new_i64();
@@ -9138,14 +9149,10 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_ST2REL:
     case IA64_OP_ST4REL:
     case IA64_OP_ST8REL:
-    case IA64_OP_ST1SPILL:
-    case IA64_OP_ST2SPILL:
-    case IA64_OP_ST4SPILL:
     case IA64_OP_ST8SPILL: {
         MemOp mop = ia64_data_memop(ctx,
                                     ia64_memop_for_opcode(insn->opcode));
-        bool spill = insn->opcode >= IA64_OP_ST1SPILL &&
-                     insn->opcode <= IA64_OP_ST8SPILL;
+        bool spill = insn->opcode == IA64_OP_ST8SPILL;
         TCGv_i64 addr = tcg_temp_new_i64();
         TCGv_i64 value = tcg_temp_new_i64();
 
@@ -9160,7 +9167,7 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         ia64_gen_memory_release(insn);
         tcg_gen_qemu_st_i64(value, addr, ctx->mmu_idx, mop);
         ia64_gen_invalidate_alat_store(ctx, addr, ia64_memop_size(mop));
-        if (insn->opcode == IA64_OP_ST8SPILL) {
+        if (spill) {
             gen_helper_st_spill_unat(tcg_env, tcg_constant_i32(insn->r2),
                                      addr);
         }
@@ -9618,7 +9625,9 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_ITR_D:
         ia64_gen_check_nat_register(insn, insn->r2);
         ia64_gen_check_nat_register(insn, insn->r3);
-        ia64_gen_check_register_index(insn, ia64_gr_src(insn->r3), 16);
+        ia64_gen_check_register_index(
+            insn, ia64_gr_src(insn->r3),
+            ia64_env_cpu_class(ctx->env)->tr_count);
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(insn->r2),
                                ia64_gr_src(insn->r3),
@@ -9630,7 +9639,9 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_ITR_I:
         ia64_gen_check_nat_register(insn, insn->r2);
         ia64_gen_check_nat_register(insn, insn->r3);
-        ia64_gen_check_register_index(insn, ia64_gr_src(insn->r3), 16);
+        ia64_gen_check_register_index(
+            insn, ia64_gr_src(insn->r3),
+            ia64_env_cpu_class(ctx->env)->tr_count);
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(insn->r2),
                                ia64_gr_src(insn->r3),
@@ -10241,8 +10252,13 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     case IA64_OP_PROBE_R:
     case IA64_OP_PROBE_W:
     case IA64_OP_PROBE_RW: {
+        /*
+         * probe.rw exists only in the faulting form (M40), so the
+         * read/write query never reaches the non-faulting helper below.
+         */
         const bool write_probe = insn->opcode == IA64_OP_PROBE_W ||
                                  insn->opcode == IA64_OP_PROBE_RW;
+        const bool rw_probe = insn->opcode == IA64_OP_PROBE_RW;
         TCGv_i64 access_level = insn->probe_imm ?
                                 tcg_constant_i64(insn->imm & 3) :
                                 ia64_gr_src(insn->r2);
@@ -10264,15 +10280,13 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             ia64_gen_sync_ip_for_helper(insn);
             gen_helper_probe_fault(tcg_env, ia64_gr_src(insn->r3),
                                    tcg_constant_i32(write_probe),
-                                   tcg_constant_i32(insn->opcode ==
-                                                    IA64_OP_PROBE_RW),
+                                   tcg_constant_i32(rw_probe),
                                    access_level);
             break;
         }
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_probe(result, tcg_env, ia64_gr_src(insn->r3),
-                         tcg_constant_i32(write_probe), tcg_constant_i32(0),
-                         access_level);
+                         tcg_constant_i32(write_probe), access_level);
         if (insn->r1 != 0) {
             ia64_gen_gr_write_nat_clear(insn->r1, result);
         }
@@ -11924,10 +11938,6 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                    ia64_vhpt_pte_not_present(&cpu->env, addr, is_ifetch,
                                              is_rse, &vhpt_entry_va)) {
             excp = IA64_EXCP_PAGE_NOT_PRESENT;
-        } else if (!is_ifetch &&
-                   ia64_vhpt_walk_miss_reports_data_tlb(&cpu->env,
-                                                        vhpt_enabled)) {
-            excp = IA64_EXCP_DTLB_FAULT;
         } else if (!ia64_vhpt_entry_accessible(&cpu->env, addr, is_ifetch,
                                                is_rse, &vhpt_entry_va)) {
             excp = IA64_EXCP_VHPT_FAULT;
@@ -11978,6 +11988,13 @@ raise_exception:
             cpu->env.cr_isr = is_ifetch ? IA64_ISR_X :
                               (access_type == MMU_DATA_STORE ? IA64_ISR_W :
                                IA64_ISR_R);
+            if (excp == IA64_EXCP_NAT_CONSUMPTION) {
+                /*
+                 * NaT Page Consumption reports ISR.code{5:4} = 2; the
+                 * non-access code in ISR.code{3:0} is zero for an access.
+                 */
+                cpu->env.cr_isr |= IA64_ISR_CODE_NAT_PAGE;
+            }
         }
         if (is_rse) {
             cpu->env.cr_isr |= IA64_ISR_RS;
@@ -11985,7 +12002,9 @@ raise_exception:
                 /* Mandatory load for an incomplete frame (SDM 6.8). */
                 cpu->env.cr_isr |= IA64_ISR_IR;
             }
-        } else if (!is_ifetch && ia64_current_code_tlb_ed(&cpu->env)) {
+        } else if (!is_ifetch && excp != IA64_EXCP_NAT_CONSUMPTION &&
+                   ia64_current_code_tlb_ed(&cpu->env)) {
+            /* NaT Page Consumption always reports ISR.ed as 0. */
             cpu->env.cr_isr |= IA64_ISR_ED;
         }
     }
@@ -13537,15 +13556,19 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 
     /* Keep direct instantiation of the base type backward compatible. */
     icc->cpuid_version = 0x000000001f010504ULL;
-    icc->cpuid_features = 1ULL << 0;
+    icc->cpuid_features = IA64_CPUID4_LB;
+    icc->tr_count = 64;
     icc->has_native_ia32 = true;
+    icc->has_virtualization = false;
     icc->is_montecito = false;
 }
 
 typedef struct IA64CPUModelDef {
     uint64_t cpuid_version;
     uint64_t cpuid_features;
+    uint8_t tr_count;
     bool has_native_ia32;
+    bool has_virtualization;
     bool is_montecito;
 } IA64CPUModelDef;
 
@@ -13556,21 +13579,40 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
 
     icc->cpuid_version = model->cpuid_version;
     icc->cpuid_features = model->cpuid_features;
+    icc->tr_count = model->tr_count;
     icc->has_native_ia32 = model->has_native_ia32;
+    icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
 }
 
+/*
+ * Translation-register file size is implementation-specific; the SDM only
+ * guarantees eight of each bank.  Madison implements 64 ITRs and 64 DTRs,
+ * and so does Tukwila.  No published figure for Montecito was found, so
+ * take the value shared by the generations on either side of it.
+ */
 static const IA64CPUModelDef ia64_cpu_model_madison = {
     /* Family 0x1f, model 1, revision 5, CPUID[4] is the last register. */
     .cpuid_version = 0x000000001f010504ULL,
-    .cpuid_features = 1ULL << 0,
+    /* No 16-byte atomics and no virtualization: both post-date Madison. */
+    .cpuid_features = IA64_CPUID4_LB,
+    .tr_count = 64,
     .has_native_ia32 = true,
+    .has_virtualization = false,
 };
 
 static const IA64CPUModelDef ia64_cpu_model_montecito = {
     /* Family 0x20, model 0, C2 revision 7, CPUID[4] is the last register. */
     .cpuid_version = 0x0000000020000704ULL,
-    .cpuid_features = (1ULL << 0) | (1ULL << 2),
+    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_AO,
+    .tr_count = 64,
+    /*
+     * Montecito implements the virtualization extensions, but this model
+     * does not virtualize.  vmsw is decoded and reported as a Virtualization
+     * fault so a guest sees the architected interruption instead of a
+     * silently succeeding privilege-mode switch.
+     */
+    .has_virtualization = true,
     .is_montecito = true,
 };
 

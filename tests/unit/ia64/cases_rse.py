@@ -37,6 +37,8 @@ CASE_NAMES = (
     'rse_bspstore_rewrite_reloads_spilled_frame',
     'rse_bspstore_write_rebases_dirty_partition',
     'rse_call_invalidates_stacked_alat',
+    'rse_seventy_output_handoff_preserves_kernel_locals',
+    'rse_small_kernel_frame_preserves_counter_across_spill_calls',
     'rse_call_maps_all_high_output_args',
     'rse_call_moves_output_nat_across_word_boundary',
     'rse_call_preserves_same_bundle_local_write',

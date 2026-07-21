@@ -110,6 +110,8 @@ CASE_NAMES = (
     'mux1_rev_decode',
     'mux2_imm_decode',
     'padd1_decode',
+    'page_frame_record_address_arithmetic',
+    'page_table_pointer_dep_cascade',
     'pavg_decode',
     'pcmp1_eq_decode',
     'pcmp1_eq_m_slot_decode',
@@ -153,8 +155,12 @@ CASE_NAMES = (
     'tf_unc_same_pred_pred_false_illegal',
     'tf_upper_cpuid_feature_bits',
     'unpack2_l_decode',
-    'vmsw0_ignores_low_bits_clears_vm',
-    'vmsw1_ignores_low_bits_sets_vm',
+    'vmsw0_madison_illegal_operation',
+    'vmsw0_montecito_virtualization_fault',
+    'vmsw1_madison_illegal_operation',
+    'vmsw1_montecito_virtualization_fault',
+    'vmsw_cpl3_madison_illegal_operation',
+    'vmsw_cpl3_montecito_privileged_operation',
     'ws2003_compare_update_decode',
 )
 
