@@ -16,6 +16,9 @@ typedef struct IA64ExceptionState {
     uint32_t exception;
     uint32_t fault_exception;
     uint32_t fault_slot;
+    bool ia32_trap;
+    /* Trap raised by the IA-32 side of an ISA transition boundary. */
+    bool ia32_transition_trap;
 
     /* Transient state spanning one serialization/fault-suppression window. */
     bool psr_ic_inflight;

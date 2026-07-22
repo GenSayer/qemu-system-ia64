@@ -6,10 +6,11 @@ related to this project to the QEMU upstream.
 
 ## Emulated Platform
 
-The default machine is `ia64-vpc`. It models an Itanium 2-class virtual
-PC profile intended for firmware, boot loader, and operating-system bring-up:
+The default machine is `ia64-vpc`.
+It models an IA-64 virtual PC profile intended for firmware, boot loader, and operating-system bring-up:
 
-- Itanium 2 CPU model with TCG translation, PAL/SAL helpers, register stack engine, TLB/VHPT paths, and architectural floating-point state
+- Montecito CPU model by default, with Madison selection available.
+  Both models use TCG translation and provide PAL/SAL helpers, the register stack engine, TLB/VHPT paths, and architectural floating-point state.
 - 1 vCPU by default, configurable from 1 to 4 vCPUs; MTTCG is supported with `-accel tcg,thread=multi`
 - 2 GiB default RAM
 - project-owned IA-64 EFI firmware built from source under `roms/ia64-firmware/`
@@ -55,8 +56,40 @@ The firmware build requires an IA-64 ELF cross toolchain named
   -display gtk
 ```
 
-For four vCPUs, MTTCG, 8 GiB of RAM, and USB input without the PS/2
-controller:
+### CPU model selection
+
+The `ia64-vpc` machine uses the `montecito` CPU model by default.
+Select a different model with `-cpu`.
+For example, use `-cpu madison` when the guest requires the processor's hardware IA-32 execution environment:
+
+```sh
+./build/qemu-system-ia64 \
+  -machine ia64-vpc \
+  -cpu madison \
+  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
+  ...
+```
+
+CPU selection changes guest-visible CPUID and PAL information as well as the available instruction set.
+
+#### `montecito` (default)
+
+Montecito implements the later 16-byte operations `ld16`, `ld16.acq`, `st16`, `st16.rel`, `cmp8xchg16.acq`, and `cmp8xchg16.rel`.
+It has no hardware IA-32 execution engine, so an eligible `br.ia` or `rfi` request to enter IA-32 mode raises a Disabled ISA Transition fault.
+The `vmsw.0` and `vmsw.1` encodings are recognized as virtualization instructions.
+Because this emulator does not provide an IA-64 virtual-machine environment, these instructions produce the architecturally appropriate Privileged Operation or Virtualization fault instead of executing a mode switch.
+
+#### `madison`
+
+Madison provides the hardware IA-32 execution environment.
+Eligible `br.ia` and `rfi` transitions execute IA-32 code, and IA-32 `JMPE` returns to IA-64.
+The later 16-byte operations and virtualization instructions are not available and raise an Illegal Operation fault.
+
+`-cpu help` lists the available names.
+The generic `ia64-cpu` entry is retained for compatibility and currently has Madison-like capabilities.
+Use an explicit generation name for predictable guest-visible behavior.
+
+For four vCPUs, MTTCG, 8 GiB of RAM, and USB input without the PS/2 controller:
 
 ```sh
 ./build/qemu-system-ia64 \
@@ -142,7 +175,7 @@ It is the same version selected by QEMU's configure process; a host `meson` of a
  
 Plain `meson test` from the source directory is not valid because the Meson build data lives under `build`.
 
-The TCG registry currently contains 976 architectural microprograms divided between core, memory/NaT, floating-point,
+The TCG registry currently contains 1058 architectural microprograms divided between core, memory/NaT, floating-point,
 RSE, MMU, interruption, and PAL groups. Machine tests cover platform wiring and display behavior.
 
 The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media. It also exercises the firmware shell through PS/2, USB, and serial input, including direct application execution and NVRAM persistence across restarts.

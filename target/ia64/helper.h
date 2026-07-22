@@ -1,6 +1,29 @@
+/* Pointer-only argument types used by the imported x86 SSE helper list. */
+typedef union MMXReg MMXReg;
+typedef union ZMMReg ZMMReg;
+
 DEF_HELPER_5(raise_exception, noreturn, env, i32, i64, i64, i32)
 DEF_HELPER_3(raise_nat_consumption, noreturn, env, i64, i64)
 DEF_HELPER_1(ia32_unsupported, noreturn, env)
+DEF_HELPER_1(ia32_jmpe_check, void, env)
+DEF_HELPER_3(ia32_jmpe, noreturn, env, tl, tl)
+DEF_HELPER_4(ia32_system_flag, void, env, tl, i32, tl)
+DEF_HELPER_1(ia32_code_fetch_check, void, env)
+DEF_HELPER_5(ia32_segment_access, void, env, tl, i32, i32, i32)
+DEF_HELPER_4(ia32_bound_access, void, env, tl, i32, i32)
+DEF_HELPER_4(ia32_fxstate_access, void, env, tl, i32, i32)
+DEF_HELPER_3(ia32_lock_check, void, env, tl, i32)
+DEF_HELPER_1(ia32_virtual_sti_check, void, env)
+DEF_HELPER_2(ia32_virtual_popf, void, env, tl)
+DEF_HELPER_1(ia32_rdtsc, void, env)
+DEF_HELPER_1(ia32_rdpmc, void, env)
+DEF_HELPER_1(ia32_taken_branch, void, env)
+DEF_HELPER_3(ia32_instruction_intercept, noreturn, env, i64, i32)
+DEF_HELPER_2(ia32_complete_instruction, void, env, tl)
+DEF_HELPER_1(ia32_rep_iteration, void, env)
+DEF_HELPER_2(ia32_check_disabled_fp, void, env, i32)
+DEF_HELPER_1(ia32_sse_exception_begin, void, env)
+DEF_HELPER_1(ia32_sse_exception_end, void, env)
 DEF_HELPER_5(cmpxchg, i64, env, i64, i64, i64, i32)
 DEF_HELPER_5(cmp8xchg16, i64, env, i64, i64, i64, i64)
 DEF_HELPER_4(set_alat, void, env, i32, i64, i32)
@@ -156,3 +179,10 @@ DEF_HELPER_5(simd_unpack, void, env, i32, i32, i32, i32)
 DEF_HELPER_5(simd_pack, void, env, i32, i32, i32, i32)
 DEF_HELPER_5(simd_czx, void, env, i32, i32, i32, i32)
 DEF_HELPER_4(simd_sum, void, env, i32, i32, i32)
+
+/* QEMU x86 TCG helpers used by Madison's IA-32 execution engine. */
+#define raise_exception ia32_raise_exception
+#define rsm ia32_rsm
+#include "target/i386/helper.h"
+#undef rsm
+#undef raise_exception

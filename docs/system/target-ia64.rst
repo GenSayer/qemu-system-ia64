@@ -17,8 +17,8 @@ MTTCG can be selected with ``-accel tcg,thread=multi``.  The machine also
 provides local SAPIC and I/O SAPIC interrupt controllers, ACPI tables, RTC,
 watchdog, NVRAM, serial I/O, and the firmware debug port.
 
-The available CPU names are ``madison``, ``itanium2`` (an alias of Madison),
-and ``montecito``.  Montecito is the default.
+The available CPU generation names are ``madison`` and ``montecito``.
+Montecito is the default.
 
 Building and running
 --------------------

@@ -10,6 +10,7 @@
 #include "qemu/log.h"
 #include "cpu.h"
 #include "arch/arch.h"
+#include "ia32/ia32.h"
 #include "exec-access.h"
 #include "exec/target_page.h"
 #include "trace.h"
@@ -735,10 +736,15 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
 {
     uint64_t old_psr = env->psr;
     uint64_t ipsr = env->cr_ipsr;
+    uint64_t raw_iip = env->cr_iip;
     uint64_t iip = (ipsr & IA64_PSR_IS) ?
-                   (env->cr_iip & UINT32_MAX) :
-                   ia64_ip_bundle_addr(env->cr_iip);
+                   (raw_iip & UINT32_MAX) :
+                   ia64_ip_bundle_addr(raw_iip);
     uint64_t ifs = env->cr_ifs;
+    bool unimplemented_ia32_target =
+        (ipsr & IA64_PSR_IS) &&
+        ((ipsr & IA64_PSR_IT) ? !ia64_va_is_implemented(raw_iip) :
+                                !ia64_pa_is_implemented(raw_iip));
 
     /*
      * Montecito has no native IA-32 execution engine.  An OS must use its
@@ -763,6 +769,10 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
      * restored PSR state (SDM Vol.2 6.6).  CR[IPSR], CR[IIP] and
      * CR[IFS] are consumed, not modified.
      */
+    if (ipsr & IA64_PSR_IS) {
+        ipsr &= ~(IA64_PSR_DA | IA64_PSR_DD |
+                  IA64_PSR_IA | IA64_PSR_ED);
+    }
     ia64_set_psr(env, ipsr);
     env->ip = iip;
     ia64_tlb_serialize(env, 1, 1);
@@ -778,7 +788,18 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
         ia64_set_cfm_rrb_fr(env, 0);
         env->cfm_rrb_pr = 0;
         ia64_rse_invalidate_non_current(env);
-        ia64_invalidate_stacked_alat(env);
+        ia64_alat_invala(env);
+        ia64_ia32_enter(env);
+        if (unimplemented_ia32_target) {
+            /*
+             * This is an IA-64 trap on the completed rfi, not a fault on
+             * the first IA-32 instruction.  Preserve all 64 target bits.
+             */
+            env->cr_isr = IA64_ISR_CODE_UI;
+            env->exception_state.ia32_transition_trap = true;
+            ia64_raise_exception(env, IA64_EXCP_UNIMPL_INST_ADDR,
+                                 raw_iip, fault_ip, fault_slot);
+        }
         return;
     }
 
@@ -932,6 +953,10 @@ void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,
 void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
                   uint64_t fault_ip, uint32_t fault_slot)
 {
+    uint64_t target = env->br[b_reg];
+    uint64_t trap_code;
+    IA64Exception trap;
+
     if (env->ar_bspstore != env->ar_bsp) {
         ia64_raise_exception(env, IA64_EXCP_ILLEGAL, fault_ip, 0,
                                fault_slot);
@@ -946,11 +971,10 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     /*
      * Perform the architectural IA-64 to IA-32 transition: IP takes
      * BR[b1]{31:0} with byte granularity, PSR.is is set, and only the
-     * current (zero-size) frame stays valid.  The Madison compatibility
-     * model retains this transition so an attempted IA-32 instruction is
-     * diagnosed with the transitioned state visible.
+     * current (zero-size) frame stays valid.  Madison then imports the
+     * architected IA-32 register image before dispatching an IA-32 TB.
      */
-    env->ip = env->br[b_reg] & UINT32_MAX;
+    env->ip = target & UINT32_MAX;
     env->psr |= IA64_PSR_IS;
     env->psr &= ~(IA64_PSR_DA | IA64_PSR_DD | IA64_PSR_IA | IA64_PSR_ED |
                   IA64_PSR_RI_MASK);
@@ -962,8 +986,28 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     ia64_set_cfm_rrb_fr(env, 0);
     env->cfm_rrb_pr = 0;
     ia64_rse_invalidate_non_current(env);
-    ia64_invalidate_stacked_alat(env);
-    ia64_ia32_unsupported(env);
+    ia64_alat_invala(env);
+    ia64_ia32_enter(env);
+
+    trap_code = ((env->psr & IA64_PSR_IT) ?
+                 !ia64_va_is_implemented(target) :
+                 !ia64_pa_is_implemented(target)) ? IA64_ISR_CODE_UI : 0;
+    trap_code |= (env->psr & IA64_PSR_TB) ? IA64_ISR_CODE_TB : 0;
+    trap_code |= (env->psr & IA64_PSR_SS) ? IA64_ISR_CODE_SS : 0;
+    if (!trap_code) {
+        return;
+    }
+
+    if (trap_code & IA64_ISR_CODE_UI) {
+        trap = IA64_EXCP_UNIMPL_INST_ADDR;
+    } else if (trap_code & IA64_ISR_CODE_TB) {
+        trap = IA64_EXCP_TAKEN_BRANCH;
+    } else {
+        trap = IA64_EXCP_SINGLE_STEP;
+    }
+    env->cr_isr = trap_code;
+    env->exception_state.ia32_transition_trap = true;
+    ia64_raise_exception(env, trap, target, fault_ip, fault_slot);
 }
 
 

@@ -86,6 +86,18 @@ def raw_bundle(address, low, high):
         (raw >> 87) & ((1 << 41) - 1),
     )
 
+def ia32_bundle(address, code):
+    """Place up to 16 IA-32 instruction bytes in an IA-64 test bundle."""
+    code = bytes(code)
+    if address & 0xf:
+        raise ValueError("IA-32 test bundle address must be 16-byte aligned")
+    if len(code) > 16:
+        raise ValueError("IA-32 test bundle cannot exceed 16 bytes")
+    code = code.ljust(16, b'\x90')
+    return raw_bundle(address,
+                      int.from_bytes(code[:8], "little"),
+                      int.from_bytes(code[8:], "little"))
+
 def normalized_bundles(bundles):
     bundles = list(bundles)
     for index, bundle in enumerate(bundles):
@@ -120,5 +132,6 @@ __all__ = (
     'EndGroupInsn',
     'bundle_words',
     'raw_bundle',
+    'ia32_bundle',
     'normalized_bundles',
 )

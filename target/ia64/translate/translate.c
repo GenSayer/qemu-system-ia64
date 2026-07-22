@@ -13,6 +13,7 @@
 #include "debug.h"
 #include "decode/decode.h"
 #include "decoder.h"
+#include "ia32/translate.h"
 #include "translate/translate.h"
 
 #include "exec/helper-proto.h"
@@ -2881,6 +2882,8 @@ void ia64_translate_init(void)
             tcg_env, offsetof(CPUIA64State, rse.rse_gr_dirty[i]),
             "rse_gr_dirty");
     }
+
+    ia64_ia32_translate_init();
 }
 
 void ia64_translate_code(CPUState *cs, TranslationBlock *tb,
@@ -2896,6 +2899,10 @@ void ia64_translate_code(CPUState *cs, TranslationBlock *tb,
         .disas_log = ia64_tr_disas_log,
     };
 
-    translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops, &ctx.base,
-                    TCG_TYPE_VA);
+    if (tb->flags & IA64_TB_FLAG_PSR_IS) {
+        ia64_ia32_translate_code(cs, tb, max_insns, pc, host_pc);
+    } else {
+        translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops,
+                        &ctx.base, TCG_TYPE_VA);
+    }
 }

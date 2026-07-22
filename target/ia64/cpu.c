@@ -13,6 +13,7 @@
 #include "qemu/timer.h"
 #include "cpu.h"
 #include "arch/arch.h"
+#include "ia32/ia32.h"
 #include "debug.h"
 #include "translate/translate.h"
 #include "exec/cputlb.h"
@@ -35,6 +36,10 @@ static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
+    if (cpu->env.psr & IA64_PSR_IS) {
+        cpu->env.ia32.eip =
+            (uint32_t)(value - cpu->env.ia32.segs[R_CS].base);
+    }
     cpu->env.ip = value;
 }
 
@@ -42,7 +47,8 @@ static vaddr ia64_cpu_get_pc(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
-    return cpu->env.ip;
+    return cpu->env.psr & IA64_PSR_IS ?
+           ia64_ia32_virtual_ip(&cpu->env) : cpu->env.ip;
 }
 
 
@@ -50,6 +56,24 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint64_t psr = cpu->env.psr;
+    CPUX86State *xenv = &cpu->env.ia32;
+
+    if (psr & IA64_PSR_IS) {
+        uint32_t cs_base = xenv->segs[R_CS].base;
+        uint32_t flags = xenv->hflags |
+            (xenv->eflags &
+             (IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK)) |
+            ((psr & IA64_PSR_DB) ? IA64_TB_FLAG_IA32_PSR_DB : 0) |
+            ((psr & IA64_PSR_AC) ? IA64_TB_FLAG_IA32_PSR_AC : 0) |
+            ((psr & IA64_PSR_SS) ? TF_MASK : 0);
+
+        return (TCGTBCPUState) {
+            .pc = (uint32_t)(cs_base + xenv->eip),
+            .cs_base = cs_base,
+            .flags = flags | IA64_TB_FLAG_PSR_IS,
+        };
+    }
+
     uint32_t flags =
         ((psr >> 17) & IA64_TB_FLAG_DT) |
         ((psr >> 35) & IA64_TB_FLAG_IT) |
@@ -58,7 +82,6 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
         ((psr >> 8) & IA64_TB_FLAG_PSR_IC) |
         ((psr << 5) & IA64_TB_FLAG_BE) |
         ((uint32_t)cpu->env.instruction_group_start << 7) |
-        ((psr >> 26) & IA64_TB_FLAG_PSR_IS) |
         ((psr >> (IA64_PSR_CPL_SHIFT - IA64_TB_FLAG_CPL_SHIFT)) &
          IA64_TB_FLAG_CPL_MASK);
 
@@ -125,6 +148,14 @@ static void ia64_cpu_synchronize_from_tb(CPUState *cs,
                                          const TranslationBlock *tb)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+
+    if (tb->flags & IA64_TB_FLAG_PSR_IS) {
+        tcg_debug_assert(!tcg_cflags_has(cs, CF_PCREL));
+        cpu->env.ia32.eip = (uint32_t)(tb->pc - tb->cs_base);
+        cpu->env.ip = (uint32_t)tb->pc;
+        return;
+    }
+
     uint64_t ri =
         (tb->flags & IA64_TB_FLAG_RI_MASK) >> IA64_TB_FLAG_RI_SHIFT;
 
@@ -146,6 +177,25 @@ static void ia64_restore_state_to_opc(CPUState *cs,
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
+    if (tb->flags & IA64_TB_FLAG_PSR_IS) {
+        CPUX86State *xenv = &cpu->env.ia32;
+        uint64_t new_pc;
+
+        if (tb_cflags(tb) & CF_PCREL) {
+            uint64_t pc = xenv->eip + tb->cs_base;
+
+            new_pc = (pc & TARGET_PAGE_MASK) | data[0];
+        } else {
+            new_pc = data[0];
+        }
+        xenv->eip = (uint32_t)(new_pc - tb->cs_base);
+        cpu->env.ip = (uint32_t)new_pc;
+        if (data[1] != CC_OP_DYNAMIC) {
+            xenv->cc_op = data[1];
+        }
+        return;
+    }
+
     cpu->env.ip = data[0];
 }
 
@@ -157,6 +207,14 @@ static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
         return MMU_IDX_VIRT_CPL(ia64_psr_cpl(cpu->env.psr));
     }
     return MMU_PHYS_IDX;
+}
+
+static vaddr ia64_pointer_wrap(CPUState *cs, int mmu_idx,
+                               vaddr result, vaddr base)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+
+    return cpu->env.psr & IA64_PSR_IS ? (uint32_t)result : result;
 }
 
 
@@ -337,6 +395,16 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     bool is_rse = !is_ifetch && mmu_idx == MMU_IDX_RSE;
     uint8_t access_level;
     bool virt_translation_enabled;
+
+    if (!probe && is_ifetch && (cpu->env.psr & IA64_PSR_IS) &&
+        (uint32_t)addr == ia64_ia32_virtual_ip(&cpu->env)) {
+        /*
+         * The first executable-page lookup happens before x86 decoding.
+         * Preserve the architectural ordering of IA-32 instruction
+         * breakpoint and code-fetch faults ahead of instruction TLB faults.
+         */
+        ia64_ia32_check_fetch_fault_priority(&cpu->env, addr, 0);
+    }
 
     rid = ia64_region_rid(&cpu->env, addr);
     if (mmu_idx == MMU_PHYS_IDX) {
@@ -577,8 +645,17 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         }
     }
 raise_exception:
+    if ((cpu->env.psr & IA64_PSR_IS) && retaddr) {
+        cpu_restore_state(cs, retaddr);
+        retaddr = 0;
+    }
+    if (cpu->env.psr & IA64_PSR_IS) {
+        cpu->env.ip = ia64_ia32_virtual_ip(&cpu->env);
+        cpu->env.exception_state.fault_ip = cpu->env.ip;
+    }
     if (is_ifetch && excp == IA64_EXCP_PAGE_NOT_PRESENT &&
-        (cpu->env.psr & IA64_PSR_IC)) {
+        (cpu->env.psr & IA64_PSR_IC) &&
+        !(cpu->env.psr & IA64_PSR_IS)) {
         /*
          * IIP receives IP on interruption entry, and for faults it must point
          * at the faulting instruction bundle when interruption collection is
@@ -597,9 +674,11 @@ raise_exception:
      * and the handler's rfi would skip slots of the target bundle.
      */
     cpu->env.exception_state.fault_slot =
+        cpu->env.psr & IA64_PSR_IS ? 0 :
         (cpu->env.psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT;
     if (cpu->env.psr & IA64_PSR_IC) {
-        cpu->env.cr_ifa = addr;
+        cpu->env.cr_ifa = is_ifetch && (cpu->env.psr & IA64_PSR_IS) ?
+                          addr & ~0xfULL : addr;
         if (ia64_exception_initializes_iha(excp)) {
             cpu->env.cr_iha = ia64_vhpt_hash_address(&cpu->env, addr);
         }
@@ -647,6 +726,9 @@ raise_exception:
                   (uint64_t)addr, rid, cpu->env.cr_itir,
                   cpu->env.cr_iha, cpu->env.cr_pta, cpu->env.cr_isr);
     cs->exception_index = excp;
+    if (cpu->env.psr & IA64_PSR_IS) {
+        cpu_loop_exit(cs);
+    }
     cpu_loop_exit_restore(cs, retaddr);
 }
 
@@ -780,9 +862,19 @@ static const struct SysemuCPUOps ia64_sysemu_ops = {
     .get_phys_page_debug = ia64_cpu_get_phys_page_debug,
 };
 
+static bool ia64_precise_smc_enabled(CPUState *cs)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+
+    /* IA-32 stores, unlike IA-64 stores, participate in hardware SMC. */
+    return cpu->env.psr & IA64_PSR_IS;
+}
+
 static const TCGCPUOps ia64_tcg_ops = {
     .guest_default_memory_order = TCG_MO_ALL,
     .mttcg_supported = true,
+    .precise_smc = true,
+    .precise_smc_enabled = ia64_precise_smc_enabled,
     .initialize = ia64_translate_init,
     .translate_code = ia64_translate_code,
     .get_tb_cpu_state = ia64_get_tb_cpu_state,
@@ -790,7 +882,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .restore_state_to_opc = ia64_restore_state_to_opc,
     .mmu_index = ia64_cpu_mmu_index,
     .tlb_fill = ia64_cpu_tlb_fill,
-    .pointer_wrap = cpu_pointer_wrap_notreached,
+    .pointer_wrap = ia64_pointer_wrap,
 #ifndef CONFIG_USER_ONLY
     .do_unaligned_access = ia64_cpu_do_unaligned_access,
 #endif
@@ -892,12 +984,6 @@ static const TypeInfo ia64_cpu_type_info[] = {
         .instance_align = __alignof__(IA64CPU),
         .class_size = sizeof(IA64CPUClass),
         .class_init = ia64_cpu_class_init,
-    },
-    {
-        .name = IA64_CPU_TYPE_NAME("itanium2"),
-        .parent = TYPE_IA64_CPU,
-        .class_init = ia64_cpu_model_class_init,
-        .class_data = &ia64_cpu_model_madison,
     },
     {
         .name = IA64_CPU_TYPE_NAME("madison"),

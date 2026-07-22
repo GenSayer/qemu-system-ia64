@@ -7,6 +7,7 @@
 #include "cpu.h"
 #include "exec/cpu-common.h"
 #include "arch/arch.h"
+#include "ia32/ia32.h"
 #include "trace.h"
 
 const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
@@ -50,6 +51,11 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
      * fault vector was subsequently defined.
      */
     [IA64_EXCP_VIRTUALIZATION]   = 0x6100,
+    [IA64_EXCP_IA32_EXCEPTION]  = 0x6900,
+    [IA64_EXCP_IA32_INTERCEPT]  = 0x6a00,
+    [IA64_EXCP_IA32_INTERRUPT]  = 0x6b00,
+    [IA64_EXCP_TAKEN_BRANCH]    = 0x5f00,
+    [IA64_EXCP_SINGLE_STEP]     = 0x6000,
 };
 
 G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
@@ -181,6 +187,9 @@ G_NORETURN void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
     CPUIA64State *env = &cpu->env;
 
     (void)mmu_idx;
+    if (env->psr & IA64_PSR_IS) {
+        ia64_ia32_unaligned_access(&env->ia32, addr, access_type, retaddr);
+    }
     cpu_restore_state(cs, retaddr);
     env->exception_state.fault_ip = env->ip;
     env->exception_state.fault_imm = 0;
@@ -246,11 +255,49 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint64_t vector;
     uint64_t isr_status = 0;
+    uint64_t ia32_fault_ip = 0;
+    uint64_t ia32_next_ip = 0;
     bool psr_ic_inflight;
     bool collect;
+    bool ia32;
+    bool ia32_entry_trap;
+    bool ia32_transition_trap;
+    bool ia32_trap = false;
 
     if (excp >= IA64_EXCP_MAX || excp == IA64_EXCP_NONE) {
         return;
+    }
+
+    ia32 = cpu->env.psr & IA64_PSR_IS;
+    ia32_transition_trap = cpu->env.exception_state.ia32_transition_trap;
+    ia32_entry_trap = ia32 && ia32_transition_trap;
+    if (ia32_entry_trap) {
+        /*
+         * br.ia/rfi committed the IA-32 register image, but their IA-64
+         * trap records retain the original 64-bit target and source bundle.
+         */
+        ia64_ia32_abort_sse_instruction(&cpu->env);
+        ia64_ia32_sync_to_ia64(&cpu->env);
+    } else if (ia32 || ia32_transition_trap) {
+        if (excp == IA64_EXCP_IA32_EXCEPTION ||
+            excp == IA64_EXCP_IA32_INTERCEPT ||
+            excp == IA64_EXCP_IA32_INTERRUPT) {
+            ia32_fault_ip = (uint32_t)cpu->env.exception_state.fault_ip;
+            ia32_trap = cpu->env.exception_state.ia32_trap;
+            ia32_next_ip = ia32_trap ?
+                (uint32_t)cpu->env.exception_state.fault_imm :
+                ia32_fault_ip;
+        } else if (excp == IA64_EXCP_EXTINT) {
+            ia32_fault_ip = ia64_ia32_virtual_ip(&cpu->env);
+            ia32_next_ip = ia32_fault_ip;
+        } else {
+            ia32_fault_ip = (uint32_t)cpu->env.exception_state.fault_ip;
+            ia32_next_ip = ia32_fault_ip;
+        }
+        if (ia32) {
+            ia64_ia32_abort_sse_instruction(&cpu->env);
+            ia64_ia32_sync_to_ia64(&cpu->env);
+        }
     }
 
     vector = ia64_ivt_vectors[excp];
@@ -282,6 +329,11 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     case IA64_EXCP_FP_TRAP:
     case IA64_EXCP_DISABLED_ISA_TRANSITION:
     case IA64_EXCP_DISABLED_FP:
+    case IA64_EXCP_IA32_EXCEPTION:
+    case IA64_EXCP_IA32_INTERCEPT:
+    case IA64_EXCP_IA32_INTERRUPT:
+    case IA64_EXCP_TAKEN_BRANCH:
+    case IA64_EXCP_SINGLE_STEP:
         isr_status = cpu->env.cr_isr;
         break;
     default:
@@ -308,15 +360,24 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     ia64_tlb_serialize(&cpu->env, 1, 1);
 
     if (collect) {
-        cpu->env.cr_ipsr = (cpu->env.psr & ~IA64_PSR_RI_MASK) |
-                           (((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT);
-        cpu->env.cr_iip = ia64_ip_bundle_addr(cpu->env.ip);
+        cpu->env.cr_ipsr = cpu->env.psr & ~IA64_PSR_RI_MASK;
+        if (ia32_entry_trap) {
+            cpu->env.cr_iip = cpu->env.exception_state.fault_ip;
+            cpu->env.cr_iipa = cpu->env.exception_state.fault_imm;
+        } else if (ia32 || ia32_transition_trap) {
+            cpu->env.cr_iip = ia32_next_ip;
+            cpu->env.cr_iipa = ia32_fault_ip;
+        } else {
+            cpu->env.cr_ipsr |=
+                ((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT;
+            cpu->env.cr_iip = ia64_ip_bundle_addr(cpu->env.ip);
+            cpu->env.cr_iipa = excp == IA64_EXCP_FP_TRAP ?
+                               cpu->env.exception_state.fault_imm :
+                               cpu->env.last_successful_bundle;
+        }
         if (ia64_exception_writes_ifa(excp)) {
             cpu->env.cr_ifa = fault_addr;
         }
-        cpu->env.cr_iipa = excp == IA64_EXCP_FP_TRAP ?
-                           cpu->env.exception_state.fault_imm :
-                           cpu->env.last_successful_bundle;
         /*
          * A collected interruption records the interrupted IP/PSR and clears
          * IFS.v.  The interrupted frame remains current until the handler
@@ -331,7 +392,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
 
     if (excp != IA64_EXCP_DATA_NESTED_TLB) {
         cpu->env.cr_isr = isr_status;
-        if (slot > 0) {
+        if ((!ia32 || ia32_entry_trap) && slot > 0) {
             cpu->env.cr_isr |= ((uint64_t)slot & 3) << IA64_ISR_EI_SHIFT;
         }
         if (!collect || psr_ic_inflight) {
@@ -356,6 +417,8 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     }
 
     cpu->env.exception_state.exception = 0;
+    cpu->env.exception_state.ia32_trap = false;
+    cpu->env.exception_state.ia32_transition_trap = false;
     cpu->env.interrupt.pending_extint = 0;
 }
 
@@ -397,11 +460,14 @@ void ia64_cpu_do_interrupt(CPUState *cs)
     int excp = cs->exception_index;
     uint64_t fault_addr;
     uint8_t slot;
+    bool ia32_entry_trap;
 
     if (excp == IA64_EXCP_NONE) {
         return;
     }
     cpu->env.exception_state.fault_exception = excp;
+    ia32_entry_trap = (cpu->env.psr & IA64_PSR_IS) &&
+                      cpu->env.exception_state.ia32_transition_trap;
 
     if (!(cpu->env.psr & IA64_PSR_IC) &&
         !ia64_exception_is_translation_fault(excp) &&
@@ -441,13 +507,22 @@ void ia64_cpu_do_interrupt(CPUState *cs)
     case IA64_EXCP_FP_TRAP:
     case IA64_EXCP_DISABLED_ISA_TRANSITION:
     case IA64_EXCP_DISABLED_FP:
+    case IA64_EXCP_IA32_EXCEPTION:
+    case IA64_EXCP_IA32_INTERCEPT:
+    case IA64_EXCP_IA32_INTERRUPT:
+    case IA64_EXCP_TAKEN_BRANCH:
+    case IA64_EXCP_SINGLE_STEP:
         fault_addr = cpu->env.exception_state.fault_ip;
         break;
     case IA64_EXCP_UNIMPL_INST_ADDR:
-        cpu->env.ip = cpu->env.psr & IA64_PSR_IT ?
-                      ia64_va_canonicalize(cpu->env.ip) :
-                      ia64_pa_canonicalize(cpu->env.ip);
-        fault_addr = cpu->env.ip;
+        if (ia32_entry_trap) {
+            fault_addr = cpu->env.exception_state.fault_ip;
+        } else {
+            cpu->env.ip = cpu->env.psr & IA64_PSR_IT ?
+                          ia64_va_canonicalize(cpu->env.ip) :
+                          ia64_pa_canonicalize(cpu->env.ip);
+            fault_addr = cpu->env.ip;
+        }
         break;
     case IA64_EXCP_EXTINT:
         break;
@@ -455,7 +530,11 @@ void ia64_cpu_do_interrupt(CPUState *cs)
         break;
     }
     slot = cpu->env.exception_state.fault_slot;
-    if (ia64_exception_uses_psr_ri_slot(excp, cpu->env.cr_isr)) {
+    if (ia32_entry_trap) {
+        /* The excepting instruction is the IA-64 br.ia/rfi source slot. */
+    } else if (cpu->env.psr & IA64_PSR_IS) {
+        slot = 0;
+    } else if (ia64_exception_uses_psr_ri_slot(excp, cpu->env.cr_isr)) {
         slot = (cpu->env.psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT;
     }
     if (ia64_psr_cpl(cpu->env.psr) == 3 &&
@@ -501,6 +580,8 @@ void ia64_cpu_do_interrupt(CPUState *cs)
 bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    bool nmi_pending = cpu->env.interrupt.sapic_irr[0] & (1ULL << 2);
+    bool interrupt_enabled = (cpu->env.psr & IA64_PSR_I) || nmi_pending;
     /*
      * While RSE.CFLE is set, instruction execution is stalled until
      * the mandatory RSE loads complete (SDM Vol.2 6.6).  This
@@ -518,9 +599,17 @@ bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     bool rse_frame_complete = !cpu->env.rse.rse_cfle &&
         cpu->env.rse.rse_dirty >= 0 && cpu->env.rse.rse_dirty_nat >= 0;
 
+    if ((cpu->env.psr & IA64_PSR_IS) && !nmi_pending) {
+        uint32_t eflags = cpu_compute_eflags(&cpu->env.ia32);
+        bool virtual_if = !(cpu->env.ar_cflg & (1ULL << 7)) ||
+                          (eflags & IF_MASK);
+
+        interrupt_enabled = (cpu->env.psr & IA64_PSR_I) && virtual_if &&
+                            !(cpu->env.ia32.hflags & HF_INHIBIT_IRQ_MASK);
+    }
+
     if ((interrupt_request & CPU_INTERRUPT_HARD) &&
-        ((cpu->env.psr & IA64_PSR_I) ||
-         (cpu->env.interrupt.sapic_irr[0] & (1ULL << 2))) &&
+        interrupt_enabled &&
         ia64_sapic_has_pending(&cpu->env) &&
         rse_frame_complete) {
         cs->exception_index = IA64_EXCP_EXTINT;

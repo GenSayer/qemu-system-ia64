@@ -85,6 +85,7 @@ from .encoding import (
     cmp_ne_or_andcm,
     cmp_ne_or_andcm_imm,
     cmp_ne_or_imm,
+    chk_a_nc_m,
     czx1_l,
     czx1_r,
     czx2_l,
@@ -101,10 +102,14 @@ from .encoding import (
     hint_i,
     hint_m,
     hint_x_mlx,
+    ia32_bundle,
+    ia32_environment_bundles,
+    IA32_TEST_CSD,
     ip_relative_branch_btype,
     ld1,
     ld4_postinc,
     ld8,
+    ld8_a,
     ld8_postinc,
     ld8_s_postinc,
     mf,
@@ -135,6 +140,7 @@ from .encoding import (
     mov_lc_gr,
     mov_lc_imm,
     mov_m_ar_gr,
+    mov_m_gr_ar,
     mov_m_cr_gr,
     mov_m_gr_cr,
     mov_m_gr_psr_um,
@@ -186,7 +192,6 @@ from .encoding import (
     psub1_uuu,
     raw_bundle,
     require_exception,
-    require_qemu_failure,
     require_registers,
     reserved_a1_x4_5_x2b_1,
     rfi_to_gr,
@@ -1921,20 +1926,349 @@ test_br_ia_montecito_native_ia32_disabled_fault = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
-test_br_ia_ia32_unsupported_aborts_after_state_transition = \
-    require_qemu_failure(
-        "br_ia_ia32_unsupported_aborts_after_state_transition", [
-            (0x10, *movl_mlx(8, 0x1234567800000043)),
+test_br_ia_executes_ia32_and_jmpe_returns_to_ia64 = require_registers(
+    "br_ia_executes_ia32_and_jmpe_returns_to_ia64", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "b8 34 12 "       # mov ax,0x1234
+            "83 c0 02 "       # add ax,2
+            "0f b8 00 02")),  # jmpe 0x200
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r1": 0x10a,
+        "r8": 0x1236,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_self_modifying_store_updates_current_translation_block = \
+    require_registers(
+        "ia32_self_modifying_store_updates_current_translation_block", [
+            *ia32_environment_bundles(
+                0x700, 0x10, csd=IA32_TEST_CSD | (1 << 62)),
+            (0x10, *movl_mlx(8, 0x100)),
             (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
-            (0x30, 0x10, nop_m(), nop_i(),
-             br_indirect(7, btype=1)),
-            (0x40, 0x10, nop_m(), nop_i(),
-             br_cond(0x40, 0x40)),
-        ], [
-            "IA-32 instruction set execution is not implemented",
-            "IP=0x0000000000000043",
-            f"PSR=0x{IA64_PSR_IS:016x}",
-        ], entry=0x10, cpu="madison")
+            (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+            ia32_bundle(0x100, bytes.fromhex(
+                "c6 05 09 01 00 00 02 "  # mov byte ptr [0x109],2
+                "66 b8 01 00 "           # mov ax,1 -> mov ax,2
+                "66 0f b8 00 02")),      # jmpe 0x200
+            (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+        ], {
+            "ip": 0x200,
+            "r8": 2,
+            "exception": IA64_EXCP_NONE,
+        }, entry=0x700, cpu="madison")
+
+test_br_ia_invalidates_global_alat_entries = require_registers(
+    "br_ia_invalidates_global_alat_entries", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, 0x00, addl(3, 0x300, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld8_a(22, 3), nop_i(), nop_i()),
+        (0x30, *movl_mlx(8, 0x100)),
+        (0x40, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex("0f b8 00 02")),
+        (0x200, 0x00, chk_a_nc_m(22, 0x200, 0x240),
+         adds(4, 1, 0), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x210)),
+        (0x240, 0x10, nop_m(), nop_i(), br_cond(0x240, 0x240)),
+        (0x300, 0x00, 0x123456789abcdef0, 0, 0),
+    ], {
+        "ip": 0x240,
+        "r4": 0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_jmpe_gr1_includes_csd_base = require_registers(
+    "ia32_jmpe_gr1_includes_csd_base", [
+        *ia32_environment_bundles(
+            0x700, 0x10, csd=IA32_TEST_CSD | 0x1000),
+        # Keep the Real Mode selector/base relationship consistent.
+        (0x10, *movl_mlx(17, 0x100)),
+        (0x20, *movl_mlx(8, 0x1100)),
+        (0x30, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x1100, bytes.fromhex(
+            "0f b8 00 04")),  # jmpe CSD.base + 0x400 = 0x1400
+        (0x1400, 0x10, nop_m(), nop_i(), br_cond(0x1400, 0x1400)),
+    ], {
+        "ip": 0x1400,
+        "r1": 0x1104,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_descriptor_ignored_bits_preserved_on_jmpe = require_registers(
+    "ia32_descriptor_ignored_bits_preserved_on_jmpe", [
+        *ia32_environment_bundles(
+            0x700, 0x10,
+            csd=0x39b0ffff00000000,
+            dsd=0x3930ffff00000000,
+            ssd=0x3930ffff00000000),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex("0f b8 00 02")),
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r25": 0x09b0ffff00000000,
+        "r26": 0x0930ffff00000000,
+        "r27": 0x3930ffff00000000,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_cpuid_leaf2_reports_madison_cache_descriptors = require_registers(
+    "ia32_cpuid_leaf2_reports_madison_cache_descriptors", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "66 31 c0 "           # xor eax,eax
+            "0f a2 "              # cpuid: highest leaf
+            "66 89 c6 "           # mov esi,eax
+            "66 b8 02 00 00 00 "  # mov eax,2
+            "0f a2")),            # cpuid: cache descriptors
+        ia32_bundle(0x110, bytes.fromhex("0f b8 00 02")),
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r8": 0x7e776701,
+        "r9": 0,
+        "r10": 0xffffffff80000000,
+        "r11": 0x8d,
+        "r14": 2,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_cpuid_leaf1_reports_madison_feature_word = require_registers(
+    "ia32_cpuid_leaf1_reports_madison_feature_word", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "66 b8 01 00 00 00 "  # mov eax,1
+            "0f a2 "              # cpuid: signature and feature word
+            "0f b8 00 02")),      # jmpe 0x200
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r8": 0x673,
+        "r9": 0,
+        "r10": 0x4383fbbf,
+        "r11": 0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_x87_top_round_trips_through_fsr = require_registers(
+    "ia32_x87_top_round_trips_through_fsr", [
+        *ia32_environment_bundles(0x700, 0x10),
+        # Begin with TOP=3 and all eight physical x87 registers empty.
+        (0x10, *movl_mlx(3, 0x55550000 | (3 << 11))),
+        (0x20, 0x00, mov_m_gr_ar(3, 28), nop_i(), nop_i()),
+        (0x30, *movl_mlx(8, 0x100)),
+        (0x40, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "d9 e8 "             # fld1: TOP 3 -> 2, physical tag 2 valid
+            "0f b8 00 02")),     # jmpe 0x200
+        (0x200, 0x00, mov_m_ar_gr(8, 28), nop_i(), nop_i()),
+        (0x210, 0x00, mov_m_ar_gr(9, 29), nop_i(), nop_i()),
+        (0x220, 0x10, nop_m(), nop_i(), br_cond(0x220, 0x220)),
+    ], {
+        "ip": 0x220,
+        "r8": (0x55550000 & ~(1 << 20)) | (2 << 11),
+        "r9": (0x1e8 << 48) | 0x100,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_fldenv_restores_x87_environment = require_registers(
+    "ia32_fldenv_restores_x87_environment", [
+        *ia32_environment_bundles(
+            0x700, 0x10, csd=IA32_TEST_CSD | (1 << 62)),
+        # Protected mode selects the 32-bit protected-mode FLDENV layout.
+        (0x10, *movl_mlx(3, 1)),
+        (0x20, 0x00, mov_m_gr_ar(3, 27), nop_i(), nop_i()),
+        (0x30, *movl_mlx(8, 0x100)),
+        (0x40, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "d9 25 00 03 00 00 "        # fldenv [0x300]
+            "0f b8 00 02 00 00")),      # jmpe 0x200
+        (0x200, 0x00, mov_m_ar_gr(8, 21), nop_i(), nop_i()),
+        (0x210, 0x00, mov_m_ar_gr(9, 28), nop_i(), nop_i()),
+        (0x220, 0x00, mov_m_ar_gr(10, 29), nop_i(), nop_i()),
+        (0x230, 0x00, mov_m_ar_gr(11, 30), nop_i(), nop_i()),
+        (0x240, 0x10, nop_m(), nop_i(), br_cond(0x240, 0x240)),
+        # FCW, FSW(TOP=5), FTW(all empty), FIP, FCS/FOP, FDP, FDS.
+        raw_bundle(0x300, 0x000028000000037f, 0x123456780000ffff),
+        raw_bundle(0x310, 0x8765432105ab2468, 0x0000000000001357),
+    ], {
+        "ip": 0x240,
+        "r8": 0x037f,
+        "r9": 0x55550000 | (5 << 11),
+        "r10": (0x5ab << 48) | (0x2468 << 32) | 0x12345678,
+        "r11": (0x1357 << 32) | 0x87654321,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_fnstenv_saves_x87_environment_and_masks_exceptions = \
+    require_registers(
+        "ia32_fnstenv_saves_x87_environment_and_masks_exceptions", [
+            *ia32_environment_bundles(
+                0x700, 0x10, csd=IA32_TEST_CSD | (1 << 62)),
+            # Start with every x87 register empty and every exception unmasked.
+            (0x10, *movl_mlx(3, 0x55550000)),
+            (0x20, 0x00, mov_m_gr_ar(3, 28), nop_i(), nop_i()),
+            (0x30, 0x00, mov_m_gr_ar(0, 21), nop_i(), nop_i()),
+            (0x40, *movl_mlx(3, 1)),
+            (0x50, 0x00, mov_m_gr_ar(3, 27), nop_i(), nop_i()),
+            (0x60, *movl_mlx(8, 0x100)),
+            (0x70, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+            (0x80, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+            ia32_bundle(0x100, bytes.fromhex(
+                "d9 e8 "                    # fld1: TOP 0 -> 7
+                "d9 35 00 03 00 00 "        # fnstenv [0x300]
+                "0f b8 00 02 00 00")),      # jmpe 0x200
+            (0x200, 0x00, mov_m_ar_gr(8, 21), nop_i(), nop_i()),
+            (0x210, 0x00, addl(3, 0x300, 0), nop_i(), nop_i()),
+            (0x220, 0x00, ld8(9, 3), nop_i(), nop_i()),
+            (0x230, 0x00, addl(3, 0x308, 0), nop_i(), nop_i()),
+            (0x240, 0x00, ld8(10, 3), nop_i(), nop_i()),
+            (0x250, 0x00, addl(3, 0x310, 0), nop_i(), nop_i()),
+            (0x260, 0x00, ld8(11, 3), nop_i(), nop_i()),
+            (0x270, 0x10, nop_m(), nop_i(), br_cond(0x270, 0x270)),
+            raw_bundle(0x300, 0, 0),
+            raw_bundle(0x310, 0, 0),
+        ], {
+            "ip": 0x270,
+            "r8": 0x3f,
+            "r9": 0x0000380000000000,
+            "r10": 0x0000010000003fff,
+            "r11": 0x0000000001e80000,
+            "exception": IA64_EXCP_NONE,
+        }, entry=0x700, cpu="madison")
+
+test_ia32_fxsave_records_x87_pointers_and_mxcsr_mask = require_registers(
+    "ia32_fxsave_records_x87_pointers_and_mxcsr_mask", [
+        *ia32_environment_bundles(
+            0x700, 0x10, csd=IA32_TEST_CSD | (1 << 62)),
+        (0x10, *movl_mlx(3, 0x55550000)),
+        (0x20, 0x00, mov_m_gr_ar(3, 28), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, (0x1f80 << 32) | 0x037f)),
+        (0x40, 0x00, mov_m_gr_ar(3, 21), nop_i(), nop_i()),
+        # Protected mode and CFLG.fxsr (IA-32 CR4.OSFXSR).
+        (0x50, *movl_mlx(3, 1 | ((1 << 9) << 32))),
+        (0x60, 0x00, mov_m_gr_ar(3, 27), nop_i(), nop_i()),
+        (0x70, *movl_mlx(8, 0x100)),
+        (0x80, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "d9 e8 "                    # fld1: last FOP/FIP, TOP 0 -> 7
+            "0f ae 05 00 03 00 00 "     # fxsave [0x300]
+            "0f b8 00 02 00 00")),      # jmpe 0x200
+        (0x200, 0x00, addl(3, 0x300, 0), nop_i(), nop_i()),
+        (0x210, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0x220, 0x00, addl(3, 0x308, 0), nop_i(), nop_i()),
+        (0x230, 0x00, ld8(9, 3), nop_i(), nop_i()),
+        (0x240, 0x00, addl(3, 0x318, 0), nop_i(), nop_i()),
+        (0x250, 0x00, ld8(10, 3), nop_i(), nop_i()),
+        (0x260, 0x10, nop_m(), nop_i(), br_cond(0x260, 0x260)),
+        raw_bundle(0x300, 0, 0),
+        raw_bundle(0x310, 0, 0),
+    ], {
+        "ip": 0x260,
+        "r8": 0x01e800803800037f,
+        "r9": 0x100,
+        "r10": 0x0000ffbf00001f80,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_pvi_cli_clears_vif_and_preserves_if = require_registers(
+    "ia32_pvi_cli_clears_vif_and_preserves_if", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(3, (1 << 0) | (1 << 33))),
+        (0x20, 0x00, mov_m_gr_ar(3, 27), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, (1 << 19) | (1 << 9) | 2)),
+        (0x40, 0x00, mov_m_gr_ar(3, 24), nop_i(), nop_i()),
+        (0x50, *movl_mlx(
+            2, IA64_PSR_IC | IA64_PSR_IS | IA64_PSR_CPL3)),
+        (0x60, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0x70, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex("fa 0f b8 00 02")),
+        (0x200, 0x00, mov_m_ar_gr(8, 24), nop_i(), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x210)),
+    ], {
+        "ip": 0x210,
+        "r8": (1 << 9) | 2,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_code32_integer_width_is_32_bits = require_registers(
+    "ia32_code32_integer_width_is_32_bits", [
+        *ia32_environment_bundles(
+            0x700, 0x10, csd=IA32_TEST_CSD | (1 << 62)),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "bc 00 04 00 00 "  # mov esp,0x400
+            "b8 ff ff ff ff "  # mov eax,0xffffffff
+            "83 c0 01 "        # add eax,1
+            "9c "              # pushfd
+            "5b")),            # pop ebx
+        ia32_bundle(0x110, bytes.fromhex(
+            "b8 ff ff ff 7f "  # mov eax,0x7fffffff
+            "83 c0 01 "        # add eax,1
+            "9c "              # pushfd
+            "59 "              # pop ecx
+            "ba 00 00 00 80 "  # mov edx,0x80000000
+            )),
+        ia32_bundle(0x120, bytes.fromhex(
+            "d1 c2 "           # rol edx,1
+            "89 d7 "           # mov edi,edx
+            "b8 ff ff ff ff "  # mov eax,0xffffffff
+            "be 02 00 00 00 "  # mov esi,2
+            "f7 e6")),         # mul esi
+        ia32_bundle(0x130, bytes.fromhex(
+            "0f b8 00 05 00 00")),  # jmpe 0x500
+        (0x500, 0x10, nop_m(), nop_i(), br_cond(0x500, 0x500)),
+    ], {
+        "ip": 0x500,
+        "r8": 0xfffffffffffffffe,
+        "r9": 0x896,
+        "r10": 1,
+        "r11": 0x57,
+        "r12": 0x400,
+        "r14": 2,
+        "r15": 1,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_bound_uses_16_bit_bound_elements = require_registers(
+    "ia32_bound_uses_16_bit_bound_elements", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "b8 05 00 "       # mov ax,5
+            "62 06 00 03 "    # bound ax,word pair ptr [0x300]
+            "bb 34 12 "       # mov bx,0x1234
+            "0f b8 00 02")),  # jmpe 0x200
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+        ia32_bundle(0x300, bytes.fromhex("00 00 0a 00")),
+    ], {
+        "ip": 0x200,
+        "r8": 5,
+        "r11": 0x1234,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
 
 test_reserved_indirect_branch_btype_illegal = require_exception(
     "reserved_indirect_branch_btype_illegal",
@@ -2262,10 +2596,23 @@ CASE_NAMES = (
     'br_ctop_rotating_pipeline',
     'br_ctop_self_loop_budgeted',
     'br_ctop_strcpy_pipeline_stops_on_first_zero_word',
-    'br_ia_ia32_unsupported_aborts_after_state_transition',
+    'br_ia_executes_ia32_and_jmpe_returns_to_ia64',
+    'br_ia_invalidates_global_alat_entries',
     'br_ia_montecito_native_ia32_disabled_fault',
     'br_ia_nonzero_qp_illegal',
     'br_ia_psr_di_disabled_transition_fault',
+    'ia32_cpuid_leaf1_reports_madison_feature_word',
+    'ia32_cpuid_leaf2_reports_madison_cache_descriptors',
+    'ia32_fldenv_restores_x87_environment',
+    'ia32_fnstenv_saves_x87_environment_and_masks_exceptions',
+    'ia32_fxsave_records_x87_pointers_and_mxcsr_mask',
+    'ia32_x87_top_round_trips_through_fsr',
+    'ia32_descriptor_ignored_bits_preserved_on_jmpe',
+    'ia32_jmpe_gr1_includes_csd_base',
+    'ia32_code32_integer_width_is_32_bits',
+    'ia32_bound_uses_16_bit_bound_elements',
+    'ia32_pvi_cli_clears_vif_and_preserves_if',
+    'ia32_self_modifying_store_updates_current_translation_block',
     'br_indirect_ignores_low_bits',
     'br_indirect_predicate_false_falls_through',
     'br_wexit_false_predicate_drains_epilog',

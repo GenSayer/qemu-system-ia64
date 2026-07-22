@@ -23,7 +23,9 @@
 #define IA64_TB_FLAG_PSR_IC       (1u << 5)
 #define IA64_TB_FLAG_BE           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
-#define IA64_TB_FLAG_PSR_IS       (1u << 8)
+#define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
+#define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
+#define IA64_TB_FLAG_PSR_IS       (1u << 31)
 #define IA64_TB_FLAG_CPL_SHIFT    9
 #define IA64_TB_FLAG_CPL_MASK     (3u << IA64_TB_FLAG_CPL_SHIFT)
 

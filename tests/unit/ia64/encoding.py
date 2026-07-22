@@ -23,6 +23,34 @@ from .encoding_memory import *
 from .encoding_fp import *
 from .encoding_simd import *
 
+IA32_TEST_CSD = 0x09b0ffff00000000
+IA32_TEST_DSD = 0x0930ffff00000000
+IA32_TEST_GDTD = 0x0800ffff00000000
+
+
+def ia32_environment_bundles(address, target, reg=31,
+                              csd=IA32_TEST_CSD,
+                              dsd=IA32_TEST_DSD,
+                              ssd=None):
+    """Install valid flat segment descriptors before an IA-32 transition."""
+    if ssd is None:
+        ssd = dsd
+    return [
+        (address, *movl_mlx(reg, dsd)),
+        (address + 0x10, 0x00, nop_m(),
+         adds(24, 0, reg), adds(27, 0, reg)),
+        (address + 0x20, 0x00, nop_m(),
+         adds(28, 0, reg), adds(29, 0, reg)),
+        (address + 0x30, *movl_mlx(reg, ssd)),
+        (address + 0x40, 0x00, mov_m_gr_ar(reg, 26), nop_i(), nop_i()),
+        (address + 0x50, *movl_mlx(reg, csd)),
+        # CSD is consumed before the I-slot clears stype/s in the scratch GR,
+        # leaving a valid system descriptor in the architected GDTD (GR31).
+        (address + 0x60, 0x10, mov_m_gr_ar(reg, 25),
+         dep(reg, 0, reg, 52, 5),
+         br_cond(address + 0x60, target)),
+    ]
+
 def run_program(qemu, bundles, entry=0x10, alat="full",
                 terminal_ip=None, expected=None, timeout=2.0,
                 name="ia64-microprogram", poll_initial_s=0.001,
@@ -156,6 +184,8 @@ IA64_EXCEPTION_VECTORS = {
     IA64_EXCP_UNSUPPORTED_DATA_REFERENCE:
         IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR,
     IA64_EXCP_VIRTUALIZATION: IA64_VIRTUALIZATION_VECTOR,
+    IA64_EXCP_TAKEN_BRANCH: IA64_TAKEN_BRANCH_VECTOR,
+    IA64_EXCP_SINGLE_STEP: IA64_SINGLE_STEP_VECTOR,
 }
 
 
