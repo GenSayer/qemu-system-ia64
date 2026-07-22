@@ -201,6 +201,7 @@ firmware_unaligned_speculative_load_assist
 firmware_unaligned_store_assist
 firmware_unaligned_virtual_load_assist
 fma_d_s0_decode
+fma_s_s0_high_f4_decode
 fma_preserves_extended_precision
 fmerge_forms_decode
 fmerge_natval_propagates
