@@ -1944,6 +1944,48 @@ test_br_ia_executes_ia32_and_jmpe_returns_to_ia64 = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
+test_ia32_indirect_jump_reaches_target = require_registers(
+    "ia32_indirect_jump_reaches_target", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "b8 08 01 "       # mov ax,0x108
+            "ff e0 "          # jmp ax
+            "90 90 90 "       # skipped bytes
+            "0f b8 00 02")),  # jmpe 0x200
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r1": 0x10c,
+        "r8": 0x108,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_indirect_call_return_reaches_target = require_registers(
+    "ia32_indirect_call_return_reaches_target", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, *movl_mlx(12, 0x300)),
+        (0x30, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "b8 10 01 "       # mov ax,0x110
+            "ff d0 "          # call ax
+            "b8 20 01 "       # mov ax,0x120
+            "ff e0")),        # jmp ax
+        ia32_bundle(0x110, bytes.fromhex("c3")),  # ret
+        ia32_bundle(0x120, bytes.fromhex("0f b8 00 02")),
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r1": 0x124,
+        "r8": 0x120,
+        "r12": 0x300,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
 test_ia32_self_modifying_store_updates_current_translation_block = \
     require_registers(
         "ia32_self_modifying_store_updates_current_translation_block", [
@@ -2601,6 +2643,8 @@ CASE_NAMES = (
     'br_ia_montecito_native_ia32_disabled_fault',
     'br_ia_nonzero_qp_illegal',
     'br_ia_psr_di_disabled_transition_fault',
+    'ia32_indirect_call_return_reaches_target',
+    'ia32_indirect_jump_reaches_target',
     'ia32_cpuid_leaf1_reports_madison_feature_word',
     'ia32_cpuid_leaf2_reports_madison_cache_descriptors',
     'ia32_fldenv_restores_x87_environment',

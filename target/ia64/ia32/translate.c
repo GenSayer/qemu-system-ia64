@@ -119,6 +119,12 @@
     gen_helper_ia32_rep_iteration(tcg_env)
 #define X86_GEN_REP_COMPLETE(s)                                        \
     gen_helper_ia32_complete_instruction(tcg_env, eip_next_tl(s))
+/*
+ * An indirect branch commits its runtime target to cpu_eip and invalidates
+ * pc_save.  That target is the next IP for instruction-completion traps.
+ */
+#define X86_IA32_COMPLETION_EIP(s)                                     \
+    ((s)->pc_save == -1 ? cpu_eip : eip_next_tl(s))
 #define X86_AFTER_INSN_WRITEBACK(s, decode) do {                       \
     if ((((decode)->e.gen == gen_MOV &&                                \
           (decode)->e.op0 == X86_TYPE_S) ||                            \
@@ -132,7 +138,8 @@
                                     tcg_constant_i32(3),               \
                                     eip_next_tl(s));                   \
     }                                                                  \
-    gen_helper_ia32_complete_instruction(tcg_env, eip_next_tl(s));     \
+    gen_helper_ia32_complete_instruction(                              \
+        tcg_env, X86_IA32_COMPLETION_EIP(s));                          \
 } while (0)
 #define X86_SYSTEM_INSTRUCTION_INTERCEPT(decode) \
     ((decode)->e.gen == gen_CLTS || \
