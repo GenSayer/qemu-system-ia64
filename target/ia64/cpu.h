@@ -41,6 +41,7 @@
 #define IA64_PMC_COUNT   64
 #define IA64_PMD_COUNT   64
 #define IA64_PKR_COUNT   16
+#define IA64_RR_COUNT    8
 #define IA64_MSR_COUNT   1024
 /* Maximum translation-register count implemented by a supported CPU model. */
 #define IA64_TR_MAX      64
@@ -362,20 +363,136 @@ static inline uint8_t ia64_pte_ma(uint64_t pte)
 #define IA64_DCR_DA          (1ULL << 13)
 #define IA64_DCR_DD          (1ULL << 14)
 
-/* ---- Local SAPIC CR register indices ---- */
-#define IA64_CR_SAPIC_LID     64
-#define IA64_CR_SAPIC_IVR     65
-#define IA64_CR_SAPIC_TPR     66
-#define IA64_CR_SAPIC_EOI     67
-#define IA64_CR_SAPIC_IRR0    68
-#define IA64_CR_SAPIC_IRR1    69
-#define IA64_CR_SAPIC_IRR2    70
-#define IA64_CR_SAPIC_IRR3    71
-#define IA64_CR_ITV           72
-#define IA64_CR_PMV           73
-#define IA64_CR_CMCV          74
-#define IA64_CR_LRR0          80
-#define IA64_CR_LRR1          81
+/*
+ * Architecturally and software-convention-defined register indices.
+ * See IA-64 SDM volume 2, section 11.8.2.5, and the FPSWA interface.
+ */
+typedef enum IA64GeneralRegisterIndex {
+    IA64_GR_ZERO = 0,
+    IA64_GR_GLOBAL_POINTER = 1,
+    IA64_GR_RETURN0 = 8,
+    IA64_GR_RETURN1 = 9,
+    IA64_GR_RETURN2 = 10,
+    IA64_GR_RETURN3 = 11,
+    IA64_GR_STACK_POINTER = 12,
+    IA64_GR_THREAD_POINTER = 13,
+} IA64GeneralRegisterIndex;
+
+typedef enum IA64PredicateRegisterIndex {
+    IA64_PR_TRUE = 0,
+    IA64_PR_ROTATING_BASE = 16,
+    IA64_PR_ROTATING_NEXT = 17,
+    IA64_PR_LAST = 63,
+} IA64PredicateRegisterIndex;
+
+typedef enum IA64BranchRegisterIndex {
+    IA64_BR_RETURN_LINK = 0,
+} IA64BranchRegisterIndex;
+
+typedef enum IA64FloatingRegisterIndex {
+    IA64_FR_ZERO_INDEX = 0,
+    IA64_FR_ONE_INDEX = 1,
+} IA64FloatingRegisterIndex;
+
+typedef enum IA64RegionRegisterIndex {
+    IA64_RR_REGION0 = 0,
+    IA64_RR_REGION1 = 1,
+    IA64_RR_REGION2 = 2,
+    IA64_RR_REGION3 = 3,
+    IA64_RR_REGION4 = 4,
+    IA64_RR_REGION5 = 5,
+    IA64_RR_REGION6 = 6,
+    IA64_RR_REGION7 = 7,
+} IA64RegionRegisterIndex;
+
+typedef enum IA64ProtectionKeyRegisterIndex {
+    IA64_PKR_0 = 0,
+    IA64_PKR_1 = 1,
+    IA64_PKR_2 = 2,
+    IA64_PKR_3 = 3,
+} IA64ProtectionKeyRegisterIndex;
+
+typedef enum IA64PalGeneralRegisterIndex {
+    IA64_PAL_GR_STATUS = IA64_GR_RETURN0,
+    IA64_PAL_GR_RESULT1 = IA64_GR_RETURN1,
+    IA64_PAL_GR_RESULT2 = IA64_GR_RETURN2,
+    IA64_PAL_GR_RESULT3 = IA64_GR_RETURN3,
+    IA64_PAL_GR_INDEX = 28,
+    IA64_PAL_GR_ARG1 = 29,
+    IA64_PAL_GR_ARG2 = 30,
+    IA64_PAL_GR_ARG3 = 31,
+} IA64PalGeneralRegisterIndex;
+
+typedef enum IA64FirmwareDebugRegisterIndex {
+    IA64_FW_DEBUG_GR_HANDLER = 16,
+    IA64_FW_DEBUG_GR_EXCEPTION = 16,
+    IA64_FW_DEBUG_GR_CONTEXT = 17,
+    IA64_FW_DEBUG_GR_CPU = 18,
+} IA64FirmwareDebugRegisterIndex;
+
+typedef enum IA64FpswaGeneralRegisterIndex {
+    IA64_FPSWA_GR_TRAP_TYPE = 32,
+    IA64_FPSWA_GR_BUNDLE = 33,
+    IA64_FPSWA_GR_IPSR_PTR = 34,
+    IA64_FPSWA_GR_FPSR_PTR = 35,
+    IA64_FPSWA_GR_ISR_PTR = 36,
+    IA64_FPSWA_GR_PREDS_PTR = 37,
+    IA64_FPSWA_GR_IFS_PTR = 38,
+    IA64_FPSWA_GR_STATE = 39,
+} IA64FpswaGeneralRegisterIndex;
+
+typedef enum IA64ControlRegisterIndex {
+    IA64_CR_DCR = 0,
+    IA64_CR_ITM = 1,
+    IA64_CR_IVA = 2,
+    IA64_CR_PTA = 8,
+    IA64_CR_IPSR = 16,
+    IA64_CR_ISR = 17,
+    IA64_CR_IIP = 19,
+    IA64_CR_IFA = 20,
+    IA64_CR_ITIR = 21,
+    IA64_CR_IIPA = 22,
+    IA64_CR_IFS = 23,
+    IA64_CR_IIM = 24,
+    IA64_CR_IHA = 25,
+    IA64_CR_SAPIC_LID = 64,
+    IA64_CR_SAPIC_IVR = 65,
+    IA64_CR_SAPIC_TPR = 66,
+    IA64_CR_SAPIC_EOI = 67,
+    IA64_CR_SAPIC_IRR0 = 68,
+    IA64_CR_SAPIC_IRR1 = 69,
+    IA64_CR_SAPIC_IRR2 = 70,
+    IA64_CR_SAPIC_IRR3 = 71,
+    IA64_CR_ITV = 72,
+    IA64_CR_PMV = 73,
+    IA64_CR_CMCV = 74,
+    IA64_CR_LRR0 = 80,
+    IA64_CR_LRR1 = 81,
+} IA64ControlRegisterIndex;
+
+typedef enum IA64ApplicationRegisterIndex {
+    IA64_AR_KR0 = 0,
+    IA64_AR_KR7 = 7,
+    IA64_AR_RSC = 16,
+    IA64_AR_BSP = 17,
+    IA64_AR_BSPSTORE = 18,
+    IA64_AR_RNAT = 19,
+    IA64_AR_FCR = 21,
+    IA64_AR_EFLAG = 24,
+    IA64_AR_CSD = 25,
+    IA64_AR_SSD = 26,
+    IA64_AR_CFLG = 27,
+    IA64_AR_FSR = 28,
+    IA64_AR_FIR = 29,
+    IA64_AR_FDR = 30,
+    IA64_AR_CCV = 32,
+    IA64_AR_UNAT = 36,
+    IA64_AR_FPSR = 40,
+    IA64_AR_ITC = 44,
+    IA64_AR_PFS = 64,
+    IA64_AR_LC = 65,
+    IA64_AR_EC = 66,
+} IA64ApplicationRegisterIndex;
 
 #define IA64_SPURIOUS_VECTOR      0x0F
 #define IA64_VECTOR_MASKED        (1ULL << 16)
@@ -617,6 +734,8 @@ static inline void ia64_tlb_entry_translate(const IA64TlbEntry *entry,
             ia64_tlb_effective_perm(entry->ar, entry->pl, access_level) : 0;
 }
 
+#include "internals.h"
+
 /* ---- CPU architectural state ---- */
 typedef struct CPUArchState {
     /* General / Predicate / Branch registers */
@@ -626,13 +745,6 @@ typedef struct CPUArchState {
     uint64_t ip;
     uint64_t last_successful_bundle;
     uint64_t psr;
-    /* PSR.ic changes remain in-flight until a data serialization event. */
-    bool psr_ic_inflight;
-    uint64_t psr_suppression_before_insn;
-    uint64_t suppressed_tlb_pages[IA64_SUPPRESSED_TLB_MAX];
-    uint16_t suppressed_tlb_idxmaps[IA64_SUPPRESSED_TLB_MAX];
-    uint8_t suppressed_tlb_count;
-    bool suppressed_tlb_overflow;
 
     /* NaT bits for GRs (2x64 bits, little-endian bit numbering) */
     uint64_t nat[2];
@@ -641,30 +753,23 @@ typedef struct CPUArchState {
     uint64_t banked_gr[16];
     uint16_t banked_nat;
 
-    /* Fault/exception state (for simple HMP reporting) */
-    uint64_t fault_ip;
-    uint64_t fault_imm;
-    uint64_t fault_tmpl;
-    /* Pending exception and the last non-NONE exception, respectively. */
-    uint32_t exception;
-    uint32_t fault_exception;
-    uint32_t fault_slot;
+    IA64ExceptionState exception_state;
 
     /* Control Registers */
     uint64_t cr[IA64_CR_COUNT];
-#define cr_dcr    cr[0]
-#define cr_itm    cr[1]
-#define cr_iva    cr[2]
-#define cr_pta    cr[8]
-#define cr_ipsr   cr[16]
-#define cr_isr    cr[17]
-#define cr_iip    cr[19]
-#define cr_ifa    cr[20]
-#define cr_itir   cr[21]
-#define cr_iipa   cr[22]
-#define cr_ifs    cr[23]
-#define cr_iim    cr[24]
-#define cr_iha    cr[25]
+#define cr_dcr    cr[IA64_CR_DCR]
+#define cr_itm    cr[IA64_CR_ITM]
+#define cr_iva    cr[IA64_CR_IVA]
+#define cr_pta    cr[IA64_CR_PTA]
+#define cr_ipsr   cr[IA64_CR_IPSR]
+#define cr_isr    cr[IA64_CR_ISR]
+#define cr_iip    cr[IA64_CR_IIP]
+#define cr_ifa    cr[IA64_CR_IFA]
+#define cr_itir   cr[IA64_CR_ITIR]
+#define cr_iipa   cr[IA64_CR_IIPA]
+#define cr_ifs    cr[IA64_CR_IFS]
+#define cr_iim    cr[IA64_CR_IIM]
+#define cr_iha    cr[IA64_CR_IHA]
 
     /* Model-specific registers */
     uint64_t msr[IA64_MSR_COUNT];
@@ -678,31 +783,31 @@ typedef struct CPUArchState {
     uint64_t dahr[8];
 
     /* Region Registers */
-    uint64_t rr[8];
+    uint64_t rr[IA64_RR_COUNT];
 
     /* Application Registers */
     uint64_t ar[IA64_AR_COUNT];
-#define ar_kr0    ar[0]
-#define ar_kr7    ar[7]
-#define ar_rsc    ar[16]
-#define ar_bsp    ar[17]
-#define ar_bspstore ar[18]
-#define ar_rnat   ar[19]
-#define ar_fcr    ar[21]
-#define ar_eflag  ar[24]
-#define ar_csd    ar[25]
-#define ar_ssd    ar[26]
-#define ar_cflg   ar[27]
-#define ar_fsr    ar[28]
-#define ar_fir    ar[29]
-#define ar_fdr    ar[30]
-#define ar_ccv    ar[32]
-#define ar_unat   ar[36]
-#define ar_fpsr   ar[40]
-#define ar_itc    ar[44]
-#define ar_pfs    ar[64]
-#define ar_lc     ar[65]
-#define ar_ec     ar[66]
+#define ar_kr0    ar[IA64_AR_KR0]
+#define ar_kr7    ar[IA64_AR_KR7]
+#define ar_rsc    ar[IA64_AR_RSC]
+#define ar_bsp    ar[IA64_AR_BSP]
+#define ar_bspstore ar[IA64_AR_BSPSTORE]
+#define ar_rnat   ar[IA64_AR_RNAT]
+#define ar_fcr    ar[IA64_AR_FCR]
+#define ar_eflag  ar[IA64_AR_EFLAG]
+#define ar_csd    ar[IA64_AR_CSD]
+#define ar_ssd    ar[IA64_AR_SSD]
+#define ar_cflg   ar[IA64_AR_CFLG]
+#define ar_fsr    ar[IA64_AR_FSR]
+#define ar_fir    ar[IA64_AR_FIR]
+#define ar_fdr    ar[IA64_AR_FDR]
+#define ar_ccv    ar[IA64_AR_CCV]
+#define ar_unat   ar[IA64_AR_UNAT]
+#define ar_fpsr   ar[IA64_AR_FPSR]
+#define ar_itc    ar[IA64_AR_ITC]
+#define ar_pfs    ar[IA64_AR_PFS]
+#define ar_lc     ar[IA64_AR_LC]
+#define ar_ec     ar[IA64_AR_EC]
     /* Current Frame Marker (derived from pfs bits) */
     uint8_t cfm_sof;
     uint8_t cfm_sol;
@@ -711,38 +816,9 @@ typedef struct CPUArchState {
     uint8_t cfm_rrb_fr;
     uint8_t cfm_rrb_pr;
 
-    /* TLB */
-    IA64TlbEntry tlb_data[IA64_TLB_MAX];
-    IA64TlbEntry tlb_inst[IA64_TLB_MAX];
-    uint16_t      tlb_data_count;
-    uint16_t      tlb_inst_count;
-    uint16_t      tlb_data_replace;
-    uint16_t      tlb_inst_replace;
-    uint32_t      tlb_data_generation;
-    uint32_t      tlb_inst_generation;
-    IA64MicroTlbEntry tlb_data_micro[IA64_MICRO_TLB_SIZE];
-    IA64MicroTlbEntry tlb_inst_micro[IA64_MICRO_TLB_SIZE];
-    uint8_t       tlb_data_micro_next;
-    uint8_t       tlb_inst_micro_next;
-    uint16_t      pending_purge_data_count;
-    uint16_t      pending_purge_inst_count;
-
-    /* pending external interrupt */
-    uint8_t pending_extint;
-    bool pal_halt_wake;
-
-    /* Local SAPIC state (IA-64 on-die interrupt controller) */
-    uint64_t sapic_irr[4];
-    uint64_t sapic_isr[4];
-
-    /* PAL machine-check/PMI registration state */
-    bool pal_mc_expected;
-    uint64_t pal_mc_save_addr;
-    uint64_t pal_pmi_entry;
-    bool pal_proc_copy_valid;
-    uint64_t pal_proc_copy_addr;
-    uint64_t pal_interrupt_block_addr;
-    uint64_t pal_io_block_addr;
+    IA64MMUState mmu;
+    IA64InterruptState interrupt;
+    IA64PalState pal;
 
     /*
      * Register Stack Engine state (SDM Vol.2 ch.6).  The register
@@ -768,88 +844,16 @@ typedef struct CPUArchState {
      * progress and cleared by interruption delivery or by completing
      * the sequence.
      */
-    uint64_t rse_pgr[IA64_STACKED_GR_COUNT];
-    uint64_t rse_pgr_nat[2];
-    uint64_t rse_gr_dirty[2];
-    uint32_t rse_bol;
-    int32_t rse_dirty;
-    int32_t rse_dirty_nat;
-    int32_t rse_clean;
-    int32_t rse_clean_nat;
-    int32_t rse_invalid;
-    bool rse_cfle;
+    IA64RSEState rse;
 
     bool instruction_group_start;  /* next instruction starts a new group */
 
-    /* ALAT (Advanced Load Address Table) */
-    IA64AlatEntry alat[IA64_ALAT_ENTRIES];
-    uint32_t alat_active_count;
-    bool alat_full;
-
-    /* ITC (Interval Timer Counter) timebase */
-    int64_t itc_delta;
-    uint64_t itm_armed_value;
-    uint64_t itm_last_match;
-    bool itm_armed;
-    bool itm_last_match_valid;
+    IA64AlatState alat_state;
 
     /* Performance counter */
     uint64_t bundles_retired;
 
-    /* Floating-point registers and status */
-    uint64_t fr[IA64_FR_COUNT];
-    uint64_t fr_nat[2];
-    /* FR value currently holds the IA-64 significand field directly. */
-    uint64_t fr_sig[2];
-    /*
-     * Exact IA-64 register-format value retained for extended loads/fills.
-     * fr remains the float64 execution cache used by existing TCG paths.
-     */
-    uint64_t fr_ext_mant[IA64_FR_COUNT];
-    uint32_t fr_ext_exp[IA64_FR_COUNT];
-    uint64_t fr_ext_sign[2];
-    uint64_t fr_ext_valid[2];
-    uint64_t fr_int_value[IA64_FR_COUNT];
-    uint64_t fr_int_origin[2];
-    bool rotating_fr_live;
-    uint64_t fp_backup_fr[IA64_FR_COUNT];
-    uint64_t fp_backup_fr_nat[2];
-    uint64_t fp_backup_fr_sig[2];
-    uint64_t fp_backup_fr_ext_mant[IA64_FR_COUNT];
-    uint32_t fp_backup_fr_ext_exp[IA64_FR_COUNT];
-    uint64_t fp_backup_fr_ext_sign[2];
-    uint64_t fp_backup_fr_ext_valid[2];
-    uint64_t fp_backup_fr_int_value[IA64_FR_COUNT];
-    uint64_t fp_backup_fr_int_origin[2];
-    uint64_t fp_backup_pr[IA64_PR_COUNT];
-    uint64_t fp_backup_fr_mask[2];
-    uint64_t fp_backup_pr_mask;
-    uint64_t fp_backup_psr_mf;
-    bool fp_backup_active;
-
-    /* Native EFI Debug Support exception/callback bridge state. */
-    uint8_t fw_debug_context[IA64_FW_DEBUG_CONTEXT_SIZE];
-    IA64FirmwareDebugRseState fw_debug_rse;
-    uint16_t fw_debug_vector;
-    bool fw_debug_context_valid;
-    bool fw_debug_handler_active;
-    bool fw_debug_rse_valid;
-
-    /*
-     * Result retained across an architecturally mandated FP software-assist
-     * fault.  The firmware entry consumes this state synchronously from the
-     * fault handler and writes it to either the supplied save area or the
-     * physical floating-point register file.
-     */
-    uint64_t fpswa_result_low;
-    uint64_t fpswa_result_high;
-    uint64_t fpswa_flags;
-    uint8_t fpswa_dest_fr;
-    uint8_t fpswa_dest_pr;
-    uint8_t fpswa_sf;
-    bool fpswa_pending;
-    bool fpswa_fpa;
-    float_status fp_status;
+    IA64FPState fp;
 } CPUIA64State;
 
 void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
@@ -861,7 +865,7 @@ static inline void ia64_rse_mark_gr_dirty(CPUIA64State *env, uint32_t reg)
     if (reg >= IA64_STACKED_GR_BASE && reg < IA64_GR_COUNT) {
         uint32_t bit = reg - IA64_STACKED_GR_BASE;
 
-        env->rse_gr_dirty[bit / 64] |= 1ULL << (bit % 64);
+        env->rse.rse_gr_dirty[bit / 64] |= 1ULL << (bit % 64);
     }
 }
 
@@ -1009,13 +1013,13 @@ static inline QEMU_ALWAYS_INLINE const IA64TlbEntry *
 ia64_tlb_find_cached(CPUIA64State *env, uint64_t va, uint32_t rid,
                      bool is_ifetch)
 {
-    IA64TlbEntry *tlb = is_ifetch ? env->tlb_inst : env->tlb_data;
-    IA64MicroTlbEntry *micro = is_ifetch ? env->tlb_inst_micro :
-                                           env->tlb_data_micro;
-    uint8_t next = is_ifetch ? env->tlb_inst_micro_next :
-                               env->tlb_data_micro_next;
-    uint32_t generation = is_ifetch ? env->tlb_inst_generation :
-                                      env->tlb_data_generation;
+    IA64TlbEntry *tlb = is_ifetch ? env->mmu.tlb_inst : env->mmu.tlb_data;
+    IA64MicroTlbEntry *micro = is_ifetch ? env->mmu.tlb_inst_micro :
+                                           env->mmu.tlb_data_micro;
+    uint8_t next = is_ifetch ? env->mmu.tlb_inst_micro_next :
+                               env->mmu.tlb_data_micro_next;
+    uint32_t generation = is_ifetch ? env->mmu.tlb_inst_generation :
+                                      env->mmu.tlb_data_generation;
     uint16_t i;
 
     for (i = 0; i < IA64_MICRO_TLB_SIZE; i++) {
@@ -1100,7 +1104,7 @@ static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
 
 static inline bool ia64_data_nested_tlb_active(const CPUIA64State *env)
 {
-    return !(env->psr & IA64_PSR_IC) && !env->psr_ic_inflight;
+    return !(env->psr & IA64_PSR_IC) && !env->exception_state.psr_ic_inflight;
 }
 
 static inline bool ia64_sal_boot_virtual_pa(const CPUIA64State *env,
@@ -1146,10 +1150,10 @@ static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
      * must remain an architectural TLB miss instead of silently falling back
      * to a different identity physical address.
      */
-    if (ia64_tlb_has_explicit_va_mapping(env->tlb_data, env->tlb_data_count,
-                                         va) ||
-        ia64_tlb_has_explicit_va_mapping(env->tlb_inst, env->tlb_inst_count,
-                                         va)) {
+    if (ia64_tlb_has_explicit_va_mapping(
+            env->mmu.tlb_data, env->mmu.tlb_data_count, va) ||
+        ia64_tlb_has_explicit_va_mapping(
+            env->mmu.tlb_inst, env->mmu.tlb_inst_count, va)) {
         return false;
     }
 
@@ -1273,14 +1277,29 @@ static inline uint64_t ia64_itc_read(CPUIA64State *env)
 static inline void ia64_itc_write(CPUIA64State *env, uint64_t value)
 {
     env->ar_itc = value;
-    env->itc_delta = ia64_itc_clock_ns();
-    env->itm_last_match_valid = false;
+    env->interrupt.itc_delta = ia64_itc_clock_ns();
+    env->interrupt.itm_last_match_valid = false;
 }
+
+typedef struct IA64BootInfo {
+    uint64_t firmware_base;
+    uint64_t firmware_entry;
+    uint64_t global_pointer;
+    uint64_t iva;
+    uint64_t bsp;
+    uint64_t stack_pointer;
+    uint64_t rsc;
+    bool powered_off;
+} IA64BootInfo;
 
 struct ArchCPU {
     CPUState parent_obj;
     CPUIA64State env;
     QEMUTimer *itm_timer;
+    IA64BootInfo boot_info;
+    IA64FirmwareDebugState firmware_debug;
+    bool boot_info_valid;
+    bool boot_info_pending;
     bool alat_full;
     uint32_t socket_id;
     uint32_t core_id;
@@ -1290,6 +1309,9 @@ struct ArchCPU {
     uint32_t package_base;
     uint32_t package_cpus;
 };
+
+void ia64_cpu_set_boot_info(IA64CPU *cpu, const IA64BootInfo *info);
+void ia64_cpu_reset_to_boot_info(IA64CPU *cpu);
 
 struct IA64CPUClass {
     CPUClass parent_class;
@@ -1309,6 +1331,19 @@ struct IA64CPUClass {
 static inline IA64CPU *ia64_cpu_from_cpu_state(CPUState *cs)
 {
     return container_of(cs, IA64CPU, parent_obj);
+}
+
+static inline IA64FirmwareDebugState *
+ia64_firmware_debug_state(CPUIA64State *env)
+{
+    return &ia64_cpu_from_cpu_state(env_cpu(env))->firmware_debug;
+}
+
+static inline const IA64FirmwareDebugState *
+ia64_firmware_debug_state_const(const CPUIA64State *env)
+{
+    return &ia64_cpu_from_cpu_state(env_cpu((CPUIA64State *)env))
+            ->firmware_debug;
 }
 
 static inline IA64CPUClass *ia64_env_cpu_class(CPUIA64State *env)

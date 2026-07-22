@@ -4,6 +4,11 @@
  * EFI 1.10 debug-port protocol for the optional platform debug UART.
  */
 
+#include "fw-debug-port.h"
+#include "fw-device-path.h"
+#include "fw-services.h"
+#include "fw-uart.h"
+
 typedef struct _EFI_DEBUGPORT_PROTOCOL EFI_DEBUGPORT_PROTOCOL;
 
 struct _EFI_DEBUGPORT_PROTOCOL {
@@ -218,7 +223,7 @@ static VOID debug_port_init_device_path(VOID)
     mDebugPortDevicePath.End.Length = sizeof(FW_DEVICE_PATH_NODE);
 }
 
-static BOOLEAN debug_protocols_install(VOID)
+BOOLEAN fw_debug_port_install(VOID)
 {
     EFI_HANDLE handle = NULL;
     EFI_STATUS st;
@@ -252,7 +257,7 @@ static BOOLEAN debug_protocols_install(VOID)
     return 1;
 }
 
-static BOOLEAN debug_protocols_selftest(VOID)
+BOOLEAN fw_debug_port_selftest(VOID)
 {
     VOID *interface = NULL;
     UINTN size;

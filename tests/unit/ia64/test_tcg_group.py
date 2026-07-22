@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import statistics
 import sys
@@ -11,9 +12,11 @@ import time
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-    from ia64.registry import GROUPS, all_cases, cases_for_group, validate_registry
+    from ia64.registry import (GROUPS, all_cases, cases_for_group,
+                               coverage_inventory, validate_registry)
 else:
-    from .registry import GROUPS, all_cases, cases_for_group, validate_registry
+    from .registry import (GROUPS, all_cases, cases_for_group,
+                           coverage_inventory, validate_registry)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -21,12 +24,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("qemu", nargs="?", help="qemu-system-ia64 executable")
     parser.add_argument("--group", choices=GROUPS)
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--inventory", action="store_true")
     parser.add_argument("--test", action="append", default=[])
     parser.add_argument("--match")
     parser.add_argument("--repeat", type=int, default=1)
     args = parser.parse_args(argv)
-    if not args.list and args.qemu is None:
-        parser.error("QEMU_SYSTEM_IA64 is required unless --list is used")
+    if args.list and args.inventory:
+        parser.error("--list and --inventory are mutually exclusive")
+    if not (args.list or args.inventory) and args.qemu is None:
+        parser.error(
+            "QEMU_SYSTEM_IA64 is required unless --list or --inventory is used")
     if args.repeat <= 0:
         parser.error("--repeat must be positive")
     return args
@@ -48,6 +55,9 @@ def select(args: argparse.Namespace):
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     validate_registry()
+    if args.inventory:
+        print(json.dumps(coverage_inventory(), indent=2, sort_keys=True))
+        return 0
     try:
         cases = select(args)
     except KeyError as exc:

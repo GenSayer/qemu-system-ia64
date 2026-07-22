@@ -13,20 +13,20 @@
 #define IA64_BUNDLE_SLOTS 3
 #define IA64_SLOT_MASK ((1ULL << 41) - 1)
 
-typedef enum IA64TemplateUnit {
-    IA64_TEMPLATE_UNIT_RESERVED,
-    IA64_TEMPLATE_UNIT_M,
-    IA64_TEMPLATE_UNIT_I,
-    IA64_TEMPLATE_UNIT_B,
-    IA64_TEMPLATE_UNIT_F,
-    IA64_TEMPLATE_UNIT_L,
-    IA64_TEMPLATE_UNIT_X,
-} IA64TemplateUnit;
+typedef enum IA64SlotUnit {
+    IA64_UNIT_RESERVED,
+    IA64_UNIT_M,
+    IA64_UNIT_I,
+    IA64_UNIT_B,
+    IA64_UNIT_F,
+    IA64_UNIT_L,
+    IA64_UNIT_X,
+} IA64SlotUnit;
 
 typedef struct IA64TemplateInfo {
     bool defined;
     const char *name;
-    IA64TemplateUnit units[IA64_BUNDLE_SLOTS];
+    IA64SlotUnit units[IA64_BUNDLE_SLOTS];
     bool stop_after[IA64_BUNDLE_SLOTS];
 } IA64TemplateInfo;
 

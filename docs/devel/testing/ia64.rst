@@ -17,8 +17,10 @@ Test layers
   Hand-encoded TCG microprograms split into non-overlapping ``core``,
   ``memory-nat``, ``fp``, ``rse``, ``mmu``, ``interrupt``, and ``pal`` groups.
   The runner starts QEMU paused, resumes it with QMP, waits for an explicit
-  terminal IP or predicate, stops it, and parses ``IA64STATE`` records.  There
-  is no fixed startup delay.  GR NaT, FR spill pairs and NaTVal, predicates,
+  terminal IP or predicate, stops it, and parses versioned ``IA64STATE``
+  records.  The parser ignores the surrounding human-oriented HMP text and
+  rejects unknown schema versions.  There is no fixed startup delay.  GR NaT,
+  FR spill pairs and NaTVal, predicates,
   FPSR, UNAT, CCV, CFM, and rotation state can therefore be asserted directly.
   The end-to-end GDB test starts QEMU with ``-s`` and checks the IA-64 raw
   register layout, 128-bit FR transfer format, writable registers, and the
@@ -89,16 +91,26 @@ Adding a TCG case
 -----------------
 
 Derive the encoding and expected behavior from the IA-64 architecture manual,
-not from the translator implementation.  Reuse the encoder in
-``tests/unit/ia64/encoding.py``, give the program an explicit terminal loop,
-and list its name in exactly one explicit ``cases_*.py`` group manifest.  The
-registry rejects missing, duplicate, or renamed entries.  Arithmetic tests
-should assert the destination FR spill pair and FPSR directly.  Do not append
-``getf`` or ``stf`` only to observe an arithmetic result; those instructions
-have their own transfer tests.  Likewise, assert the GR NaT bitmap and
-predicate mask instead of inserting ``tnat`` and predicated ``adds`` as an
-observer.
+not from the translator implementation.  Reuse the encoder in the matching
+``tests/unit/ia64/encoding_<family>.py`` module, give the program an explicit
+terminal loop, and define it in exactly one ``cases_*.py`` semantic test group.
+``encoding.py`` is only the compatibility facade and shared microprogram
+harness.  The typed registry rejects missing, duplicate, or renamed entries,
+and attaches coverage tags, specification references, and required emulator
+features to every case.
+
+Arithmetic tests should assert the destination FR spill pair and FPSR
+directly.  Do not append ``getf`` or ``stf`` only to observe an arithmetic
+result; those instructions have their own transfer tests.  Likewise, assert
+the GR NaT bitmap and predicate mask instead of inserting ``tnat`` and
+predicated ``adds`` as an observer.
 
 The command below lists the registry without starting QEMU::
 
   python3 tests/unit/ia64/test_tcg_group.py --list
+
+The deterministic JSON coverage inventory is generated from the same typed
+registry, so it cannot drift from the executable case set::
+
+  python3 tests/unit/ia64/test_tcg_group.py --inventory \
+      > ia64-coverage.json

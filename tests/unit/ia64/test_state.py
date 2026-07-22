@@ -17,6 +17,7 @@ else:
 
 def sample_state() -> str:
     lines = [
+        "IA64STATE SCHEMA version=0000000000000001",
         "IA64STATE META ip=0000000000000030 psr=0000000000000040 "
         "halted=0",
         "IA64STATE EXCEPTION code=0000000000000000 "
@@ -52,6 +53,7 @@ def sample_state() -> str:
 
 def test_complete_parse() -> None:
     state = parse_state(sample_state())
+    assert state.schema_version == 1
     assert state.ip == 0x30
     assert state.exception == 0 and state.fault_code == 0x1b
     assert state.gr[5] == 5 and state.gr_nat[5]
@@ -128,6 +130,18 @@ def test_duplicate_singleton_rejected() -> None:
         raise AssertionError("duplicate META record was accepted")
 
 
+def test_unknown_schema_rejected() -> None:
+    text = sample_state().replace(
+        "IA64STATE SCHEMA version=0000000000000001",
+        "IA64STATE SCHEMA version=0000000000000002")
+    try:
+        parse_state(text)
+    except StateParseError as exc:
+        assert "unsupported IA64STATE schema version 2" in str(exc)
+    else:
+        raise AssertionError("unknown IA64STATE schema was accepted")
+
+
 def test_exception_fault_code_required() -> None:
     text = sample_state().replace(
         "fault_code=000000000000001b ", "")
@@ -169,6 +183,7 @@ def main() -> int:
         ("missing records", test_missing_records_rejected),
         ("duplicate register", test_duplicate_register_rejected),
         ("duplicate singleton", test_duplicate_singleton_rejected),
+        ("schema version", test_unknown_schema_rejected),
         ("exception fault code", test_exception_fault_code_required),
         ("field validation", test_non_boolean_and_trailing_field_rejected),
     )

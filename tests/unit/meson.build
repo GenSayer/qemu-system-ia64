@@ -206,6 +206,7 @@ if 'ia64-softmmu' in target_dirs
     [
       'test-ia64-decoder.c',
       meson.project_source_root() / 'target/ia64/decoder.c',
+      meson.project_source_root() / 'target/ia64/decode/decode.c',
     ],
     include_directories: include_directories('../..'))
 
@@ -235,6 +236,20 @@ if 'ia64-softmmu' in target_dirs
        timeout: 30,
        suite: ['unit', 'ia64'])
 
+  ia64_simd_test = executable(
+    'test-ia64-simd',
+    [
+      'test-ia64-simd.c',
+      meson.project_source_root() / 'target/ia64/arch/simd-ops.c',
+    ],
+    dependencies: [qemuutil],
+    include_directories: include_directories('../..', '../../target/ia64'))
+
+  test('test-ia64-simd', ia64_simd_test,
+       protocol: 'tap',
+       timeout: 30,
+       suite: ['unit', 'ia64'])
+
   test('test-ia64-fpmodel',
        python,
        args: [files('ia64/test_fpmodel.py')],
@@ -248,6 +263,28 @@ if 'ia64-softmmu' in target_dirs
          files('test-ia64-firmware-layout.py'),
          meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
          meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.elf',
+       ],
+       protocol: 'tap',
+       timeout: 30,
+       suite: ['unit', 'ia64'])
+
+  ia64_firmware_decompress_test = executable(
+    'test-ia64-firmware-decompress',
+    [
+      'test-ia64-firmware-decompress.c',
+      meson.project_source_root() / 'roms/ia64-firmware/decompress.c',
+    ],
+    include_directories: include_directories('../../roms/ia64-firmware'))
+
+  test('test-ia64-firmware-decompress', ia64_firmware_decompress_test,
+       timeout: 30,
+       suite: ['unit', 'ia64'])
+
+  test('test-ia64-source-includes',
+       python,
+       args: [
+         files('test-ia64-source-includes.py'),
+         meson.project_source_root(),
        ],
        protocol: 'tap',
        timeout: 30,

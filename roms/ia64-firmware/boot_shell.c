@@ -4,6 +4,8 @@
  * Interactive pre-boot manager and EFI application shell.
  */
 
+#include "fw-boot-shell.h"
+
 #define FW_SHELL_LINE_MAX       256U
 #define FW_SHELL_ARG_MAX        16U
 #define FW_SHELL_FS_MAX         16U
@@ -157,7 +159,7 @@ static BOOLEAN fw_shell_hotkey(const EFI_INPUT_KEY *Key)
             Key->UnicodeChar == 0x7fU);
 }
 
-static BOOLEAN fw_shell_hotkey_window(void)
+BOOLEAN fw_boot_shell_hotkey_window(VOID)
 {
     EFI_INPUT_KEY key;
     UINTN poll;
@@ -165,8 +167,7 @@ static BOOLEAN fw_shell_hotkey_window(void)
     fw_shell_puts("\r\nPress F2, F12, or Delete within 3 seconds for "
                   "the EFI shell.\r\n");
     for (poll = 0; poll < FW_SHELL_HOTKEY_POLLS; poll++) {
-        while (mConInProto.ReadKeyStroke(&mConInProto, &key) ==
-               EFI_SUCCESS) {
+        while (fw_console_read_key(&key) == EFI_SUCCESS) {
             if (fw_shell_hotkey(&key)) {
                 fw_shell_puts("Opening EFI shell...\r\n");
                 return 1;
@@ -188,7 +189,7 @@ static UINTN fw_shell_read_line(CHAR8 *Line, UINTN Capacity)
     }
     Line[0] = 0;
     for (;;) {
-        if (mConInProto.ReadKeyStroke(&mConInProto, &key) != EFI_SUCCESS) {
+        if (fw_console_read_key(&key) != EFI_SUCCESS) {
             (void)bs_stall(1000U);
             continue;
         }
@@ -790,8 +791,7 @@ static EFI_STATUS fw_shell_execute_path(const CHAR8 *Specification,
     if (status != EFI_SUCCESS) {
         return status;
     }
-    status = mBootServices.LoadImage(BootPolicy, mImageHandle, full_path,
-                                     NULL, 0, &image);
+    status = fw_load_image(BootPolicy, full_path, &image);
     if (status != EFI_SUCCESS) {
         return status;
     }
@@ -804,24 +804,24 @@ static EFI_STATUS fw_shell_execute_path(const CHAR8 *Specification,
      * standard OS-agnostic EFI removable-media boot (no injected payload).
      */
     if (status != EFI_SUCCESS) {
-        (void)mBootServices.UnloadImage(image);
+        (void)fw_unload_image(image);
         return status;
     }
 
     if (BootPolicy) {
-        (void)mBootServices.SetWatchdogTimer(300, 0, 0, NULL);
+        (void)fw_set_watchdog_timeout(300);
     }
-    mSalLoaderHandoffPending = BootPolicy;
-    status = mBootServices.StartImage(image, NULL, NULL);
-    mSalLoaderHandoffPending = 0;
+    fw_set_sal_loader_handoff_pending(BootPolicy);
+    status = fw_start_image(image);
+    fw_set_sal_loader_handoff_pending(0);
     if (BootPolicy) {
-        (void)mBootServices.SetWatchdogTimer(0, 0, 0, NULL);
+        (void)fw_set_watchdog_timeout(0);
     }
-    if (!mBootServicesExited) {
+    if (!fw_boot_services_exited()) {
         if (load_options != NULL) {
             (void)fw_release_loaded_image_load_options(image, load_options);
         }
-        (void)mBootServices.UnloadImage(image);
+        (void)fw_unload_image(image);
     }
     return status;
 }
@@ -1181,49 +1181,27 @@ static EFI_STATUS fw_shell_set_time(const CHAR8 *Argument)
     return rs_set_time(&time);
 }
 
-static const CHAR8 *fw_shell_storage_kind(const FW_STORAGE_DEVICE *Device)
-{
-    if (!storage_device_present(Device)) {
-        return "none";
-    }
-    if (Device->Kind == FW_STORAGE_SCSI) {
-        return storage_is_cd(Device) ? "SCSI optical" : "SCSI disk";
-    }
-    if (Device->Kind == FW_STORAGE_AHCI) {
-        return storage_is_cd(Device) ? "SATA optical" : "SATA disk";
-    }
-    return storage_is_cd(Device) ? "IDE optical" : "IDE disk";
-}
-
 static void fw_shell_system_info(void)
 {
-    UINTN partition_count = 0;
-    UINTN index;
-
     fw_shell_refresh_file_systems();
-    for (index = 0; index < FW_ARRAY_SIZE(mPartitions); index++) {
-        if (mPartitions[index].in_use) {
-            partition_count++;
-        }
-    }
     fw_shell_puts("Firmware:       IA-64 EFI 1.10\r\n");
     fw_shell_puts("Processors:     ");
-    fw_shell_put_uint64(mProcessorCount);
+    fw_shell_put_uint64(fw_processor_count());
     fw_shell_puts("\r\nInstalled RAM:  ");
-    fw_shell_put_uint64(mGuestRamSize / (1024U * 1024U));
+    fw_shell_put_uint64(fw_installed_ram_size() / (1024U * 1024U));
     fw_shell_puts(" MiB\r\nConsole:        ");
     fw_shell_puts(fw_handoff_vga_console_primary() ?
                   "graphics" : "serial");
     fw_shell_puts("\r\nGraphics:       ");
-    fw_shell_put_uint64(mGraphicsWidth);
+    fw_shell_put_uint64(fw_graphics_width());
     fw_shell_put_char('x');
-    fw_shell_put_uint64(mGraphicsHeight);
+    fw_shell_put_uint64(fw_graphics_height());
     fw_shell_puts("x32\r\nBoot storage:   ");
-    fw_shell_puts(fw_shell_storage_kind(&mBootStorageDevice));
+    fw_shell_puts(fw_storage_description(1));
     fw_shell_puts("\r\nFixed storage:  ");
-    fw_shell_puts(fw_shell_storage_kind(&mDiskStorageDevice));
+    fw_shell_puts(fw_storage_description(0));
     fw_shell_puts("\r\nPartitions:     ");
-    fw_shell_put_uint64(partition_count);
+    fw_shell_put_uint64(fw_partition_count());
     fw_shell_puts("\r\nFile systems:   ");
     fw_shell_put_uint64(mShellFileSystemCount);
     fw_shell_puts("\r\nNVRAM backing:  ");
@@ -1266,7 +1244,7 @@ static void fw_shell_prompt(void)
 
 static void fw_shell_report_command_status(EFI_STATUS Status)
 {
-    if (Status != EFI_SUCCESS && !mBootServicesExited) {
+    if (Status != EFI_SUCCESS && !fw_boot_services_exited()) {
         fw_shell_puts("Command failed: ");
         fw_shell_put_status(Status);
         fw_shell_puts("\r\n");
@@ -1356,7 +1334,7 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
             const CHAR8 *remaining;
 
             if (fw_shell_parse_boot_number(Arguments[1], &number)) {
-                status = boot_image_from_boot_option(number);
+                status = fw_boot_image_from_boot_option(number);
             } else if (fw_shell_parse_fs_prefix(
                            Arguments[1], &fs_index, &remaining) &&
                        remaining[0] == 0) {
@@ -1409,9 +1387,9 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
         }
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "clear") ||
                fw_shell_ascii_equal_ci(Arguments[0], "cls")) {
-        (void)mConOutProto.ClearScreen(&mConOutProto);
+        (void)fw_console_clear();
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "reset")) {
-        rs_reset_system(EFI_RESET_COLD, EFI_SUCCESS, 0, NULL);
+        fw_reset_cold();
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "exit")) {
         return 0;
     } else {
@@ -1430,10 +1408,10 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
         }
     }
     fw_shell_report_command_status(status);
-    return !mBootServicesExited;
+    return !fw_boot_services_exited();
 }
 
-static BOOLEAN fw_boot_shell_selftest(void)
+BOOLEAN fw_boot_shell_selftest(VOID)
 {
     EFI_INPUT_KEY key;
     EFI_TIME time;
@@ -1478,16 +1456,16 @@ static BOOLEAN fw_boot_shell_selftest(void)
            fw_shell_ascii_equal_ci(arguments[2], "arg");
 }
 
-static void fw_boot_shell_run(void)
+void fw_boot_shell_run(VOID)
 {
     CHAR8 line[FW_SHELL_LINE_MAX];
     CHAR8 *arguments[FW_SHELL_ARG_MAX];
 
     fw_shell_refresh_file_systems();
-    (void)mConOutProto.ClearScreen(&mConOutProto);
+    (void)fw_console_clear();
     fw_shell_puts("IA-64 EFI shell\r\n"
                   "Type 'help' for commands; 'exit' resumes boot.\r\n\r\n");
-    while (!mBootServicesExited) {
+    while (!fw_boot_services_exited()) {
         UINTN argument_count;
 
         fw_shell_prompt();
@@ -1498,7 +1476,7 @@ static void fw_boot_shell_run(void)
             break;
         }
     }
-    if (!mBootServicesExited) {
+    if (!fw_boot_services_exited()) {
         fw_shell_puts("Leaving EFI shell.\r\n");
     }
 }

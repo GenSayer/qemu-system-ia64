@@ -7,6 +7,8 @@ endif
 ia64_app_builder = files('apps/build-test-app.sh')
 ia64_app_linker_script = files('apps/ia64-test-app.lds')
 ia64_app_header = files('apps/ia64-test.h')
+ia64_services_common = files('apps/common/services.c')
+ia64_services_header = files('apps/common/services.h')
 ia64_app_sh = find_program('sh')
 ia64_functional_test_apps = []
 
@@ -17,21 +19,23 @@ foreach app : ['smoke', 'services', 'tables', 'exitbs', 'storage', 'input', 'smp
     ia64_app_linker_script,
     ia64_app_header,
   ]
-  if app == 'tables'
-    app_depend_files += files('apps/services-app.c')
+  app_command = [
+    ia64_app_sh,
+    ia64_app_builder,
+    '@OUTPUT@',
+    '@INPUT@',
+    ia64_app_linker_script,
+  ]
+  if app == 'services' or app == 'tables'
+    app_depend_files += [ia64_services_common, ia64_services_header]
+    app_command += ['0x4000000', ia64_services_common]
   endif
   app_target = custom_target(
     'ia64-functional-' + app + '-app',
     output: app + '-app.efi',
     input: app_source,
     depend_files: app_depend_files,
-    command: [
-      ia64_app_sh,
-      ia64_app_builder,
-      '@OUTPUT@',
-      '@INPUT@',
-      ia64_app_linker_script,
-    ],
+    command: app_command,
     build_by_default: false,
   )
   ia64_functional_test_apps += app_target

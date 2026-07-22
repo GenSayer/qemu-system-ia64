@@ -32,6 +32,7 @@ For guest-performance measurements, use an IA-64-only build without the compiler
 
 ```sh
 ./configure --target-list=ia64-softmmu \
+  --enable-lto \
   --disable-qom-cast-debug \
   --disable-stack-protector \
   --extra-cflags='-O2 -fno-stack-protector -fzero-call-used-regs=skip -ftrivial-auto-var-init=uninitialized' \
@@ -141,7 +142,7 @@ It is the same version selected by QEMU's configure process; a host `meson` of a
  
 Plain `meson test` from the source directory is not valid because the Meson build data lives under `build`.
 
-The TCG registry currently contains 900 architectural microprograms divided between core, memory/NaT, floating-point,
+The TCG registry currently contains 976 architectural microprograms divided between core, memory/NaT, floating-point,
 RSE, MMU, interruption, and PAL groups. Machine tests cover platform wiring and display behavior.
 
 The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media. It also exercises the firmware shell through PS/2, USB, and serial input, including direct application execution and NVRAM persistence across restarts.

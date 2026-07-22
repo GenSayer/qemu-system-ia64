@@ -8,8 +8,8 @@ import socket
 import struct
 import subprocess
 import sys
-import time
 
+from process import connect_tcp, terminate_process
 from qmp import QmpClient
 
 
@@ -19,7 +19,7 @@ GDB_RAW_REGISTER_BYTES = 128 * 8 + 128 * 16 + (GDB_NUM_RAW_REGS - 256) * 8
 
 # Establish a five-register clean RSE partition: set BSPSTORE, allocate and
 # populate a frame, cover it, then flushrs.  The bytes are the same instruction
-# sequence used by rse_cover_flushrs_spills_covered_frame in encoding.py.
+# sequence used by rse_cover_flushrs_spills_covered_frame in cases_rse.py.
 RSE_CLEAN_PROGRAM = bytes.fromhex(
     "04000000010000000000006000000260"
     "01000c242a0400000002000000000400"
@@ -91,23 +91,6 @@ class RspClient:
         return decoded.decode("ascii")
 
 
-def _connect(proc: subprocess.Popen[str], timeout_s: float) -> socket.socket:
-    deadline = time.monotonic() + timeout_s
-    output = ""
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            stdout, stderr = proc.communicate(timeout=1)
-            output = (stdout or "") + (stderr or "")
-            break
-        try:
-            client = socket.create_connection(("127.0.0.1", GDB_PORT), 0.1)
-            client.settimeout(3.0)
-            return client
-        except OSError:
-            time.sleep(0.01)
-    raise RuntimeError("QEMU -s did not open TCP port 1234\n" + output)
-
-
 def _reg_offset(reg: int) -> int:
     if reg < 128:
         return reg * 8
@@ -170,7 +153,8 @@ def test_gdbstub(qemu: str) -> None:
         if proc.stdin is None or proc.stdout is None:
             raise RuntimeError("QEMU QMP pipes were not created")
         qmp = QmpClient(proc.stdout, proc.stdin)
-        with _connect(proc, 3.0) as sock:
+        with connect_tcp(proc, "127.0.0.1", GDB_PORT, 3.0,
+                         "QEMU -s GDB endpoint") as sock:
             rsp = RspClient(sock)
             stop = rsp.request("?")
             if not stop.startswith("T05"):
@@ -329,13 +313,7 @@ def test_gdbstub(qemu: str) -> None:
             if _read_reg(rsp, 446, 8) != reserved:
                 raise RuntimeError("GDB write modified reserved AR112")
     finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2)
+        terminate_process(proc)
 
 
 def main() -> int:

@@ -4,6 +4,8 @@
  * EFI 1.10 USB host-controller and device I/O protocols.
  */
 
+#include "fw-usb.h"
+
 typedef enum {
     EfiUsbHcStateHalt,
     EfiUsbHcStateOperational,
@@ -1907,9 +1909,9 @@ static VOID usb_protocol_initialize_interfaces(VOID)
     mUsbIoDevice.protocol.UsbPortReset = usb_io_port_reset;
 }
 
-static BOOLEAN usb_protocols_install(VOID)
+BOOLEAN fw_usb_protocols_install(VOID)
 {
-    EFI_HANDLE controller = mPciOhciHandle;
+    EFI_HANDLE controller = fw_usb_controller_handle();
     EFI_STATUS status;
 
     if (!usb_ohci_controller_present()) {
@@ -1925,8 +1927,9 @@ static BOOLEAN usb_protocols_install(VOID)
         return 1;
     }
 
-    mUsbIoDevice.device_path.Acpi = mPciOhciDevicePath.Acpi;
-    mUsbIoDevice.device_path.Pci = mPciOhciDevicePath.Pci;
+    fw_usb_controller_device_path(&mUsbIoDevice.device_path.Acpi,
+                                  &mUsbIoDevice.device_path.Pci,
+                                  &mUsbIoDevice.device_path.End);
     mUsbIoDevice.device_path.Usb.Header.Type = 0x03;
     mUsbIoDevice.device_path.Usb.Header.SubType = 0x05;
     mUsbIoDevice.device_path.Usb.Header.Length =
@@ -1934,7 +1937,6 @@ static BOOLEAN usb_protocols_install(VOID)
     mUsbIoDevice.device_path.Usb.ParentPortNumber = mUsbIoDevice.port;
     mUsbIoDevice.device_path.Usb.InterfaceNumber =
         mUsbIoDevice.interface_number;
-    mUsbIoDevice.device_path.End = mEndDevicePath;
     mUsbIoDevice.handle = NULL;
     status = bs_install_protocol(&mUsbIoDevice.handle,
                                  (VOID *)mUsbIoProtocolGuid, 0,
@@ -1951,7 +1953,7 @@ static BOOLEAN usb_protocols_install(VOID)
                                         &mUsbIoDevice.protocol);
         }
         mUsbIoDevice.handle = NULL;
-        (void)bs_uninstall_protocol(mPciOhciHandle,
+        (void)bs_uninstall_protocol(controller,
                                     (VOID *)mUsbHcProtocolGuid,
                                     &mUsbHcProtocol);
         return 0;
@@ -1959,7 +1961,7 @@ static BOOLEAN usb_protocols_install(VOID)
     return 1;
 }
 
-static BOOLEAN usb_protocols_selftest(VOID)
+BOOLEAN fw_usb_protocols_selftest(VOID)
 {
     EFI_USB_HC_STATE state;
     EFI_USB_PORT_STATUS port_status;

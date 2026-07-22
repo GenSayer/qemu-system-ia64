@@ -17,6 +17,7 @@
 #include "libqos/pci.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
+#include "hw/ia64/ia64_vpc_abi.h"
 #include "hw/net/e1000_regs.h"
 
 #define IA64_LEGACY_IO_BASE          0x000000800010000000ULL
@@ -39,17 +40,6 @@
 #define IA64_IOSAPIC_RTE_DELIVERY    BIT(12)
 #define IA64_IOSAPIC_RTE_REMOTE_IRR  BIT(14)
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
-#define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
-#define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL
-#define IA64_FW_HANDOFF_VERSION      9ULL
-#define IA64_FW_HANDOFF_RAM_SIZE     0x10ULL
-#define IA64_FW_HANDOFF_CONSOLE      0x18ULL
-#define IA64_FW_HANDOFF_IDE_DMA      0x20ULL
-#define IA64_FW_HANDOFF_DEBUG        0x28ULL
-#define IA64_FW_HANDOFF_DEBUG_BASE   0x30ULL
-#define IA64_FW_HANDOFF_I8042        0x38ULL
-#define IA64_FW_HANDOFF_CPUS         0x40ULL
-#define IA64_FW_HANDOFF_NVRAM        0x48ULL
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 
 #define IA64_LSI_MMIO_BASE           0x00000000c1030000ULL
@@ -139,34 +129,45 @@ static void test_acpi_reset_register(void)
 static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                                     uint64_t cpus, uint64_t nvram)
 {
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR), ==,
-                    IA64_FW_HANDOFF_MAGIC);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR + 8), ==,
+    IA64VpcHandoff handoff;
+
+    g_assert_cmpuint(sizeof(handoff), ==, 80);
+    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
+    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
+    g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
                     IA64_FW_HANDOFF_VERSION);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
-                               IA64_FW_HANDOFF_RAM_SIZE), ==,
-                    IA64_TEST_RAM_SIZE);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
-                               IA64_FW_HANDOFF_CONSOLE), ==, 1);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
-                               IA64_FW_HANDOFF_IDE_DMA), ==, 1);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
-                               IA64_FW_HANDOFF_DEBUG), ==, 0);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
-                               IA64_FW_HANDOFF_DEBUG_BASE), ==, 0);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
-                               IA64_FW_HANDOFF_I8042), ==, i8042);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
-                               IA64_FW_HANDOFF_CPUS), ==, cpus);
-    g_assert_cmphex(qtest_readq(qts, IA64_FW_HANDOFF_ADDR +
-                               IA64_FW_HANDOFF_NVRAM), ==, nvram);
+    g_assert_cmphex(le64_to_cpu(handoff.RamSize), ==, IA64_TEST_RAM_SIZE);
+    g_assert_cmphex(le64_to_cpu(handoff.ConsolePolicy), ==,
+                    IA64_FW_CONSOLE_VGA);
+    g_assert_cmphex(le64_to_cpu(handoff.IdeDmaEnabled), ==, 1);
+    g_assert_cmphex(le64_to_cpu(handoff.DebugPortFlags), ==, 0);
+    g_assert_cmphex(le64_to_cpu(handoff.DebugPortBase), ==, 0);
+    g_assert_cmphex(le64_to_cpu(handoff.I8042Enabled), ==, i8042);
+    g_assert_cmphex(le64_to_cpu(handoff.ProcessorCount), ==, cpus);
+    g_assert_cmphex(le64_to_cpu(handoff.NvramPersistent), ==, nvram);
 }
 
 static void test_firmware_handoff_defaults(void)
 {
+    static const uint8_t expected_v9[sizeof(IA64VpcHandoff)] = {
+        0x51, 0x49, 0x41, 0x36, 0x34, 0x52, 0x41, 0x4d,
+        0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
 
     assert_firmware_handoff(qts, 1, 1, 0);
+    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual),
+                    expected_v9, sizeof(expected_v9));
     qtest_quit(qts);
 }
 

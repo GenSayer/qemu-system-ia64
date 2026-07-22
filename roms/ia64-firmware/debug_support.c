@@ -4,6 +4,9 @@
  * EFI 1.10 native Debug Support protocol for IA-64.
  */
 
+#include "fw-debug-support.h"
+#include "fw-services.h"
+
 typedef struct {
     UINT64 Reserved;
     UINT64 R[31];
@@ -479,7 +482,7 @@ VOID fw_debug_support_dispatch(EFI_EXCEPTION_TYPE ExceptionType,
     mDebugDispatchActive[ProcessorIndex] = 0;
 }
 
-static BOOLEAN debug_support_install(VOID)
+BOOLEAN fw_debug_support_install(VOID)
 {
     EFI_HANDLE handle = NULL;
 
@@ -510,7 +513,7 @@ static BOOLEAN debug_support_install(VOID)
     return 1;
 }
 
-static VOID debug_support_exit_boot_services(VOID)
+VOID fw_debug_support_exit_boot_services(VOID)
 {
     UINTN exception_type;
     UINT64 saved_psr = debug_support_interrupt_save();
@@ -579,7 +582,7 @@ static UINTN __attribute__((noinline)) debug_support_breakpoint_probe(VOID)
     return 1;
 }
 
-static BOOLEAN debug_support_selftest(VOID)
+BOOLEAN fw_debug_support_selftest(VOID)
 {
     EFI_DEBUG_SUPPORT_PROTOCOL *protocol = NULL;
     UINT64 saved_psr;

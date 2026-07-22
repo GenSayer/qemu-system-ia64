@@ -4,6 +4,9 @@
  * EFI 1.10 UGA I/O protocol for the platform framebuffer.
  */
 
+#include "fw-services.h"
+#include "fw-uga-io.h"
+
 typedef UINT32 UGA_STATUS;
 
 typedef enum {
@@ -380,7 +383,7 @@ static BOOLEAN uga_io_video_row(UINT64 Base, INT32 Delta, UINTN Row,
 
 static UGA_STATUS uga_io_copy_rectangle(const UGA_MEMORY_TRANSFER *Transfer)
 {
-    UINT64 video_size = fw_pci_io_expected_bar_length(&mPciIoDevices[5]);
+    UINT64 video_size = fw_graphics_bar_length();
     UINTN width;
     UINTN height;
     UINTN row;
@@ -424,7 +427,8 @@ static UGA_STATUS uga_io_copy_rectangle(const UGA_MEMORY_TRANSFER *Transfer)
                 return UGA_STATUS_INVALID_PARAMETER;
             }
             fw_copy_mem((UINT8 *)temporary + row * width,
-                        (VOID *)(UINTN)(VGA_FB_BASE + source), width);
+                        (VOID *)(UINTN)(fw_graphics_framebuffer_base() + source),
+                        width);
         }
         for (row = 0; row < height; row++) {
             UINT64 destination;
@@ -436,7 +440,8 @@ static UGA_STATUS uga_io_copy_rectangle(const UGA_MEMORY_TRANSFER *Transfer)
                 (void)bs_free_pool(temporary);
                 return UGA_STATUS_INVALID_PARAMETER;
             }
-            fw_copy_mem((VOID *)(UINTN)(VGA_FB_BASE + destination),
+            fw_copy_mem((VOID *)(UINTN)(fw_graphics_framebuffer_base() +
+                                        destination),
                         (UINT8 *)temporary + row * width, width);
         }
         (void)bs_free_pool(temporary);
@@ -459,7 +464,8 @@ static UGA_STATUS uga_io_copy_rectangle(const UGA_MEMORY_TRANSFER *Transfer)
                     &destination)) {
                 return UGA_STATUS_INVALID_PARAMETER;
             }
-            fw_copy_mem((VOID *)(UINTN)(VGA_FB_BASE + destination),
+            fw_copy_mem((VOID *)(UINTN)(fw_graphics_framebuffer_base() +
+                                        destination),
                         (VOID *)(UINTN)source, width);
         }
     } else {
@@ -483,7 +489,8 @@ static UGA_STATUS uga_io_copy_rectangle(const UGA_MEMORY_TRANSFER *Transfer)
                 return UGA_STATUS_INVALID_PARAMETER;
             }
             fw_copy_mem((VOID *)(UINTN)destination,
-                        (VOID *)(UINTN)(VGA_FB_BASE + source), width);
+                        (VOID *)(UINTN)(fw_graphics_framebuffer_base() + source),
+                        width);
         }
     }
     if (Transfer->bEndOfTransfer) {
@@ -627,7 +634,7 @@ static UGA_STATUS uga_io_dispatch(UGA_DEVICE *Device,
         if (!uga_io_no_buffers(Request)) {
             return UGA_STATUS_INVALID_PARAMETER;
         }
-        return graphics_select_mode(mGopMode.Mode, 1) == EFI_SUCCESS ?
+        return fw_graphics_reset_current_mode(1) == EFI_SUCCESS ?
             UGA_STATUS_SUCCESS : UGA_STATUS_OPERATION_FAILED;
     case UgaIoGetDeviceState:
         return uga_io_output(Request, &record->state,
@@ -682,12 +689,12 @@ static UGA_STATUS uga_io_dispatch(UGA_DEVICE *Device,
         if (Device->deviceData.deviceType != UgaDtOutputController) {
             return UGA_STATUS_INVALID_FUNCTION;
         } else {
-            UINT64 visible = mGopMode.FrameBufferSize;
-            UINT64 total = fw_pci_io_expected_bar_length(&mPciIoDevices[5]);
+            UINT64 visible = fw_graphics_framebuffer_size();
+            UINT64 total = fw_graphics_bar_length();
             UGA_MEMORY_CONFIGURATION configuration = {
                 total,
                 0,
-                mGopMode.Info->PixelsPerScanLine * 4U,
+                fw_graphics_pixels_per_scan_line() * 4U,
                 visible,
                 visible < total ? total - visible : 0,
                 4,
@@ -705,8 +712,8 @@ static UGA_STATUS uga_io_dispatch(UGA_DEVICE *Device,
             return UGA_STATUS_INVALID_PARAMETER;
         } else {
             UGA_VIDEO_MODE *mode = (UGA_VIDEO_MODE *)Request->pvInBuffer;
-            EFI_STATUS status = uga_set_mode(
-                &mUgaDrawProto, mode->ui32HorizontalResolution,
+            EFI_STATUS status = fw_graphics_set_uga_mode(
+                mode->ui32HorizontalResolution,
                 mode->ui32VerticalResolution, mode->ui32ColorDepth,
                 mode->ui32RefreshRate);
 
@@ -795,11 +802,11 @@ static void uga_io_init_edid(VOID)
     mUgaIoEdid[127] = (UINT8)(0U - sum);
 }
 
-static BOOLEAN uga_io_install(VOID)
+BOOLEAN fw_uga_io_install(VOID)
 {
-    EFI_HANDLE handle = mGraphicsHandle;
+    EFI_HANDLE handle = fw_graphics_handle();
 
-    if (!fw_pci_io_device_present(&mPciIoDevices[5])) {
+    if (!fw_graphics_present()) {
         return 1;
     }
     mUgaIoProtocol.CreateDevice = uga_io_create_device;
@@ -810,7 +817,7 @@ static BOOLEAN uga_io_install(VOID)
                                &mUgaIoProtocol) == EFI_SUCCESS;
 }
 
-static BOOLEAN uga_io_selftest(VOID)
+BOOLEAN fw_uga_io_selftest(VOID)
 {
     UGA_IO_REQUEST request;
     UGA_DEVICE_DATA data;
@@ -821,10 +828,9 @@ static BOOLEAN uga_io_selftest(VOID)
     UINTN i;
     UINT8 sum = 0;
 
-    if (!fw_pci_io_device_present(&mPciIoDevices[5])) {
-        return !installed_protocol_interface(mGraphicsHandle,
-                                             (VOID *)mUgaIoProtocolGuid,
-                                             NULL);
+    if (!fw_graphics_present()) {
+        return !fw_protocol_interface_installed(
+            fw_graphics_handle(), (VOID *)mUgaIoProtocolGuid, NULL);
     }
     fw_set_mem(&request, sizeof(request), 0);
     request.ioRequestCode = UgaIoGetVersion;

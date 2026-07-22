@@ -8,7 +8,8 @@ import socket
 import subprocess
 import sys
 import tempfile
-import time
+
+from process import connect_tcp, connect_unix, terminate_process
 
 
 def test_duplicate_debug_port(qemu: str) -> None:
@@ -23,22 +24,6 @@ def test_duplicate_debug_port(qemu: str) -> None:
                            result.stdout)
 
 
-def _wait_unix_socket(path: str, proc: subprocess.Popen, timeout_s: float) -> None:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            output, _ = proc.communicate(timeout=1)
-            raise RuntimeError(f"QEMU exited before QMP became ready\n{output}")
-        try:
-            with socket.socket(socket.AF_UNIX) as client:
-                client.settimeout(0.1)
-                client.connect(path)
-                return
-        except OSError:
-            time.sleep(0.01)
-    raise RuntimeError("QMP socket did not become ready")
-
-
 def test_nographic_debug_stdio(qemu: str) -> None:
     with tempfile.TemporaryDirectory(prefix="ia64-cli-") as tmpdir:
         qmp_path = os.path.join(tmpdir, "qmp.sock")
@@ -50,15 +35,10 @@ def test_nographic_debug_stdio(qemu: str) -> None:
         ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True)
         try:
-            _wait_unix_socket(qmp_path, proc, 3.0)
+            with connect_unix(proc, qmp_path, 3.0, "QMP socket"):
+                pass
         finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
+            terminate_process(proc)
 
 
 def test_debug_tcp_server(qemu: str) -> None:
@@ -74,32 +54,12 @@ def test_debug_tcp_server(qemu: str) -> None:
         "-monitor", "none", "-serial", "none",
         "-debug-port", f"tcp:127.0.0.1:{port},server=on,wait=off",
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    connected = False
-    output = ""
     try:
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                output, _ = proc.communicate(timeout=1)
-                break
-            try:
-                with socket.create_connection(("127.0.0.1", port),
-                                              timeout=0.1):
-                    connected = True
-                    break
-            except OSError:
-                time.sleep(0.01)
-        if not connected:
-            raise RuntimeError("debug TCP server did not accept a client\n" +
-                               output)
+        with connect_tcp(proc, "127.0.0.1", port, 3.0,
+                         "debug TCP server"):
+            pass
     finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2)
+        terminate_process(proc)
 
 
 def main() -> int:

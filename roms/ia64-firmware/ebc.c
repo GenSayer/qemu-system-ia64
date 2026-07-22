@@ -9,6 +9,9 @@
  * from another firmware interpreter.
  */
 
+#include "fw-ebc.h"
+#include "fw-services.h"
+
 #define FW_EBC_REVISION             0x00010000ULL
 #define FW_EBC_STACK_BYTES          (64U * 1024U)
 #define FW_EBC_NATIVE_ARGUMENTS     16U
@@ -1332,7 +1335,7 @@ static UINT64 fw_ebc_protocol_gate(UINT64 first_argument, ...)
                       FW_EBC_NATIVE_ARGUMENTS, NULL);
 }
 
-static UINT64 fw_ebc_image_gate(EFI_HANDLE image, EFI_SYSTEM_TABLE *system)
+static UINT64 fw_ebc_image_gate(EFI_HANDLE image, VOID *system)
 {
     FW_EBC_THUNK *context =
         (FW_EBC_THUNK *)(UINTN)fw_ebc_capture_context();
@@ -1369,18 +1372,6 @@ static VOID fw_ebc_emit_movl(UINT8 *destination, UINTN reg, UINT64 value)
 
     fw_ebc_pack_bundle(destination, 0x05U, 0x00008000000ULL,
                        extension, base);
-}
-
-static VOID fw_flush_instruction_cache(VOID *start, UINTN bytes)
-{
-    UINTN address = (UINTN)start & ~(UINTN)31U;
-    UINTN end = ((UINTN)start + bytes + 31U) & ~(UINTN)31U;
-
-    while (address < end) {
-        __asm__ volatile ("fc %0" :: "r"(address) : "memory");
-        address += 32U;
-    }
-    __asm__ volatile ("sync.i;;\n\tsrlz.i;;" ::: "memory");
 }
 
 static EFI_STATUS fw_ebc_make_thunk(EFI_HANDLE image, UINT8 *byte_code,
@@ -1511,19 +1502,18 @@ static EFI_STATUS fw_ebc_protocol_version(FW_EBC_PROTOCOL *This,
     return EFI_SUCCESS;
 }
 
-static EFI_STATUS fw_ebc_create_image_thunk(EFI_HANDLE ImageHandle,
-                                            VOID *EbcEntryPoint,
-                                            VOID **Thunk)
+EFI_STATUS fw_ebc_create_image_thunk(EFI_HANDLE ImageHandle,
+                                     VOID *EbcEntryPoint, VOID **Thunk)
 {
     return fw_ebc_make_thunk(ImageHandle, (UINT8 *)EbcEntryPoint, 1, Thunk);
 }
 
-static EFI_STATUS fw_ebc_unload_for_image(EFI_HANDLE ImageHandle)
+EFI_STATUS fw_ebc_unload_for_image(EFI_HANDLE ImageHandle)
 {
     return fw_ebc_protocol_unload(&mEbcProtocol, ImageHandle);
 }
 
-static BOOLEAN fw_ebc_install_protocol(VOID)
+BOOLEAN fw_ebc_install_protocol(VOID)
 {
     EFI_HANDLE handle = NULL;
 
@@ -1672,7 +1662,7 @@ static BOOLEAN fw_ebc_instruction_selftest(VOID)
     return 1;
 }
 
-static BOOLEAN fw_ebc_selftest(VOID)
+BOOLEAN fw_ebc_selftest(VOID)
 {
     static UINT8 program[] __attribute__((aligned(2))) = {
         FW_EBC_OP_BREAK, 1, FW_EBC_OP_RETURN, 0,
@@ -1680,7 +1670,7 @@ static BOOLEAN fw_ebc_selftest(VOID)
     EFI_HANDLE image = (EFI_HANDLE)(UINTN)0xebc0U;
     UINT64 version = 0;
     VOID *thunk = NULL;
-    UINT64 (*entry)(EFI_HANDLE, EFI_SYSTEM_TABLE *);
+    UINT64 (*entry)(EFI_HANDLE, VOID *);
     UINT64 result;
 
     if (!mEbcProtocolInstalled || !fw_ebc_instruction_selftest() ||
@@ -1694,8 +1684,8 @@ static BOOLEAN fw_ebc_selftest(VOID)
         thunk == NULL) {
         return 0;
     }
-    entry = (UINT64 (*)(EFI_HANDLE, EFI_SYSTEM_TABLE *))thunk;
-    result = entry(image, &mSystemTable);
+    entry = (UINT64 (*)(EFI_HANDLE, VOID *))thunk;
+    result = entry(image, fw_system_table());
     return result == version &&
            mEbcProtocol.UnloadImage(&mEbcProtocol, image) == EFI_SUCCESS &&
            mEbcProtocol.UnloadImage(&mEbcProtocol, image) ==

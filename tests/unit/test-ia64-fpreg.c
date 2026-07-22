@@ -32,11 +32,11 @@ static char failure[192];
 static void reset_env(CPUIA64State *env)
 {
     memset(env, 0, sizeof(*env));
-    env->fr[1] = IA64_FR_ONE;
-    set_float_2nan_prop_rule(float_2nan_prop_ab, &env->fp_status);
-    set_float_3nan_prop_rule(float_3nan_prop_abc, &env->fp_status);
-    set_float_infzeronan_rule(float_infzeronan_dnan_never, &env->fp_status);
-    set_float_default_nan_pattern(0b01000000, &env->fp_status);
+    env->fp.fr[1] = IA64_FR_ONE;
+    set_float_2nan_prop_rule(float_2nan_prop_ab, &env->fp.fp_status);
+    set_float_3nan_prop_rule(float_3nan_prop_abc, &env->fp.fp_status);
+    set_float_infzeronan_rule(float_infzeronan_dnan_never, &env->fp.fp_status);
+    set_float_default_nan_pattern(0b01000000, &env->fp.fp_status);
 }
 
 static const char *fail_u64(const char *label, uint64_t actual,
@@ -71,11 +71,11 @@ static const char *test_constants(void)
     const char *error;
 
     reset_env(&env);
-    env.fr[0] = UINT64_MAX;
-    env.fr[1] = 0;
+    env.fp.fr[0] = UINT64_MAX;
+    env.fp.fr[1] = 0;
     ia64_fpreg_from_spill(&env, 0, UINT64_MAX, 0x3ffff);
     ia64_fpreg_from_spill(&env, 1, UINT64_MAX, 0x3ffff);
-    if (env.fr[0] != UINT64_MAX || env.fr[1] != 0) {
+    if (env.fp.fr[0] != UINT64_MAX || env.fp.fr[1] != 0) {
         return "write to architectural f0/f1 was not ignored";
     }
 
@@ -172,8 +172,8 @@ static const char *test_integer_significand(void)
         return error;
     }
     if (!ia64_fpreg_is_integer(&env, 5) ||
-        !(env.fr_int_origin[0] & (1ULL << 5)) ||
-        env.fr_int_value[5] != value) {
+        !(env.fp.fr_int_origin[0] & (1ULL << 5)) ||
+        env.fp.fr_int_value[5] != value) {
         return "integer-significand tags were not restored";
     }
     return NULL;
@@ -255,26 +255,26 @@ static const char *test_stale_tags(void)
     const uint64_t bit = 1ULL << reg;
 
     reset_env(&env);
-    env.fr_nat[0] |= bit;
-    env.fr_sig[0] |= bit;
-    env.fr_ext_valid[0] |= bit;
-    env.fr_int_origin[0] |= bit;
-    env.fr_int_value[reg] = UINT64_MAX;
+    env.fp.fr_nat[0] |= bit;
+    env.fp.fr_sig[0] |= bit;
+    env.fp.fr_ext_valid[0] |= bit;
+    env.fp.fr_int_origin[0] |= bit;
+    env.fp.fr_int_value[reg] = UINT64_MAX;
 
     ia64_fpreg_from_binary64(&env, reg, 0x4000000000000000ULL);
-    if ((env.fr_nat[0] | env.fr_sig[0] | env.fr_ext_valid[0] |
-         env.fr_int_origin[0]) & bit) {
+    if ((env.fp.fr_nat[0] | env.fp.fr_sig[0] | env.fp.fr_ext_valid[0] |
+         env.fp.fr_int_origin[0]) & bit) {
         return "binary64 write left a stale representation tag";
     }
-    if (env.fr_int_value[reg] != 0) {
+    if (env.fp.fr_int_value[reg] != 0) {
         return "binary64 write left a stale integer value";
     }
 
     ia64_fpreg_from_spill(&env, reg, 0x8000000000000000ULL, 0xffff);
-    if ((env.fr_nat[0] | env.fr_sig[0] | env.fr_int_origin[0]) & bit) {
+    if ((env.fp.fr_nat[0] | env.fp.fr_sig[0] | env.fp.fr_int_origin[0]) & bit) {
         return "extended fill left an incompatible representation tag";
     }
-    if (!(env.fr_ext_valid[0] & bit)) {
+    if (!(env.fp.fr_ext_valid[0] & bit)) {
         return "extended fill did not set its valid tag";
     }
     return NULL;

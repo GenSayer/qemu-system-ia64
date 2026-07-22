@@ -1,41 +1,30 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# IA-64 EFI Firmware Makefile
-# Build with ia64-linux-gnu-gcc toolchain
+# Thin wrapper around the canonical firmware build script.
 
-CROSS   = ia64-linux-gnu-
-CC      = $(CROSS)gcc
+CROSS   ?= ia64-linux-gnu-
 AS      = $(CROSS)as
+CC      = $(CROSS)gcc
 LD      = $(CROSS)ld
 OBJCOPY = $(CROSS)objcopy
-PYTHON  ?= python3
-LIBGCC  := $(shell $(CC) -print-libgcc-file-name)
+SIZE    = $(CROSS)size
 
-CFLAGS  = -O2 -fno-builtin -ffreestanding -nostdinc -nostdlib \
-          -G 0 -mno-sdata -fno-stack-protector -fno-common \
-          -fno-optimize-sibling-calls -fno-pic \
-          -Wall -Wextra -Wno-unused-parameter
+BUILD_SCRIPT := build_firmware.sh
+MANIFEST := firmware.sources
+SOURCES := $(shell sed -e '/^[[:space:]]*$$/d' -e '/^[[:space:]]*#/d' $(MANIFEST))
+OUTPUTS := ia64-firmware.bin ia64-firmware.elf ia64-firmware.map \
+	ia64-firmware.sections
+DEPFILE := ia64-firmware.d
 
-ASFLAGS =
+all: $(OUTPUTS)
 
-LDFLAGS = -nostdlib -static -T firmware.lds
+$(OUTPUTS) &: $(BUILD_SCRIPT) $(MANIFEST) $(SOURCES)
+	AS="$(AS)" CC="$(CC)" LD="$(LD)" OBJCOPY="$(OBJCOPY)" SIZE="$(SIZE)" \
+		./$(BUILD_SCRIPT) ia64-firmware.bin ia64-firmware.elf \
+		ia64-firmware.map ia64-firmware.sections . $(DEPFILE)
 
-OBJS = entry.o firmware.o
-
-all: ia64-firmware.bin
-
-entry.o: entry.S
-	$(AS) $(ASFLAGS) -o $@ $<
-
-firmware.o: firmware.c boot_shell.c linker-symbols.h
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-ia64-firmware.elf: $(OBJS)
-	$(LD) $(LDFLAGS) -o $@ $(OBJS) $(LIBGCC)
-
-ia64-firmware.bin: ia64-firmware.elf
-	$(OBJCOPY) -O binary $< $@
+-include $(DEPFILE)
 
 clean:
-	rm -f $(OBJS) ia64-firmware.elf ia64-firmware.bin
+	rm -f ia64-fw-*.o ia64-fw-*.o.d $(OUTPUTS) $(DEPFILE)
 
 .PHONY: all clean

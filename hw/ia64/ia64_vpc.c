@@ -11,6 +11,9 @@
  */
 
 #include "qemu/osdep.h"
+
+#include CONFIG_DEVICES
+
 #include "qemu/units.h"
 #include "qemu/cutils.h"
 #include "qemu/datadir.h"
@@ -32,6 +35,7 @@
 #include "hw/isa/isa.h"
 #include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
+#include "hw/ia64/ia64_loader.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/ia64/ia64_iosapic.h"
 #include "system/address-spaces.h"
@@ -43,8 +47,6 @@
 #include "target/ia64/cpu-qom.h"
 #include "target/ia64/cpu.h"
 
-#define IA64_UART_BASE  0x00000047f0000000ULL
-#define IA64_DEBUG_UART_BASE 0x00000047f0001000ULL
 #define IA64_FW_BASE    0x0000000000100000ULL
 #define IA64_LOW_RAM_LIMIT 0x0000000080000000ULL
 #define IA64_HIGH_RAM_BASE 0x0000000080200000ULL
@@ -90,12 +92,6 @@
 #define IA64_ACPI_PM_RESET_OFFSET 0x0000000cU
 #define IA64_ACPI_PM_RESET_VALUE  0x01U
 #define IA64_ACPI_SCI_IRQ       9
-#define IA64_FW_HANDOFF_ADDR         0x00000000000ff000ULL
-#define IA64_FW_HANDOFF_MAGIC        0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION      9ULL
-#define IA64_FW_CONSOLE_SERIAL       0ULL
-#define IA64_FW_CONSOLE_VGA          1ULL
-#define IA64_FW_DEBUG_PORT_PRESENT   1ULL
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
@@ -110,39 +106,53 @@
 #define IA64_SAPIC_DELIVERY_NMI     4
 #define IA64_SAPIC_DELIVERY_EXTINT  7
 
-static PCIDevice *ia64_vpc_ahci_dev;
-static PCIDevice *ia64_vpc_ohci_dev;
-static PCIDevice *ia64_vpc_uhci_dev;
-static PCIDevice *ia64_vpc_lsi_dev;
-static PCIDevice *ia64_vpc_vga_dev;
-static PCIDevice *ia64_vpc_nic_devs[MAX_NICS];
-static unsigned int ia64_vpc_nic_count;
-static MemoryRegion *ia64_vpc_vga_fb_alias;
-static MemoryRegion *ia64_vpc_vga_mmio_alias;
-static MemoryRegion *ia64_vpc_vga_legacy_alias;
-static Object *ia64_vpc_pci_fixup_reset;
-static MemoryRegion *ia64_vpc_lsapic_mmio;
-static MemoryRegion ia64_vpc_firmware_space;
-static MemoryRegion ia64_vpc_rtc_mmio;
-static MemoryRegion ia64_vpc_watchdog_mmio;
-static MemoryRegion ia64_vpc_nvram_mmio;
-static QEMUTimer *ia64_vpc_watchdog_timer;
-static uint64_t ia64_vpc_watchdog_timeout;
-static uint64_t ia64_vpc_watchdog_code;
-static uint8_t ia64_vpc_nvram_data[IA64_NVRAM_SIZE];
-static char *ia64_vpc_nvram_path;
-static char *ia64_vpc_nvram_resolved_path;
-static bool ia64_vpc_nvram_write_warning;
-static MemoryRegion ia64_vpc_acpi_pm;
-static MemoryRegion ia64_vpc_acpi_reset;
-static ACPIREGS ia64_vpc_acpi_regs;
-static qemu_irq ia64_vpc_acpi_sci_irq;
-static Notifier ia64_vpc_powerdown_notifier;
-static qemu_irq ia64_vpc_isa_irqs[ISA_NUM_IRQS];
-static bool ia64_vpc_i8042_enabled = true;
-static bool ia64_vpc_firmware_ide_dma = true;
-static uint64_t ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
-static bool ia64_vpc_alat_full;
+#define TYPE_IA64_VPC_MACHINE MACHINE_TYPE_NAME("ia64-vpc")
+OBJECT_DECLARE_SIMPLE_TYPE(IA64VpcMachineState, IA64_VPC_MACHINE)
+
+struct IA64VpcMachineState {
+    MachineState parent_obj;
+
+    bool i8042_enabled;
+    bool firmware_ide_dma;
+    uint64_t firmware_console;
+    char *nvram_path;
+    bool alat_full;
+
+    PCIDevice *ahci_dev;
+    PCIDevice *ohci_dev;
+    PCIDevice *uhci_dev;
+    PCIDevice *lsi_dev;
+    PCIDevice *vga_dev;
+    PCIDevice *nic_devs[MAX_NICS];
+    unsigned int nic_count;
+
+    MemoryRegion *ram_aliases[4];
+    unsigned int ram_alias_count;
+    MemoryRegion *vga_fb_alias;
+    MemoryRegion *vga_mmio_alias;
+    MemoryRegion *vga_legacy_alias;
+    MemoryRegion *lsapic_mmio;
+    MemoryRegion firmware_space;
+    MemoryRegion rtc_mmio;
+    MemoryRegion watchdog_mmio;
+    MemoryRegion nvram_mmio;
+    MemoryRegion acpi_pm;
+    MemoryRegion acpi_reset;
+
+    Object *pci_fixup_reset;
+    QEMUTimer *watchdog_timer;
+    uint64_t watchdog_timeout;
+    uint64_t watchdog_code;
+    uint8_t nvram_data[IA64_NVRAM_SIZE];
+    size_t firmware_size;
+    char *nvram_resolved_path;
+    bool nvram_write_warning;
+    ACPIREGS acpi_regs;
+    qemu_irq acpi_sci_irq;
+    qemu_irq isa_irqs[ISA_NUM_IRQS];
+    Notifier powerdown_notifier;
+    Notifier done_notifier;
+};
 
 static uint64_t ia64_vpc_rtc_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -188,36 +198,37 @@ static const MemoryRegionOps ia64_vpc_rtc_ops = {
     },
 };
 
-static void ia64_vpc_init_rtc(MachineState *machine)
+static void ia64_vpc_init_rtc(IA64VpcMachineState *s)
 {
-    memory_region_init_io(&ia64_vpc_rtc_mmio, OBJECT(machine),
-                          &ia64_vpc_rtc_ops, NULL, "ia64-vpc.rtc",
+    memory_region_init_io(&s->rtc_mmio, OBJECT(s),
+                          &ia64_vpc_rtc_ops, s, "ia64-vpc.rtc",
                           IA64_RTC_SIZE);
     memory_region_add_subregion_overlap(get_system_memory(), IA64_RTC_BASE,
-                                        &ia64_vpc_rtc_mmio, 2);
+                                        &s->rtc_mmio, 2);
 }
 
 static void ia64_vpc_watchdog_expired(void *opaque)
 {
-    (void)opaque;
+    IA64VpcMachineState *s = opaque;
 
     warn_report("IA-64 firmware watchdog expired (code 0x%" PRIx64 ")",
-                ia64_vpc_watchdog_code);
-    ia64_vpc_watchdog_timeout = 0;
+                s->watchdog_code);
+    s->watchdog_timeout = 0;
     watchdog_perform_action();
 }
 
 static uint64_t ia64_vpc_watchdog_read(void *opaque, hwaddr addr,
                                        unsigned size)
 {
-    (void)opaque;
+    IA64VpcMachineState *s = opaque;
+
     (void)size;
 
     switch (addr) {
     case IA64_WATCHDOG_TIMEOUT:
-        return ia64_vpc_watchdog_timeout;
+        return s->watchdog_timeout;
     case IA64_WATCHDOG_CODE:
-        return ia64_vpc_watchdog_code;
+        return s->watchdog_code;
     default:
         return 0;
     }
@@ -226,21 +237,21 @@ static uint64_t ia64_vpc_watchdog_read(void *opaque, hwaddr addr,
 static void ia64_vpc_watchdog_write(void *opaque, hwaddr addr,
                                     uint64_t value, unsigned size)
 {
+    IA64VpcMachineState *s = opaque;
     int64_t now;
     int64_t delta;
 
-    (void)opaque;
     if (size != sizeof(uint64_t)) {
         return;
     }
 
     switch (addr) {
     case IA64_WATCHDOG_CODE:
-        ia64_vpc_watchdog_code = value;
+        s->watchdog_code = value;
         break;
     case IA64_WATCHDOG_TIMEOUT:
-        ia64_vpc_watchdog_timeout = value;
-        timer_del(ia64_vpc_watchdog_timer);
+        s->watchdog_timeout = value;
+        timer_del(s->watchdog_timer);
         if (value == 0) {
             break;
         }
@@ -250,7 +261,7 @@ static void ia64_vpc_watchdog_write(void *opaque, hwaddr addr,
         } else {
             delta = value * NANOSECONDS_PER_SECOND;
         }
-        timer_mod(ia64_vpc_watchdog_timer, now + delta);
+        timer_mod(s->watchdog_timer, now + delta);
         break;
     default:
         break;
@@ -275,89 +286,91 @@ static const MemoryRegionOps ia64_vpc_watchdog_ops = {
 
 static void ia64_vpc_watchdog_reset(void *opaque)
 {
-    (void)opaque;
+    IA64VpcMachineState *s = opaque;
 
-    timer_del(ia64_vpc_watchdog_timer);
-    ia64_vpc_watchdog_timeout = 0;
-    ia64_vpc_watchdog_code = 0;
+    timer_del(s->watchdog_timer);
+    s->watchdog_timeout = 0;
+    s->watchdog_code = 0;
 }
 
-static void ia64_vpc_init_watchdog(MachineState *machine)
+static void ia64_vpc_init_watchdog(IA64VpcMachineState *s)
 {
-    ia64_vpc_watchdog_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                           ia64_vpc_watchdog_expired, NULL);
-    memory_region_init_io(&ia64_vpc_watchdog_mmio, OBJECT(machine),
-                          &ia64_vpc_watchdog_ops, NULL,
+    s->watchdog_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                     ia64_vpc_watchdog_expired, s);
+    memory_region_init_io(&s->watchdog_mmio, OBJECT(s),
+                          &ia64_vpc_watchdog_ops, s,
                           "ia64-vpc.firmware-watchdog",
                           IA64_WATCHDOG_SIZE);
     memory_region_add_subregion_overlap(get_system_memory(),
                                         IA64_WATCHDOG_BASE,
-                                        &ia64_vpc_watchdog_mmio, 2);
-    qemu_register_reset(ia64_vpc_watchdog_reset, NULL);
+                                        &s->watchdog_mmio, 2);
+    qemu_register_reset(ia64_vpc_watchdog_reset, s);
 }
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
 {
-    (void)obj;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
     (void)errp;
 
-    return g_strdup(ia64_vpc_nvram_path ?: "auto");
+    return g_strdup(s->nvram_path ?: "auto");
 }
 
 static void ia64_vpc_set_nvram(Object *obj, const char *value, Error **errp)
 {
-    (void)obj;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
     (void)errp;
 
-    g_free(ia64_vpc_nvram_path);
-    ia64_vpc_nvram_path = g_strcmp0(value, "auto") == 0 ?
-                           NULL : g_strdup(value);
+    g_free(s->nvram_path);
+    s->nvram_path = g_strcmp0(value, "auto") == 0 ?
+                    NULL : g_strdup(value);
 }
 
 static uint64_t ia64_vpc_nvram_read(void *opaque, hwaddr addr,
                                     unsigned size)
 {
+    IA64VpcMachineState *s = opaque;
     uint64_t value = 0;
     unsigned i;
 
-    (void)opaque;
     for (i = 0; i < size; i++) {
-        value |= (uint64_t)ia64_vpc_nvram_data[addr + i] << (i * 8);
+        value |= (uint64_t)s->nvram_data[addr + i] << (i * 8);
     }
     return value;
 }
 
-static void ia64_vpc_nvram_commit(void)
+static void ia64_vpc_nvram_commit(IA64VpcMachineState *s)
 {
     g_autoptr(GError) err = NULL;
 
-    if (!ia64_vpc_nvram_resolved_path) {
+    if (!s->nvram_resolved_path) {
         return;
     }
-    if (!g_file_set_contents(ia64_vpc_nvram_resolved_path,
-                             (const char *)ia64_vpc_nvram_data,
-                             sizeof(ia64_vpc_nvram_data), &err) &&
-        !ia64_vpc_nvram_write_warning) {
+    if (!g_file_set_contents(s->nvram_resolved_path,
+                             (const char *)s->nvram_data,
+                             sizeof(s->nvram_data), &err) &&
+        !s->nvram_write_warning) {
         warn_report("failed to save IA-64 NVRAM '%s': %s",
-                    ia64_vpc_nvram_resolved_path,
+                    s->nvram_resolved_path,
                     err ? err->message : "unknown error");
-        ia64_vpc_nvram_write_warning = true;
+        s->nvram_write_warning = true;
     }
 }
 
 static void ia64_vpc_nvram_write(void *opaque, hwaddr addr,
                                  uint64_t value, unsigned size)
 {
+    IA64VpcMachineState *s = opaque;
     unsigned i;
 
-    (void)opaque;
     if (addr == IA64_NVRAM_COMMIT_OFFSET && size == 8 &&
         value == IA64_NVRAM_COMMIT_MAGIC) {
-        ia64_vpc_nvram_commit();
+        ia64_vpc_nvram_commit(s);
         return;
     }
     for (i = 0; i < size; i++) {
-        ia64_vpc_nvram_data[addr + i] = value >> (i * 8);
+        s->nvram_data[addr + i] = value >> (i * 8);
     }
 }
 
@@ -377,22 +390,22 @@ static const MemoryRegionOps ia64_vpc_nvram_ops = {
     },
 };
 
-static void ia64_vpc_init_nvram(MachineState *machine)
+static void ia64_vpc_init_nvram(IA64VpcMachineState *s)
 {
+    MachineState *machine = MACHINE(s);
     g_autofree char *firmware_path = NULL;
     g_autofree char *directory = NULL;
     g_autofree char *contents = NULL;
     g_autoptr(GError) err = NULL;
     gsize length = 0;
 
-    memset(ia64_vpc_nvram_data, 0, sizeof(ia64_vpc_nvram_data));
-    g_clear_pointer(&ia64_vpc_nvram_resolved_path, g_free);
-    ia64_vpc_nvram_write_warning = false;
+    memset(s->nvram_data, 0, sizeof(s->nvram_data));
+    g_clear_pointer(&s->nvram_resolved_path, g_free);
+    s->nvram_write_warning = false;
 
-    if (g_strcmp0(ia64_vpc_nvram_path, "none") != 0) {
-        if (ia64_vpc_nvram_path) {
-            ia64_vpc_nvram_resolved_path =
-                g_strdup(ia64_vpc_nvram_path);
+    if (g_strcmp0(s->nvram_path, "none") != 0) {
+        if (s->nvram_path) {
+            s->nvram_resolved_path = g_strdup(s->nvram_path);
         } else if (machine->firmware) {
             firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS,
                                            machine->firmware);
@@ -400,36 +413,42 @@ static void ia64_vpc_init_nvram(MachineState *machine)
                 firmware_path = g_strdup(machine->firmware);
             }
             directory = g_path_get_dirname(firmware_path);
-            ia64_vpc_nvram_resolved_path =
+            s->nvram_resolved_path =
                 g_build_filename(directory, "nvram", NULL);
         }
     }
 
-    if (ia64_vpc_nvram_resolved_path &&
-        g_file_get_contents(ia64_vpc_nvram_resolved_path, &contents,
+    if (s->nvram_resolved_path &&
+        g_file_get_contents(s->nvram_resolved_path, &contents,
                             &length, &err)) {
-        if (length == sizeof(ia64_vpc_nvram_data)) {
-            memcpy(ia64_vpc_nvram_data, contents, length);
+        if (length == sizeof(s->nvram_data)) {
+            memcpy(s->nvram_data, contents, length);
         } else {
             warn_report("ignoring IA-64 NVRAM '%s': expected %zu bytes, "
                         "found %zu",
-                        ia64_vpc_nvram_resolved_path,
-                        sizeof(ia64_vpc_nvram_data), (size_t)length);
+                        s->nvram_resolved_path,
+                        sizeof(s->nvram_data), (size_t)length);
         }
     } else if (err && !g_error_matches(err, G_FILE_ERROR,
                                        G_FILE_ERROR_NOENT)) {
         warn_report("failed to load IA-64 NVRAM '%s': %s",
-                    ia64_vpc_nvram_resolved_path, err->message);
+                    s->nvram_resolved_path, err->message);
     }
 
-    memory_region_init_io(&ia64_vpc_nvram_mmio, OBJECT(machine),
-                          &ia64_vpc_nvram_ops, NULL, "ia64-vpc.nvram",
+    memory_region_init_io(&s->nvram_mmio, OBJECT(s),
+                          &ia64_vpc_nvram_ops, s, "ia64-vpc.nvram",
                           IA64_NVRAM_SIZE);
     memory_region_add_subregion_overlap(get_system_memory(), IA64_NVRAM_BASE,
-                                        &ia64_vpc_nvram_mmio, 2);
+                                        &s->nvram_mmio, 2);
 }
 
-static GlobalProperty ia64_vpc_compat_defaults[] = {
+typedef struct IA64VpcCompatDefault {
+    const char *driver;
+    const char *property;
+    const char *value;
+} IA64VpcCompatDefault;
+
+static const IA64VpcCompatDefault ia64_vpc_compat_defaults[] = {
     /*
      * Some IA-64 USB hub drivers use an alignment-requiring 32-bit load for
      * packed extended-property descriptors.  Do not expose the optional
@@ -440,69 +459,98 @@ static GlobalProperty ia64_vpc_compat_defaults[] = {
     { "usb-tablet", "msos-desc", "off" },
 };
 
-static uint16_t ia64_lduw(const uint8_t *p)
+static void ia64_vpc_add_compat_defaults(MachineClass *mc)
 {
-    return p[0] | (p[1] << 8);
-}
+    size_t i;
 
-static uint32_t ia64_ldl(const uint8_t *p)
-{
-    return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+    for (i = 0; i < G_N_ELEMENTS(ia64_vpc_compat_defaults); i++) {
+        const IA64VpcCompatDefault *value = &ia64_vpc_compat_defaults[i];
+        GlobalProperty *property = g_new0(GlobalProperty, 1);
+
+        property->driver = value->driver;
+        property->property = value->property;
+        property->value = value->value;
+        g_ptr_array_add(mc->compat_props, property);
+    }
 }
 
 static bool ia64_vpc_get_i8042(Object *obj, Error **errp)
 {
-    (void)obj;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
     (void)errp;
 
-    return ia64_vpc_i8042_enabled;
+    return s->i8042_enabled;
 }
 
 static void ia64_vpc_set_i8042(Object *obj, bool value, Error **errp)
 {
-    (void)obj;
-    (void)errp;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
-    ia64_vpc_i8042_enabled = value;
+#ifndef CONFIG_IA64_VPC_PS2
+    if (value) {
+        error_setg(errp, "i8042 support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->i8042_enabled = value;
 }
 
 static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
 {
-    (void)obj;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
     (void)errp;
 
-    return ia64_vpc_firmware_ide_dma;
+    return s->firmware_ide_dma;
 }
 
 static void ia64_vpc_set_firmware_ide_dma(Object *obj, bool value,
                                           Error **errp)
 {
-    (void)obj;
-    (void)errp;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
-    ia64_vpc_firmware_ide_dma = value;
+#ifndef CONFIG_IA64_VPC_STORAGE
+    if (value) {
+        error_setg(errp,
+                   "firmware IDE DMA support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->firmware_ide_dma = value;
 }
 
 static char *ia64_vpc_get_firmware_console(Object *obj, Error **errp)
 {
-    (void)obj;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
     (void)errp;
 
-    return g_strdup(ia64_vpc_firmware_console == IA64_FW_CONSOLE_VGA ?
+    return g_strdup(s->firmware_console == IA64_FW_CONSOLE_VGA ?
                     "vga" : "serial");
 }
 
 static void ia64_vpc_set_firmware_console(Object *obj, const char *value,
                                           Error **errp)
 {
-    (void)obj;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
     if (g_strcmp0(value, "serial") == 0) {
-        ia64_vpc_firmware_console = IA64_FW_CONSOLE_SERIAL;
+        s->firmware_console = IA64_FW_CONSOLE_SERIAL;
         return;
     }
     if (g_strcmp0(value, "vga") == 0) {
-        ia64_vpc_firmware_console = IA64_FW_CONSOLE_VGA;
+#ifndef CONFIG_IA64_VPC_GRAPHICS
+        error_setg(errp, "VGA support is not present in this build");
+#else
+        s->firmware_console = IA64_FW_CONSOLE_VGA;
+#endif
         return;
     }
 
@@ -511,22 +559,23 @@ static void ia64_vpc_set_firmware_console(Object *obj, const char *value,
 
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
 {
-    (void)obj;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
     (void)errp;
 
-    return g_strdup(ia64_vpc_alat_full ? "full" : "zero");
+    return g_strdup(s->alat_full ? "full" : "zero");
 }
 
 static void ia64_vpc_set_alat(Object *obj, const char *value, Error **errp)
 {
-    (void)obj;
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
     if (g_strcmp0(value, "zero") == 0) {
-        ia64_vpc_alat_full = false;
+        s->alat_full = false;
         return;
     }
     if (g_strcmp0(value, "full") == 0) {
-        ia64_vpc_alat_full = true;
+        s->alat_full = true;
         return;
     }
 
@@ -535,7 +584,10 @@ static void ia64_vpc_set_alat(Object *obj, const char *value, Error **errp)
 
 static void ia64_vpc_acpi_update_sci(ACPIREGS *ar)
 {
-    acpi_update_sci(ar, ia64_vpc_acpi_sci_irq);
+    IA64VpcMachineState *s = container_of(ar, IA64VpcMachineState,
+                                          acpi_regs);
+
+    acpi_update_sci(ar, s->acpi_sci_irq);
 }
 
 static uint64_t ia64_vpc_acpi_reset_read(void *opaque, hwaddr addr,
@@ -567,44 +619,47 @@ static const MemoryRegionOps ia64_vpc_acpi_reset_ops = {
     },
 };
 
-static void ia64_vpc_init_acpi_pm(MachineState *machine, DeviceState *iosapic,
+static void ia64_vpc_init_acpi_pm(IA64VpcMachineState *s,
+                                  DeviceState *iosapic,
                                   MemoryRegion *pci_io)
 {
-    ia64_vpc_acpi_sci_irq = qdev_get_gpio_in(iosapic, IA64_ACPI_SCI_IRQ);
+    s->acpi_sci_irq = qdev_get_gpio_in(iosapic, IA64_ACPI_SCI_IRQ);
 
-    memory_region_init(&ia64_vpc_acpi_pm, OBJECT(machine), "ia64-acpi-pm",
+    memory_region_init(&s->acpi_pm, OBJECT(s), "ia64-acpi-pm",
                        IA64_ACPI_PM_IO_SIZE);
     memory_region_add_subregion(pci_io, IA64_ACPI_PM_IO_BASE,
-                                &ia64_vpc_acpi_pm);
+                                &s->acpi_pm);
 
-    acpi_pm1_evt_init(&ia64_vpc_acpi_regs, ia64_vpc_acpi_update_sci,
-                      &ia64_vpc_acpi_pm);
-    acpi_pm1_cnt_init(&ia64_vpc_acpi_regs, &ia64_vpc_acpi_pm,
+    acpi_pm1_evt_init(&s->acpi_regs, ia64_vpc_acpi_update_sci,
+                      &s->acpi_pm);
+    acpi_pm1_cnt_init(&s->acpi_regs, &s->acpi_pm,
                       false, false, 0, true);
-    acpi_pm_tmr_init(&ia64_vpc_acpi_regs, ia64_vpc_acpi_update_sci,
-                     &ia64_vpc_acpi_pm);
-    memory_region_init_io(&ia64_vpc_acpi_reset, OBJECT(machine),
-                          &ia64_vpc_acpi_reset_ops, NULL,
+    acpi_pm_tmr_init(&s->acpi_regs, ia64_vpc_acpi_update_sci,
+                     &s->acpi_pm);
+    memory_region_init_io(&s->acpi_reset, OBJECT(s),
+                          &ia64_vpc_acpi_reset_ops, s,
                           "ia64-acpi-reset", 1);
-    memory_region_add_subregion(&ia64_vpc_acpi_pm,
+    memory_region_add_subregion(&s->acpi_pm,
                                 IA64_ACPI_PM_RESET_OFFSET,
-                                &ia64_vpc_acpi_reset);
+                                &s->acpi_reset);
 
     /*
      * acpi_update_sci() always folds in GPE status.  The current platform
      * exposes no GPE block to the guest, but the shared ACPI core still needs
      * backing storage for that internal zero-valued contribution.
      */
-    acpi_gpe_init(&ia64_vpc_acpi_regs, 2);
+    acpi_gpe_init(&s->acpi_regs, 2);
 }
 
 static void ia64_vpc_powerdown_req(Notifier *n, void *opaque)
 {
-    (void)n;
+    IA64VpcMachineState *s = container_of(n, IA64VpcMachineState,
+                                          powerdown_notifier);
+
     (void)opaque;
 
-    if (ia64_vpc_acpi_regs.pm1.evt.en & ACPI_BITMASK_POWER_BUTTON_ENABLE) {
-        acpi_pm1_evt_power_down(&ia64_vpc_acpi_regs);
+    if (s->acpi_regs.pm1.evt.en & ACPI_BITMASK_POWER_BUTTON_ENABLE) {
+        acpi_pm1_evt_power_down(&s->acpi_regs);
     } else {
         /* Avoid making QEMU's powerdown action a no-op before ACPI is armed. */
         qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
@@ -692,43 +747,52 @@ static const MemoryRegionOps ia64_vpc_lsapic_ops = {
     },
 };
 
-static void ia64_vpc_map_lsapic(void)
+static void ia64_vpc_map_lsapic(IA64VpcMachineState *s)
 {
-    if (ia64_vpc_lsapic_mmio != NULL) {
+    if (s->lsapic_mmio != NULL) {
         return;
     }
 
-    ia64_vpc_lsapic_mmio = g_new(MemoryRegion, 1);
-    memory_region_init_io(ia64_vpc_lsapic_mmio, NULL,
-                          &ia64_vpc_lsapic_ops, NULL,
+    s->lsapic_mmio = g_new(MemoryRegion, 1);
+    memory_region_init_io(s->lsapic_mmio, OBJECT(s),
+                          &ia64_vpc_lsapic_ops, s,
                           "ia64-vpc.local-sapic",
                           IA64_LOCAL_SAPIC_SIZE);
     memory_region_add_subregion(get_system_memory(), IA64_LOCAL_SAPIC_PA,
-                                ia64_vpc_lsapic_mmio);
+                                s->lsapic_mmio);
 }
 
-static void ia64_vpc_map_firmware_address_space(void)
+static bool ia64_vpc_map_firmware_address_space(IA64VpcMachineState *s,
+                                                Error **errp)
 {
+    Error *local_err = NULL;
+
     /*
      * IA-64 reserves the top 16 MiB below 4 GiB for PAL/SAL firmware
      * resources.  Decode it so firmware identity mappings can use the
      * platform address space directly.
      */
-    memory_region_init_ram(&ia64_vpc_firmware_space, NULL,
+    memory_region_init_ram(&s->firmware_space, NULL,
                            "ia64-firmware-address-space",
-                           IA64_FIRMWARE_ADDRESS_SPACE_SIZE, &error_fatal);
+                           IA64_FIRMWARE_ADDRESS_SPACE_SIZE, &local_err);
+    if (local_err != NULL) {
+        error_propagate(errp, local_err);
+        return false;
+    }
     memory_region_add_subregion_overlap(get_system_memory(),
                                         IA64_FIRMWARE_ADDRESS_SPACE_BASE,
-                                        &ia64_vpc_firmware_space, 1);
+                                        &s->firmware_space, 1);
+    return true;
 }
 
-static uint64_t ia64_vpc_map_ram_alias(MachineState *machine,
+static uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s,
                                        hwaddr guest_base,
                                        uint64_t backing_offset,
                                        uint64_t remaining,
                                        uint64_t capacity,
                                        const char *name)
 {
+    MachineState *machine = MACHINE(s);
     MemoryRegion *alias;
     uint64_t size = MIN(remaining, capacity);
 
@@ -736,15 +800,18 @@ static uint64_t ia64_vpc_map_ram_alias(MachineState *machine,
         return 0;
     }
 
+    g_assert(s->ram_alias_count < ARRAY_SIZE(s->ram_aliases));
     alias = g_new(MemoryRegion, 1);
-    memory_region_init_alias(alias, OBJECT(machine), name, machine->ram,
+    s->ram_aliases[s->ram_alias_count++] = alias;
+    memory_region_init_alias(alias, OBJECT(s), name, machine->ram,
                              backing_offset, size);
     memory_region_add_subregion(get_system_memory(), guest_base, alias);
     return size;
 }
 
-static void ia64_vpc_map_ram(MachineState *machine)
+static void ia64_vpc_map_ram(IA64VpcMachineState *s)
 {
+    MachineState *machine = MACHINE(s);
     uint64_t remaining = machine->ram_size;
     uint64_t offset = 0;
     uint64_t size;
@@ -759,13 +826,13 @@ static void ia64_vpc_map_ram(MachineState *machine)
      * RAM displaced by those apertures is mapped above 4 GiB instead of
      * being hidden by higher-priority device regions.
      */
-    size = ia64_vpc_map_ram_alias(machine, 0, offset, remaining,
+    size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
                                   IA64_LOW_RAM_LIMIT,
                                   "ia64-vpc.low-ram");
     offset += size;
     remaining -= size;
 
-    size = ia64_vpc_map_ram_alias(machine, IA64_HIGH_RAM_BASE, offset,
+    size = ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_BASE, offset,
                                   remaining,
                                   IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE,
                                   "ia64-vpc.high-ram-below-pci");
@@ -773,35 +840,46 @@ static void ia64_vpc_map_ram(MachineState *machine)
     remaining -= size;
 
     size = ia64_vpc_map_ram_alias(
-        machine, IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE, offset, remaining,
+        s, IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE, offset, remaining,
         IA64_LOCAL_SAPIC_PA -
             (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE),
         "ia64-vpc.high-ram-above-pci");
     offset += size;
     remaining -= size;
 
-    ia64_vpc_map_ram_alias(machine, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
+    ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
                            offset, remaining, remaining,
                            "ia64-vpc.high-ram-above-4g");
 }
 
-static void ia64_vpc_write_firmware_handoff(MachineState *machine)
+static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
 {
-    uint8_t handoff[80] = { 0 };
+    MachineState *machine = MACHINE(s);
+    IA64VpcHandoff handoff = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
-    stq_le_p(handoff, IA64_FW_HANDOFF_MAGIC);
-    stq_le_p(handoff + 8, IA64_FW_HANDOFF_VERSION);
-    stq_le_p(handoff + 16, machine->ram_size);
-    stq_le_p(handoff + 24, ia64_vpc_firmware_console);
-    stq_le_p(handoff + 32, ia64_vpc_firmware_ide_dma);
-    stq_le_p(handoff + 40,
-             debug_port_present ? IA64_FW_DEBUG_PORT_PRESENT : 0);
-    stq_le_p(handoff + 48, debug_port_present ? IA64_DEBUG_UART_BASE : 0);
-    stq_le_p(handoff + 56, ia64_vpc_i8042_enabled);
-    stq_le_p(handoff + 64, machine->smp.cpus);
-    stq_le_p(handoff + 72, ia64_vpc_nvram_resolved_path != NULL);
-    cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, handoff, sizeof(handoff));
+    _Static_assert(sizeof(IA64VpcHandoff) == 80,
+                   "IA-64 firmware handoff ABI size changed");
+    _Static_assert(offsetof(IA64VpcHandoff, ProcessorCount) == 64,
+                   "IA-64 firmware handoff CPU count offset changed");
+    _Static_assert(offsetof(IA64VpcHandoff, NvramPersistent) == 72,
+                   "IA-64 firmware handoff NVRAM offset changed");
+
+    handoff.Magic = cpu_to_le64(IA64_FW_HANDOFF_MAGIC);
+    handoff.Version = cpu_to_le64(IA64_FW_HANDOFF_VERSION);
+    handoff.RamSize = cpu_to_le64(machine->ram_size);
+    handoff.ConsolePolicy = cpu_to_le64(s->firmware_console);
+    handoff.IdeDmaEnabled = cpu_to_le64(s->firmware_ide_dma);
+    handoff.DebugPortFlags = cpu_to_le64(
+        debug_port_present ? IA64_FW_DEBUG_PORT_PRESENT : 0);
+    handoff.DebugPortBase = cpu_to_le64(
+        debug_port_present ? IA64_DEBUG_UART_BASE : 0);
+    handoff.I8042Enabled = cpu_to_le64(s->i8042_enabled);
+    handoff.ProcessorCount = cpu_to_le64(machine->smp.cpus);
+    handoff.NvramPersistent = cpu_to_le64(
+        s->nvram_resolved_path != NULL);
+    cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
+                              sizeof(handoff));
 }
 
 static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
@@ -882,13 +960,6 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
         return;
     }
 
-    if (object_property_find(OBJECT(pci_dev),
-                             "x-vbe-legacy-mode-switch")) {
-        object_property_set_bool(OBJECT(pci_dev),
-                                 "x-vbe-legacy-mode-switch", true,
-                                 &error_abort);
-    }
-
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
                              IA64_VGA_FB_PCI_BASE, 4);
     if (pci_dev->io_regions[1].memory != NULL) {
@@ -900,6 +971,20 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY, 2);
 
+}
+
+static bool ia64_vpc_enable_vga_legacy_switch(PCIDevice *pci_dev,
+                                               Error **errp)
+{
+    if (pci_dev == NULL ||
+        !object_property_find(OBJECT(pci_dev),
+                              "x-vbe-legacy-mode-switch")) {
+        return true;
+    }
+
+    return object_property_set_bool(OBJECT(pci_dev),
+                                    "x-vbe-legacy-mode-switch", true,
+                                    errp);
 }
 
 static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
@@ -921,31 +1006,33 @@ static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
                              PCI_COMMAND_MASTER, 2);
 }
 
-static void ia64_vpc_configure_platform_pci(void)
+static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
 {
-    ia64_vpc_configure_ahci(ia64_vpc_ahci_dev);
-    ia64_vpc_configure_ohci(ia64_vpc_ohci_dev);
-    ia64_vpc_configure_uhci(ia64_vpc_uhci_dev);
-    ia64_vpc_configure_lsi(ia64_vpc_lsi_dev);
-    ia64_vpc_configure_vga(ia64_vpc_vga_dev);
-    for (unsigned int i = 0; i < ia64_vpc_nic_count; i++) {
-        ia64_vpc_configure_nic(ia64_vpc_nic_devs[i], i);
+    ia64_vpc_configure_ahci(s->ahci_dev);
+    ia64_vpc_configure_ohci(s->ohci_dev);
+    ia64_vpc_configure_uhci(s->uhci_dev);
+    ia64_vpc_configure_lsi(s->lsi_dev);
+    ia64_vpc_configure_vga(s->vga_dev);
+    for (unsigned int i = 0; i < s->nic_count; i++) {
+        ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
-    ia64_vpc_configure_pci_irq(ia64_vpc_ahci_dev);
-    ia64_vpc_configure_pci_irq(ia64_vpc_ohci_dev);
-    ia64_vpc_configure_pci_irq(ia64_vpc_uhci_dev);
-    ia64_vpc_configure_pci_irq(ia64_vpc_lsi_dev);
-    ia64_vpc_configure_pci_irq(ia64_vpc_vga_dev);
-    for (unsigned int i = 0; i < ia64_vpc_nic_count; i++) {
-        ia64_vpc_configure_pci_irq(ia64_vpc_nic_devs[i]);
+    ia64_vpc_configure_pci_irq(s->ahci_dev);
+    ia64_vpc_configure_pci_irq(s->ohci_dev);
+    ia64_vpc_configure_pci_irq(s->uhci_dev);
+    ia64_vpc_configure_pci_irq(s->lsi_dev);
+    ia64_vpc_configure_pci_irq(s->vga_dev);
+    for (unsigned int i = 0; i < s->nic_count; i++) {
+        ia64_vpc_configure_pci_irq(s->nic_devs[i]);
     }
 }
 
-static void ia64_vpc_record_nic(PCIBus *bus, PCIDevice *pci_dev)
+#ifdef CONFIG_IA64_VPC_NETWORK
+static void ia64_vpc_record_nic(IA64VpcMachineState *s, PCIBus *bus,
+                                PCIDevice *pci_dev)
 {
     uint16_t class;
 
-    if (pci_dev == NULL || ia64_vpc_nic_count >= MAX_NICS) {
+    if (pci_dev == NULL || s->nic_count >= MAX_NICS) {
         return;
     }
 
@@ -957,19 +1044,20 @@ static void ia64_vpc_record_nic(PCIBus *bus, PCIDevice *pci_dev)
         return;
     }
 
-    ia64_vpc_nic_devs[ia64_vpc_nic_count] = pci_dev;
-    ia64_vpc_configure_nic(pci_dev, ia64_vpc_nic_count);
+    s->nic_devs[s->nic_count] = pci_dev;
+    ia64_vpc_configure_nic(pci_dev, s->nic_count);
     ia64_vpc_configure_pci_irq(pci_dev);
-    ia64_vpc_nic_count++;
+    s->nic_count++;
 }
 
-static void ia64_vpc_init_network(MachineState *machine, PCIBus *pci_bus)
+static void ia64_vpc_init_network(IA64VpcMachineState *s, PCIBus *pci_bus)
 {
+    MachineState *machine = MACHINE(s);
     MachineClass *mc = MACHINE_GET_CLASS(machine);
     unsigned int slot;
 
-    ia64_vpc_nic_count = 0;
-    memset(ia64_vpc_nic_devs, 0, sizeof(ia64_vpc_nic_devs));
+    s->nic_count = 0;
+    memset(s->nic_devs, 0, sizeof(s->nic_devs));
 
     /* Keep the default adapter at a stable BDF after the built-in devices. */
     pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL,
@@ -977,10 +1065,11 @@ static void ia64_vpc_init_network(MachineState *machine, PCIBus *pci_bus)
     pci_init_nic_devices(pci_bus, mc->default_nic);
 
     for (slot = IA64_VPC_NIC_SLOT; slot < PCI_SLOT_MAX; slot++) {
-        ia64_vpc_record_nic(pci_bus,
+        ia64_vpc_record_nic(s, pci_bus,
                             pci_find_device(pci_bus, 0, PCI_DEVFN(slot, 0)));
     }
 }
+#endif
 
 #define TYPE_IA64_PCI_FIXUP_RESET "ia64-pci-fixup-reset"
 OBJECT_DECLARE_SIMPLE_TYPE(IA64PciFixupReset, IA64_PCI_FIXUP_RESET)
@@ -988,6 +1077,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IA64PciFixupReset, IA64_PCI_FIXUP_RESET)
 struct IA64PciFixupReset {
     Object parent;
     ResettableState reset_state;
+    IA64VpcMachineState *machine;
 };
 
 OBJECT_DEFINE_SIMPLE_TYPE_WITH_INTERFACES(
@@ -1003,10 +1093,11 @@ static ResettableState *ia64_pci_fixup_reset_get_state(Object *obj)
 
 static void ia64_pci_fixup_reset_exit(Object *obj, ResetType type)
 {
-    (void)obj;
+    IA64PciFixupReset *r = IA64_PCI_FIXUP_RESET(obj);
+
     (void)type;
 
-    ia64_vpc_configure_platform_pci();
+    ia64_vpc_configure_platform_pci(r->machine);
 }
 
 static void ia64_pci_fixup_reset_class_init(ObjectClass *klass,
@@ -1029,7 +1120,8 @@ static void ia64_pci_fixup_reset_finalize(Object *obj)
     (void)obj;
 }
 
-static void ia64_vpc_map_vga_fixed_windows(PCIDevice *pci_dev)
+static void ia64_vpc_map_vga_fixed_windows(IA64VpcMachineState *s,
+                                           PCIDevice *pci_dev)
 {
     PCIIORegion *fb;
     PCIIORegion *mmio;
@@ -1049,53 +1141,56 @@ static void ia64_vpc_map_vga_fixed_windows(PCIDevice *pci_dev)
         return;
     }
 
-    if (ia64_vpc_vga_fb_alias == NULL) {
-        ia64_vpc_vga_fb_alias = g_new(MemoryRegion, 1);
-        memory_region_init_alias(ia64_vpc_vga_fb_alias, OBJECT(pci_dev),
+    if (s->vga_fb_alias == NULL) {
+        s->vga_fb_alias = g_new(MemoryRegion, 1);
+        memory_region_init_alias(s->vga_fb_alias, OBJECT(s),
                                  "ia64-vga-fb-fixed", fb->memory, 0, fb->size);
         memory_region_add_subregion_overlap(fb->address_space,
                                             IA64_VGA_FB_PCI_BASE,
-                                            ia64_vpc_vga_fb_alias, 1);
+                                            s->vga_fb_alias, 1);
     }
 
-    if (ia64_vpc_vga_mmio_alias == NULL) {
-        ia64_vpc_vga_mmio_alias = g_new(MemoryRegion, 1);
-        memory_region_init_alias(ia64_vpc_vga_mmio_alias, OBJECT(pci_dev),
+    if (s->vga_mmio_alias == NULL) {
+        s->vga_mmio_alias = g_new(MemoryRegion, 1);
+        memory_region_init_alias(s->vga_mmio_alias, OBJECT(s),
                                  "ia64-vga-mmio-fixed", mmio->memory, 0,
                                  mmio->size);
         memory_region_add_subregion_overlap(fb->address_space,
                                             IA64_VGA_MMIO_PCI_BASE,
-                                            ia64_vpc_vga_mmio_alias, 1);
+                                            s->vga_mmio_alias, 1);
     }
 
-    if (ia64_vpc_vga_legacy_alias == NULL) {
-        ia64_vpc_vga_legacy_alias = g_new(MemoryRegion, 1);
-        memory_region_init_alias(ia64_vpc_vga_legacy_alias,
-                                 OBJECT(pci_dev),
+    if (s->vga_legacy_alias == NULL) {
+        s->vga_legacy_alias = g_new(MemoryRegion, 1);
+        memory_region_init_alias(s->vga_legacy_alias,
+                                 OBJECT(s),
                                  "ia64-vga-legacy-fixed",
                                  fb->address_space,
                                  IA64_VGA_LEGACY_BASE,
                                  IA64_VGA_LEGACY_SIZE);
         memory_region_add_subregion_overlap(get_system_memory(),
                                             IA64_VGA_LEGACY_BASE,
-                                            ia64_vpc_vga_legacy_alias, 1);
+                                            s->vga_legacy_alias, 1);
     }
 }
 
-static void ia64_vpc_init_usb(MachineState *machine, PCIBus *pci_bus)
+#ifdef CONFIG_IA64_VPC_USB
+static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
+                              Error **errp)
 {
+    MachineState *machine = MACHINE(s);
     USBBus *usb_bus;
     bool add_default_input;
 
     machine->usb |= defaults_enabled() && !machine->usb_disabled;
     if (!machine->usb) {
-        return;
+        return true;
     }
 
-    ia64_vpc_ohci_dev = pci_create_simple(pci_bus, -1, "pci-ohci");
-    ia64_vpc_configure_ohci(ia64_vpc_ohci_dev);
+    s->ohci_dev = pci_create_simple(pci_bus, -1, "pci-ohci");
+    ia64_vpc_configure_ohci(s->ohci_dev);
 
-    add_default_input = defaults_enabled() && !ia64_vpc_i8042_enabled;
+    add_default_input = defaults_enabled() && !s->i8042_enabled;
     if (add_default_input) {
         /*
          * Attach default USB input only when PS/2 is disabled. HID keyboards
@@ -1105,13 +1200,39 @@ static void ia64_vpc_init_usb(MachineState *machine, PCIBus *pci_bus)
          * relative-pointer grab.
          */
         usb_bus = USB_BUS(object_resolve_type_unambiguous(TYPE_USB_BUS,
-                                                          &error_abort));
+                                                          errp));
+        if (usb_bus == NULL) {
+            return false;
+        }
         usb_create_simple(usb_bus, "usb-kbd");
         usb_create_simple(usb_bus, "usb-tablet");
     }
 
-    ia64_vpc_uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);
-    ia64_vpc_configure_uhci(ia64_vpc_uhci_dev);
+    s->uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);
+    ia64_vpc_configure_uhci(s->uhci_dev);
+    return true;
+}
+#endif
+
+static IA64BootInfo ia64_vpc_boot_info(unsigned int cpu_index,
+                                       uint64_t entry,
+                                       uint64_t global_pointer)
+{
+    IA64BootInfo info = {
+        .firmware_base = IA64_FW_BASE,
+        .firmware_entry = entry,
+        .global_pointer = global_pointer,
+        .iva = IA64_IVT_BASE,
+        .bsp = 0x80000 + cpu_index * IA64_VPC_RSE_STACK_SIZE,
+        .stack_pointer = cpu_index == 0 ?
+            IA64_VPC_EARLY_STACK_TOP - 16 :
+            IA64_VPC_AP_EARLY_STACK_TOP - 16 -
+                cpu_index * IA64_VPC_EARLY_STACK_STRIDE,
+        .rsc = IA64_RSC_MODE,
+        .powered_off = cpu_index != 0,
+    };
+
+    return info;
 }
 
 /*
@@ -1124,56 +1245,18 @@ static void ia64_vpc_init_usb(MachineState *machine, PCIBus *pci_bus)
  */
 static void ia64_vpc_reset(void *opaque)
 {
+    IA64VpcMachineState *s = opaque;
     CPUState *cs;
 
-    (void)opaque;
-
     CPU_FOREACH(cs) {
-        CPUIA64State *env = cpu_env(cs);
-        uint64_t cpu_offset = cs->cpu_index;
-
         /* The CPUs are not children of the platform system bus. */
-        cpu_reset(cs);
-
-        /* Start in physical mode at the firmware entry point. */
-        env->psr = 0;
-        env->ip = IA64_FW_BASE;
-        env->br[0] = IA64_FW_BASE;
-        env->cr_iva = IA64_IVT_BASE;
-        env->cr_pta = 0;
-        env->cr[8] = 0x0000000000000030ULL; /* rr0: 256MB, RID 0 */
-        env->cr_dcr = IA64_DCR_DM | IA64_DCR_DP;
-        env->ar_kr0 = IA64_FW_BASE;
-        env->ar_kr7 = 0;
-
-        /* Give every processor independent early RSE and memory stacks. */
-        env->ar_rsc = IA64_RSC_MODE;
-        env->ar_bsp = 0x80000 + cpu_offset * IA64_VPC_RSE_STACK_SIZE;
-        env->ar_bspstore = env->ar_bsp;
-        env->ar_rnat = 0;
-        env->cfm_sof = 0;
-        env->cfm_sol = 0;
-        env->cfm_sor = 0;
-        env->cfm_rrb_gr = 0;
-        env->gr[12] = cpu_offset == 0 ? IA64_VPC_EARLY_STACK_TOP - 16 :
-                      IA64_VPC_AP_EARLY_STACK_TOP - 16 -
-                      cpu_offset * IA64_VPC_EARLY_STACK_STRIDE;
-
-        /* The flat firmware entry code derives its link-time GP. */
-        env->gr[1] = IA64_FW_BASE;
-        env->pal_halt_wake = cs->start_powered_off;
-        ia64_itc_write(env, 0);
-        env->ar_fpsr = IA64_FPSR_DEFAULT;
-        set_float_rounding_mode(float_round_nearest_even, &env->fp_status);
-        set_flush_to_zero(false, &env->fp_status);
-        set_flush_inputs_to_zero(false, &env->fp_status);
-        set_default_nan_mode(false, &env->fp_status);
+        ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
     }
 
-    acpi_pm1_evt_reset(&ia64_vpc_acpi_regs);
-    acpi_pm1_cnt_reset(&ia64_vpc_acpi_regs);
-    acpi_pm_tmr_reset(&ia64_vpc_acpi_regs);
-    acpi_gpe_reset(&ia64_vpc_acpi_regs);
+    acpi_pm1_evt_reset(&s->acpi_regs);
+    acpi_pm1_cnt_reset(&s->acpi_regs);
+    acpi_pm_tmr_reset(&s->acpi_regs);
+    acpi_gpe_reset(&s->acpi_regs);
 }
 
 /*
@@ -1181,133 +1264,135 @@ static void ia64_vpc_reset(void *opaque)
  * so ROM content is guaranteed to be in guest memory.  Parse a firmware
  * plabel only when the firmware image is a valid IA-64 PE32+ binary.
  */
-typedef struct {
-    Notifier notifier;
-    MachineState *machine;
-} IA64VpcDoneNotifier;
-
 static void ia64_vpc_machine_done(Notifier *notifier, void *data)
 {
-    IA64VpcDoneNotifier *n = container_of(notifier,
-                                            IA64VpcDoneNotifier, notifier);
-    MachineState *machine = n->machine;
+    IA64VpcMachineState *s = container_of(notifier, IA64VpcMachineState,
+                                          done_notifier);
+    MachineState *machine = MACHINE(s);
+    g_autofree uint8_t *image = NULL;
+    IA64FirmwareEntrypoint entrypoint;
     CPUState *cs;
 
-    ia64_vpc_configure_platform_pci();
+    (void)data;
+    ia64_vpc_configure_platform_pci(s);
 
-    if (!machine->firmware) {
+    if (!machine->firmware || s->firmware_size == 0) {
         return;
     }
-
-    uint8_t mz_hdr[0x40];
-    uint8_t pe_hdr[24];
-    uint8_t opt_hdr[20];
-    uint32_t e_lfanew, entry_rva;
-    uint16_t machine_type, opt_magic;
-    uint64_t plabel[2];
 
     /*
      * The project firmware is a flat raw binary (no DOS+PE header).
      * Without a strict PE signature gate, random bytes can be mistaken
      * for PE metadata and clobber startup registers (including gp).
      */
-    cpu_physical_memory_read(IA64_FW_BASE, mz_hdr, sizeof(mz_hdr));
-    if (ia64_lduw(mz_hdr) != 0x5a4d) {
+    image = g_malloc(s->firmware_size);
+    cpu_physical_memory_read(IA64_FW_BASE, image, s->firmware_size);
+    if (!ia64_loader_parse_pe_plabel(image, s->firmware_size,
+                                     &entrypoint)) {
         return;
     }
 
-    /* Read PE header offset (e_lfanew at offset 0x3C in MZ header) */
-    e_lfanew = ia64_ldl(mz_hdr + 0x3c);
-    if (e_lfanew < sizeof(mz_hdr) || e_lfanew > 0x100000) {
-        return;
-    }
+    CPU_FOREACH(cs) {
+        IA64BootInfo info = ia64_vpc_boot_info(cs->cpu_index,
+                                               entrypoint.entry,
+                                               entrypoint.global_pointer);
 
-    cpu_physical_memory_read(IA64_FW_BASE + e_lfanew, pe_hdr, sizeof(pe_hdr));
-    if (memcmp(pe_hdr, "PE\0\0", 4) != 0) {
-        return;
-    }
-
-    machine_type = ia64_lduw(pe_hdr + 4);
-    if (machine_type != 0x0200) {
-        return;
-    }
-
-    cpu_physical_memory_read(IA64_FW_BASE + e_lfanew + 24, opt_hdr,
-                             sizeof(opt_hdr));
-    opt_magic = ia64_lduw(opt_hdr);
-    if (opt_magic != 0x020b) {
-        return;
-    }
-
-    /* PE32+ optional header: AddressOfEntryPoint at offset 16 */
-    entry_rva = ia64_ldl(opt_hdr + 16);
-    if (entry_rva == 0) {
-        return;
-    }
-
-    /* Read plabel (function descriptor) at entry point RVA */
-    cpu_physical_memory_read(IA64_FW_BASE + entry_rva, plabel, 16);
-
-    {
-        uint64_t entry_addr = le64_to_cpu(plabel[0]);
-        uint64_t gp_val = le64_to_cpu(plabel[1]);
-
-        /* Sanity: entry must be in a reasonable address range */
-        if (entry_addr != 0 && entry_addr < 0x100000000ULL) {
-            CPU_FOREACH(cs) {
-                CPUIA64State *env = cpu_env(cs);
-
-                env->ip = entry_addr;
-                env->br[0] = entry_addr;
-                env->gr[1] = gp_val;
-            }
-        }
+        ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
+        ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
     }
 }
 
-static IA64VpcDoneNotifier vpc_done_notifier;
-
-static void ia64_vpc_init(MachineState *machine)
+static bool ia64_vpc_validate_configuration(MachineState *machine,
+                                            IA64VpcMachineState *s,
+                                            Error **errp)
 {
+    if (machine->ram_size < IA64_FW_LOW_RAM_MIN) {
+        g_autofree char *size = size_to_str(IA64_FW_LOW_RAM_MIN);
+
+        error_setg(errp, "Invalid RAM size, should be at least %s", size);
+        return false;
+    }
+    if (s->alat_full && machine->smp.cpus > 1) {
+        error_setg(errp, "full ALAT emulation is not SMP-safe");
+        return false;
+    }
+    return true;
+}
+
+static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
+                                   MachineState *machine, Error **errp)
+{
+    g_autofree char *firmware_path = NULL;
+    Error *local_err = NULL;
+    int64_t firmware_size;
+
+    if (machine->firmware == NULL) {
+        return true;
+    }
+
+    firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS, machine->firmware);
+    if (firmware_path == NULL) {
+        firmware_path = g_strdup(machine->firmware);
+    }
+    firmware_size = get_image_size(firmware_path, &local_err);
+    if (local_err != NULL) {
+        error_prepend(&local_err, "failed to inspect firmware '%s': ",
+                      machine->firmware);
+        error_propagate(errp, local_err);
+        return false;
+    }
+    if (firmware_size <= 0 ||
+        (uint64_t)firmware_size > machine->ram_size - IA64_FW_BASE) {
+        error_setg(errp, "invalid firmware image size for '%s'",
+                   machine->firmware);
+        return false;
+    }
+    if (rom_add_file_fixed(machine->firmware, IA64_FW_BASE, -1)) {
+        error_setg(errp, "failed to load firmware '%s'", machine->firmware);
+        return false;
+    }
+    s->firmware_size = firmware_size;
+    return true;
+}
+
+static bool ia64_vpc_build(MachineState *machine, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(machine);
     IA64CPU *cpu;
     DeviceState *pci_host;
     DeviceState *iosapic;
     PCIBus *pci_bus;
     ISABus *isa_bus;
     MemoryRegion *pci_io;
+#ifdef CONFIG_IA64_VPC_STORAGE
     DriveInfo *sata_drives[6] = { NULL };
     AHCIPCIState *ahci;
+#endif
     int i;
 
-    if (machine->ram_size < IA64_FW_LOW_RAM_MIN) {
-        char *sz = size_to_str(IA64_FW_LOW_RAM_MIN);
-
-        error_report("Invalid RAM size, should be at least %s", sz);
-        g_free(sz);
-        exit(1);
+    if (!ia64_vpc_validate_configuration(machine, s, errp)) {
+        return false;
     }
 
-    if (ia64_vpc_alat_full && machine->smp.cpus > 1) {
-        error_report("full ALAT emulation is not SMP-safe");
-        exit(1);
+    ia64_vpc_map_ram(s);
+    if (!ia64_vpc_map_firmware_address_space(s, errp)) {
+        return false;
     }
-
-    ia64_vpc_map_ram(machine);
-    ia64_vpc_map_firmware_address_space();
-    ia64_vpc_init_rtc(machine);
-    ia64_vpc_init_watchdog(machine);
-    ia64_vpc_init_nvram(machine);
-    ia64_vpc_write_firmware_handoff(machine);
+    ia64_vpc_init_rtc(s);
+    ia64_vpc_init_watchdog(s);
+    ia64_vpc_init_nvram(s);
+    ia64_vpc_write_firmware_handoff(s);
 
     for (i = 0; i < machine->smp.cpus; i++) {
         uint32_t threads = MAX(machine->smp.threads, 1U);
         uint32_t cores = MAX(machine->smp.cores, 1U);
         uint32_t per_socket = threads * cores;
         uint32_t package_base = (i / per_socket) * per_socket;
+        IA64BootInfo boot_info = ia64_vpc_boot_info(i, IA64_FW_BASE,
+                                                    IA64_FW_BASE);
 
         cpu = IA64_CPU(object_new(machine->cpu_type));
-        cpu->alat_full = ia64_vpc_alat_full;
-        cpu->env.alat_full = ia64_vpc_alat_full;
+        cpu->alat_full = s->alat_full;
         cpu->socket_id = i / per_socket;
         cpu->core_id = (i / threads) % cores;
         cpu->thread_id = i % threads;
@@ -1316,14 +1401,17 @@ static void ia64_vpc_init(MachineState *machine)
         cpu->package_base = package_base;
         cpu->package_cpus = MIN(per_socket,
                                 machine->smp.cpus - package_base);
-        object_property_set_bool(OBJECT(cpu), "start-powered-off", i != 0,
-                                 &error_abort);
-        qdev_realize_and_unref(DEVICE(cpu), NULL, &error_fatal);
+        ia64_cpu_set_boot_info(cpu, &boot_info);
+        if (!qdev_realize_and_unref(DEVICE(cpu), NULL, errp)) {
+            return false;
+        }
     }
-    ia64_vpc_map_lsapic();
+    ia64_vpc_map_lsapic(s);
 
     iosapic = qdev_new(TYPE_IA64_IOSAPIC);
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(iosapic), &error_fatal);
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(iosapic), errp)) {
+        return false;
+    }
     sysbus_mmio_map(SYS_BUS_DEVICE(iosapic), 0, IA64_IOSAPIC_BASE);
 
     serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
@@ -1336,11 +1424,8 @@ static void ia64_vpc_init(MachineState *machine)
                        DEVICE_LITTLE_ENDIAN);
     }
 
-    if (machine->firmware) {
-        if (rom_add_file_fixed(machine->firmware, IA64_FW_BASE, -1)) {
-            error_report("failed to load firmware '%s'", machine->firmware);
-            exit(1);
-        }
+    if (!ia64_vpc_load_firmware(s, machine, errp)) {
+        return false;
     }
 
     /* Fill IVT with break bundles (one-time, before any reset) */
@@ -1355,12 +1440,13 @@ static void ia64_vpc_init(MachineState *machine)
     }
 
     /* Defer PE32+ plabel parsing until after ROM content is loaded */
-    vpc_done_notifier.machine = machine;
-    vpc_done_notifier.notifier.notify = ia64_vpc_machine_done;
-    qemu_add_machine_init_done_notifier(&vpc_done_notifier.notifier);
+    s->done_notifier.notify = ia64_vpc_machine_done;
+    qemu_add_machine_init_done_notifier(&s->done_notifier);
 
     pci_host = qdev_new(TYPE_IA64_PCI_HOST_BRIDGE);
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(pci_host), &error_fatal);
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(pci_host), errp)) {
+        return false;
+    }
     pci_bus = PCI_BUS(qdev_get_child_bus(pci_host, "pci"));
 
     /*
@@ -1370,7 +1456,7 @@ static void ia64_vpc_init(MachineState *machine)
      */
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
     pci_io = pci_bus->address_space_io;
-    ia64_vpc_init_acpi_pm(machine, iosapic, pci_io);
+    ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
 
     /* Leave ISA/SCI lines in the legacy range and route PCI INTx above 15. */
     for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
@@ -1383,49 +1469,109 @@ static void ia64_vpc_init(MachineState *machine)
      * AHCI remains available for guests that support SATA.  Firmware boot
      * storage is provided by the LSI SCSI HBA below.
      */
-    ia64_vpc_ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
-    ia64_vpc_configure_ahci(ia64_vpc_ahci_dev);
-    ahci = ICH9_AHCI(ia64_vpc_ahci_dev);
+#ifdef CONFIG_IA64_VPC_STORAGE
+    s->ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
+    ia64_vpc_configure_ahci(s->ahci_dev);
+    ahci = ICH9_AHCI(s->ahci_dev);
     g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
     ide_drive_get(sata_drives, ahci->ahci.ports);
     ahci_ide_create_devs(&ahci->ahci, sata_drives);
+#endif
 
-    isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, &error_fatal);
-    for (i = 0; i < ISA_NUM_IRQS; i++) {
-        ia64_vpc_isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
+    isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
+    if (isa_bus == NULL) {
+        return false;
     }
-    isa_bus_register_input_irqs(isa_bus, ia64_vpc_isa_irqs);
-    if (ia64_vpc_i8042_enabled) {
+    for (i = 0; i < ISA_NUM_IRQS; i++) {
+        s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
+    }
+    isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
+#ifdef CONFIG_IA64_VPC_PS2
+    if (s->i8042_enabled) {
         isa_create_simple(isa_bus, TYPE_I8042);
     }
+#endif
 
-    ia64_vpc_init_usb(machine, pci_bus);
+#ifdef CONFIG_IA64_VPC_USB
+    if (!ia64_vpc_init_usb(s, pci_bus, errp)) {
+        return false;
+    }
+#endif
 
     /* Put the SCSI HBA on device 4. */
-    ia64_vpc_lsi_dev = pci_new(PCI_DEVFN(4, 0), "lsi53c895a");
-    qdev_prop_set_bit(DEVICE(ia64_vpc_lsi_dev),
+#ifdef CONFIG_IA64_VPC_STORAGE
+    s->lsi_dev = pci_new(PCI_DEVFN(4, 0), "lsi53c895a");
+    qdev_prop_set_bit(DEVICE(s->lsi_dev),
                       "disconnect-on-data-wait", false);
-    pci_realize_and_unref(ia64_vpc_lsi_dev, pci_bus, &error_fatal);
-    ia64_vpc_configure_lsi(ia64_vpc_lsi_dev);
-    lsi53c8xx_handle_legacy_cmdline(DEVICE(ia64_vpc_lsi_dev));
+    if (!pci_realize_and_unref(s->lsi_dev, pci_bus, errp)) {
+        return false;
+    }
+    ia64_vpc_configure_lsi(s->lsi_dev);
+    lsi53c8xx_handle_legacy_cmdline(DEVICE(s->lsi_dev));
+#endif
 
-    ia64_vpc_vga_dev = pci_vga_init(pci_bus);
-    ia64_vpc_configure_vga(ia64_vpc_vga_dev);
-    ia64_vpc_map_vga_fixed_windows(ia64_vpc_vga_dev);
-    ia64_vpc_init_network(machine, pci_bus);
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    s->vga_dev = pci_vga_init(pci_bus);
+#endif
+    if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
+        return false;
+    }
+    ia64_vpc_configure_vga(s->vga_dev);
+    ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
+#ifdef CONFIG_IA64_VPC_NETWORK
+    ia64_vpc_init_network(s, pci_bus);
+#endif
     pci_bus_clear_slot_reserved_mask(pci_bus, 1U << 0);
 
-    ia64_vpc_powerdown_notifier.notify = ia64_vpc_powerdown_req;
-    qemu_register_powerdown_notifier(&ia64_vpc_powerdown_notifier);
+    s->powerdown_notifier.notify = ia64_vpc_powerdown_req;
+    qemu_register_powerdown_notifier(&s->powerdown_notifier);
 
-    qemu_register_reset(ia64_vpc_reset, NULL);
-    ia64_vpc_pci_fixup_reset = object_new(TYPE_IA64_PCI_FIXUP_RESET);
-    qemu_register_resettable(ia64_vpc_pci_fixup_reset);
+    qemu_register_reset(ia64_vpc_reset, s);
+    s->pci_fixup_reset = object_new(TYPE_IA64_PCI_FIXUP_RESET);
+    IA64_PCI_FIXUP_RESET(s->pci_fixup_reset)->machine = s;
+    qemu_register_resettable(s->pci_fixup_reset);
+    return true;
 }
 
-static void ia64_vpc_machine_init(MachineClass *mc)
+static void ia64_vpc_init(MachineState *machine)
 {
-    ObjectClass *oc = OBJECT_CLASS(mc);
+    Error *err = NULL;
+
+    if (!ia64_vpc_build(machine, &err)) {
+        error_propagate(&error_fatal, err);
+    }
+}
+
+static void ia64_vpc_machine_instance_init(Object *obj)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+#ifdef CONFIG_IA64_VPC_PS2
+    s->i8042_enabled = true;
+#endif
+#ifdef CONFIG_IA64_VPC_STORAGE
+    s->firmware_ide_dma = true;
+#endif
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    s->firmware_console = IA64_FW_CONSOLE_VGA;
+#else
+    s->firmware_console = IA64_FW_CONSOLE_SERIAL;
+#endif
+}
+
+static void ia64_vpc_machine_instance_finalize(Object *obj)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    g_free(s->nvram_path);
+    g_free(s->nvram_resolved_path);
+}
+
+static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    (void)data;
 
     mc->desc = "IA-64 virtual PC platform";
     mc->init = ia64_vpc_init;
@@ -1435,16 +1581,23 @@ static void ia64_vpc_machine_init(MachineClass *mc)
     mc->smp_props.prefer_sockets = true;
     mc->default_ram_size = 2 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
+#ifdef CONFIG_IA64_VPC_GRAPHICS
     mc->default_display = "ati";
+#endif
+#ifdef CONFIG_IA64_VPC_NETWORK
     mc->default_nic = "e1000";
+#endif
+#ifdef CONFIG_IA64_VPC_STORAGE
     mc->block_default_type = IF_SCSI;
+#else
+    mc->block_default_type = IF_NONE;
+#endif
     mc->no_serial = 0;
     mc->no_parallel = 1;
     mc->no_floppy = 1;
     mc->no_cdrom = 1;
 
-    compat_props_add(mc->compat_props, ia64_vpc_compat_defaults,
-                     G_N_ELEMENTS(ia64_vpc_compat_defaults));
+    ia64_vpc_add_compat_defaults(mc);
 
     object_class_property_add_bool(oc, "i8042",
                                    ia64_vpc_get_i8042,
@@ -1473,4 +1626,18 @@ static void ia64_vpc_machine_init(MachineClass *mc)
         "Set the IA-64 ALAT model to 'zero' (default) or 'full'");
 }
 
-DEFINE_MACHINE("ia64-vpc", ia64_vpc_machine_init)
+static const TypeInfo ia64_vpc_machine_typeinfo = {
+    .name = TYPE_IA64_VPC_MACHINE,
+    .parent = TYPE_MACHINE,
+    .instance_size = sizeof(IA64VpcMachineState),
+    .instance_init = ia64_vpc_machine_instance_init,
+    .instance_finalize = ia64_vpc_machine_instance_finalize,
+    .class_init = ia64_vpc_machine_class_init,
+};
+
+static void ia64_vpc_machine_register_types(void)
+{
+    type_register_static(&ia64_vpc_machine_typeinfo);
+}
+
+type_init(ia64_vpc_machine_register_types)

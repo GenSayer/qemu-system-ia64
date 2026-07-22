@@ -10,33 +10,20 @@
  *  - Boot from disk (PE32+ image loader)
  */
 
-/* Freestanding — define types ourselves, no libc headers */
+/* Freestanding — no libc or hosted headers. */
 
-typedef __UINT8_TYPE__   uint8_t;
-typedef __INT8_TYPE__    int8_t;
-typedef __UINT16_TYPE__  uint16_t;
-typedef __INT16_TYPE__   int16_t;
-typedef __UINT32_TYPE__  uint32_t;
-typedef __INT32_TYPE__   int32_t;
-typedef __UINT64_TYPE__  uint64_t;
-typedef __INT64_TYPE__   int64_t;
-typedef __SIZE_TYPE__    size_t;
-
-#define NULL ((void *)0)
-
-#define UART_BASE   0x00000047f0000000ULL
-#define DEBUG_UART_BASE 0x00000047f0001000ULL
-#define UART_MMIO_SIZE 0x0000000000002000ULL
-/* 16550 UART register offsets */
-#define UART_RBR    0x00   /* Receiver Buffer Register (read) */
-#define UART_THR    0x00   /* Transmit Holding Register (write) */
-#define UART_LSR    0x05   /* Line Status Register */
-#define UART_LSR_DR     0x01   /* Data Ready */
-#define UART_LSR_THRE   0x20   /* Transmitter Holding Register Empty */
+#include "fw-base.h"
+#include "fw-boot-shell.h"
+#include "fw-debug-support.h"
+#include "fw-device-path.h"
+#include "fw-ebc.h"
+#include "fw-legacy-io.h"
+#include "fw-pointer.h"
+#include "fw-services.h"
+#include "fw-uga-io.h"
+#include "fw-usb.h"
 
 #define IA64_PSR_AC     (1ULL << 3)
-#define IA64_PSR_IC     (1ULL << 13)
-#define IA64_PSR_I      (1ULL << 14)
 #define IA64_PSR_DT     (1ULL << 17)
 #define IA64_PSR_DFL    (1ULL << 18)
 #define IA64_PSR_DFH    (1ULL << 19)
@@ -48,7 +35,6 @@ typedef __SIZE_TYPE__    size_t;
 #define IA64_DCR_LC     (1ULL << 2)
 
 #define SAL_REVISION                 0x0340U
-#define SAL_IVT_BASE                 0x0000000000010000ULL
 #define SAL_TR_VIRTUAL_ADDRESS       0x0000000000000000ULL
 #define SAL_TR_PAGE_SHIFT            22U
 #define SAL_TR_ENCODED_PAGE_SIZE     (SAL_TR_PAGE_SHIFT << 2)
@@ -60,8 +46,6 @@ typedef __SIZE_TYPE__    size_t;
 #define SAL_BACKING_STORE_BASE       0x0000000000080000ULL
 #define SAL_BACKING_STORE_END        0x00000000000a0000ULL
 
-#define PCI_MMIO_BASE                 0x00000000c1000000ULL
-#define PCI_MMIO_SIZE                 0x0000000010000000ULL
 #define PCI_OHCI_MMIO_BAR             0xc1010000U
 #define PCI_AHCI_MMIO_BAR             0xc1020000U
 #define PCI_LSI_MMIO_BAR              0xc1030000U
@@ -123,8 +107,8 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008000000ULL
 #define FW_LOW_RAM_LIMIT  0x0000000080000000ULL
 #define FW_HIGH_RAM_BASE  0x0000000080200000ULL
-#define FW_HIGH_RAM_BELOW_PCI_END PCI_MMIO_BASE
-#define FW_HIGH_RAM_AFTER_PCI_BASE (PCI_MMIO_BASE + PCI_MMIO_SIZE)
+#define FW_HIGH_RAM_BELOW_PCI_END IA64_PCI_MMIO_BASE
+#define FW_HIGH_RAM_AFTER_PCI_BASE (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE)
 #define FW_LOCAL_SAPIC_BASE 0x00000000fee00000ULL
 #define FW_LOCAL_SAPIC_SIZE 0x0000000000200000ULL
 #define FW_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
@@ -144,37 +128,18 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define FW_HIGH_RAM_RANGE_MAX 3U
 #define FW_MEMORY_AFFINITY_MAX (1U + FW_HIGH_RAM_RANGE_MAX)
-#define FW_MAX_CPUS       4U
 #define FW_AP_STACK_SIZE  (FW_BOOT_STACK_SIZE / FW_MAX_CPUS)
-#define FW_HANDOFF_ADDR   0x00000000000ff000ULL
 #define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
 #define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
-#define FW_HANDOFF_MAGIC  0x4d41523436414951ULL /* "QIA64RAM" */
-#define FW_HANDOFF_VERSION 9ULL
-#define FW_HANDOFF_DEBUG_PORT_PRESENT 1ULL
-#define FW_CONSOLE_POLICY_SERIAL 0ULL
-#define FW_CONSOLE_POLICY_VGA    1ULL
 #define EFI_MEMORY_UC     0x0000000000000001ULL
 #define EFI_MEMORY_WB     0x0000000000000008ULL
 #define EFI_MEMORY_RUNTIME 0x8000000000000000ULL
-#define EFI_PAGE_SIZE     0x1000U
 #define EFI_MEMORY_DESCRIPTOR_VERSION 1U
 #define EFI_OPTIONAL_PTR  0x0000000000000001ULL
-#define FW_ITC_TICKS_PER_100NS 20ULL
-#define FW_ITC_TICKS_PER_MICROSECOND (FW_ITC_TICKS_PER_100NS * 10ULL)
-#define FW_ITC_TICKS_PER_SECOND (FW_ITC_TICKS_PER_100NS * 10000000ULL)
 #define FW_NANOSECONDS_PER_SECOND 1000000000ULL
 #define FW_RTC_RESOLUTION_HZ 1U
 #define FW_TIME_ACCURACY_1E6_PPM 50000000U
 
-#define EFI_VARIABLE_NON_VOLATILE       0x00000001U
-#define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x00000002U
-#define EFI_VARIABLE_RUNTIME_ACCESS     0x00000004U
-#define EFI_VARIABLE_HARDWARE_ERROR_RECORD 0x00000008U
-#define EFI_VARIABLE_AUTHENTICATED_WRITE_ACCESS 0x00000010U
-#define EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS 0x00000020U
-#define EFI_VARIABLE_APPEND_WRITE       0x00000040U
-#define EFI_VARIABLE_ENHANCED_AUTHENTICATED_ACCESS 0x00000080U
 #define EFI_VARIABLE_ACCESS_ATTRIBUTES \
     (EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)
 #define EFI_VARIABLE_SUPPORTED_ATTRIBUTES \
@@ -237,17 +202,13 @@ typedef __SIZE_TYPE__    size_t;
  * two's-complement negative base creates a separate, invalid Linux I/O space.
  */
 #define PCI_IO_TRANSLATION_OFFSET     0ULL
-#define PCI_MMIO_END                  (PCI_MMIO_BASE + PCI_MMIO_SIZE - 1U)
+#define PCI_MMIO_END \
+    (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE - 1U)
 #define PCI_MMIO_TRANSLATION_OFFSET   0ULL
 #define PCI_CONFIG_ECAM_BASE          0x0000007FF0000000ULL
 #define PCI_CONFIG_ECAM_SIZE          0x0000000010000000ULL
 #define PCI_IDE_CMD646_ID             0x06461095U
 #define IA64_REGION6_BASE             0xC000000000000000ULL
-#define PS2_DATA_PORT                 (LEGACY_IO_BASE + 0x60U)
-#define PS2_STATUS_PORT               (LEGACY_IO_BASE + 0x64U)
-#define PS2_STATUS_OBF                0x01U
-#define PS2_STATUS_IBF                0x02U
-#define PS2_STATUS_MOUSE_OBF          0x20U
 #define PS2_CMD_READ_MODE             0x20U
 #define PS2_CMD_WRITE_MODE            0x60U
 #define PS2_CMD_KBD_ENABLE            0xAEU
@@ -258,60 +219,11 @@ typedef __SIZE_TYPE__    size_t;
 #define PS2_MODE_SYS                  0x04U
 #define PS2_MODE_KCC                  0x40U
 
-#define OHCI_REG_REVISION             0x00U
-#define OHCI_REG_CONTROL              0x04U
-#define OHCI_REG_COMMAND_STATUS       0x08U
-#define OHCI_REG_INTERRUPT_STATUS     0x0cU
-#define OHCI_REG_INTERRUPT_DISABLE    0x14U
-#define OHCI_REG_HCCA                 0x18U
-#define OHCI_REG_CONTROL_HEAD_ED      0x20U
-#define OHCI_REG_PERIODIC_START       0x40U
-#define OHCI_REG_RH_DESCRIPTOR_A      0x48U
-#define OHCI_REG_RH_STATUS            0x50U
-#define OHCI_REG_RH_PORT_STATUS_BASE  0x54U
-
-#define OHCI_CTL_PLE                  (1U << 2)
-#define OHCI_CTL_CLE                  (1U << 4)
-#define OHCI_USB_OPERATIONAL          0x80U
-#define OHCI_STATUS_HCR               (1U << 0)
-#define OHCI_STATUS_CLF               (1U << 1)
-#define OHCI_RHS_LPSC                 (1U << 16)
-#define OHCI_PORT_CCS                 (1U << 0)
-#define OHCI_PORT_PES                 (1U << 1)
-#define OHCI_PORT_PRS                 (1U << 4)
-#define OHCI_PORT_PPS                 (1U << 8)
-#define OHCI_PORT_LSDA                (1U << 9)
-#define OHCI_PORT_WTC                 0x001f0000U
-#define OHCI_TD_R                     (1U << 18)
-#define OHCI_TD_DIR_SETUP             0U
-#define OHCI_TD_DIR_OUT               1U
-#define OHCI_TD_DIR_IN                2U
-#define OHCI_TD_DP_SHIFT              19U
-#define OHCI_TD_DI_SHIFT              21U
-#define OHCI_TD_CC_SHIFT              28U
-#define OHCI_TD_CC_NOERROR            0U
-#define OHCI_TD_CC_NOT_ACCESSED       0x0fU
-#define OHCI_ED_D_SHIFT               11U
-#define OHCI_ED_S                     (1U << 13)
-#define OHCI_ED_C                     2U
-#define OHCI_ED_MPS_SHIFT             16U
-#define OHCI_DPTR_MASK                0xfffffff0U
-#define OHCI_USB_KEYBOARD_ADDRESS     1U
-#define OHCI_USB_KEYBOARD_ENDPOINT    1U
-#define OHCI_USB_KEYBOARD_REPORT_SIZE 8U
-
-#define USB_REQ_SET_ADDRESS           0x05U
-#define USB_REQ_SET_CONFIGURATION     0x09U
-#define USB_REQ_HID_SET_IDLE          0x0aU
-#define USB_REQ_HID_SET_PROTOCOL      0x0bU
-#define USB_TYPE_CLASS_INTERFACE_OUT  0x21U
-
 #define EFI_RESET_COLD                0U
 #define EFI_RESET_WARM                1U
 #define EFI_RESET_SHUTDOWN            2U
 #define EFI_RESET_PLATFORM_SPECIFIC   3U
 
-#define FW_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 #define VGA_TEXT_COLUMNS              80U
 #define VGA_TEXT_ROWS                 25U
@@ -323,75 +235,7 @@ typedef __SIZE_TYPE__    size_t;
 #define VGA_TEXT_GLYPH_Y              1U
 #define VGA_TEXT_GLYPH_SCALE_Y        2U
 
-#define EFI_SCAN_UP                   0x0001U
-#define EFI_SCAN_DOWN                 0x0002U
-#define EFI_SCAN_RIGHT                0x0003U
-#define EFI_SCAN_LEFT                 0x0004U
-#define EFI_SCAN_HOME                 0x0005U
-#define EFI_SCAN_END                  0x0006U
-#define EFI_SCAN_INSERT               0x0007U
-#define EFI_SCAN_DELETE               0x0008U
-#define EFI_SCAN_PAGE_UP              0x0009U
-#define EFI_SCAN_PAGE_DOWN            0x000aU
-#define EFI_SCAN_F1                   0x000bU
-#define EFI_SCAN_F2                   0x000cU
-#define EFI_SCAN_F3                   0x000dU
-#define EFI_SCAN_F4                   0x000eU
-#define EFI_SCAN_F5                   0x000fU
-#define EFI_SCAN_F6                   0x0010U
-#define EFI_SCAN_F7                   0x0011U
-#define EFI_SCAN_F8                   0x0012U
-#define EFI_SCAN_F9                   0x0013U
-#define EFI_SCAN_F10                  0x0014U
-#define EFI_SCAN_F11                  0x0015U
-#define EFI_SCAN_F12                  0x0016U
-#define EFI_SCAN_ESC                  0x0017U
-
 /* --- EFI/UEFI type definitions -------------------------------------------- */
-
-typedef uint8_t     BOOLEAN;
-typedef int8_t      INT8;
-typedef uint8_t     UINT8;
-typedef char        CHAR8;
-typedef int16_t     INT16;
-typedef uint16_t    UINT16;
-typedef int32_t     INT32;
-typedef uint32_t    UINT32;
-typedef int64_t     INT64;
-typedef uint64_t    UINT64;
-typedef int64_t     INTN;
-typedef uint64_t    UINTN;
-typedef INTN        EFI_EXCEPTION_TYPE;
-typedef uint16_t    CHAR16;
-typedef void        VOID;
-
-typedef uint64_t    EFI_PHYSICAL_ADDRESS;
-typedef uint64_t    EFI_VIRTUAL_ADDRESS;
-typedef void       *EFI_HANDLE;
-typedef UINTN       EFI_STATUS;
-typedef VOID       *EFI_EVENT;
-
-typedef struct {
-    UINT32 InterruptTable[32];
-    UINT16 FrameNumber;
-    UINT16 Pad;
-    UINT32 DoneHead;
-    UINT8  Reserved[120];
-} __attribute__((packed)) FW_OHCI_HCCA;
-
-typedef struct {
-    UINT32 Flags;
-    UINT32 Tail;
-    UINT32 Head;
-    UINT32 Next;
-} __attribute__((packed)) FW_OHCI_ED;
-
-typedef struct {
-    UINT32 Flags;
-    UINT32 CurrentBufferPointer;
-    UINT32 Next;
-    UINT32 BufferEnd;
-} __attribute__((packed)) FW_OHCI_TD;
 
 #include "linker-symbols.h"
 
@@ -400,36 +244,6 @@ typedef struct {
 #define EFI_SYSTEM_TABLE_SIGNATURE  0x5453595320494249ULL
 #define EFI_BOOT_SERVICES_SIGNATURE  0x56524553544F4F42ULL
 #define EFI_RUNTIME_SERVICES_SIGNATURE 0x56524553544E5552ULL
-
-#define EFI_ERROR_BIT            0x8000000000000000ULL
-#define EFIERR(a)                (EFI_ERROR_BIT | (a))
-#define EFI_SUCCESS              0
-#define EFI_WARN_UNKNOWN_GLYPH   1
-#define EFI_WARN_DELETE_FAILURE  2
-#define EFI_LOAD_ERROR           EFIERR(1)
-#define EFI_INVALID_PARAMETER    EFIERR(2)
-#define EFI_UNSUPPORTED          EFIERR(3)
-#define EFI_BAD_BUFFER_SIZE      EFIERR(4)
-#define EFI_BUFFER_TOO_SMALL     EFIERR(5)
-#define EFI_NOT_READY            EFIERR(6)
-#define EFI_DEVICE_ERROR         EFIERR(7)
-#define EFI_WRITE_PROTECTED      EFIERR(8)
-#define EFI_OUT_OF_RESOURCES     EFIERR(9)
-#define EFI_VOLUME_CORRUPTED     EFIERR(10)
-#define EFI_VOLUME_FULL          EFIERR(11)
-#define EFI_NO_MEDIA             EFIERR(12)
-#define EFI_MEDIA_CHANGED        EFIERR(13)
-#define EFI_NOT_FOUND            EFIERR(14)
-#define EFI_ACCESS_DENIED        EFIERR(15)
-#define EFI_NO_RESPONSE          EFIERR(16)
-#define EFI_NO_MAPPING           EFIERR(17)
-#define EFI_TIMEOUT              EFIERR(18)
-#define EFI_NOT_STARTED          EFIERR(19)
-#define EFI_ALREADY_STARTED      EFIERR(20)
-#define EFI_ABORTED              EFIERR(21)
-#define EFI_ICMP_ERROR           EFIERR(22)
-#define EFI_TFTP_ERROR           EFIERR(23)
-#define EFI_PROTOCOL_ERROR       EFIERR(24)
 
 typedef struct _EFI_DRIVER_BINDING_PROTOCOL EFI_DRIVER_BINDING_PROTOCOL;
 
@@ -554,11 +368,6 @@ typedef struct _EFI_SIMPLE_TEXT_OUT_PROTOCOL {
 #define EFI_SIMPLE_TEXT_INPUT_PROTOCOL_GUID { 0x387477c1, 0x69c7, 0x11d2, \
     { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } }
 
-typedef struct {
-    UINT16  ScanCode;
-    CHAR16  UnicodeChar;
-} EFI_INPUT_KEY;
-
 typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
     EFI_STATUS (*Reset)(struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This,
                         BOOLEAN ExtendedVerification);
@@ -667,51 +476,16 @@ typedef struct {
 /* --- EFI Boot Services Table ---------------------------------------------- */
 #define EFI_BOOT_SERVICES_REVISION   0x0001000a
 
-typedef UINTN EFI_TPL;
 #define TPL_APPLICATION 4U
-#define TPL_CALLBACK    8U
-#define TPL_NOTIFY      16U
 #define TPL_HIGH_LEVEL  31U
 
-#define EVT_TIMER                         0x80000000U
 #define EVT_RUNTIME                       0x40000000U
 #define EVT_RUNTIME_CONTEXT               0x20000000U
-#define EVT_NOTIFY_WAIT                   0x00000100U
-#define EVT_NOTIFY_SIGNAL                 0x00000200U
 #define EVT_SIGNAL_EXIT_BOOT_SERVICES     0x00000201U
 #define EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE 0x60000202U
 
-#define TIMER_CANCEL   0U
-#define TIMER_PERIODIC 1U
-#define TIMER_RELATIVE 2U
-
 typedef EFI_TPL (*EFI_RAISE_TPL)(EFI_TPL NewTpl);
 typedef VOID (*EFI_RESTORE_TPL)(EFI_TPL OldTpl);
-
-typedef enum {
-    AllocateAnyPages,
-    AllocateMaxAddress,
-    AllocateAddress,
-    MaxAllocateType
-} EFI_ALLOCATE_TYPE;
-
-typedef enum {
-    EfiReservedMemoryType,
-    EfiLoaderCode,
-    EfiLoaderData,
-    EfiBootServicesCode,
-    EfiBootServicesData,
-    EfiRuntimeServicesCode,
-    EfiRuntimeServicesData,
-    EfiConventionalMemory,
-    EfiUnusableMemory,
-    EfiACPIReclaimMemory,
-    EfiACPIMemoryNVS,
-    EfiMemoryMappedIO,
-    EfiMemoryMappedIOPortSpace,
-    EfiPalCode,
-    EfiMaxMemoryType
-} EFI_MEMORY_TYPE;
 
 #define EFI_MEMORY_TYPE_OS_RESERVED_MIN 0x80000000U
 
@@ -732,15 +506,6 @@ static UINT64 efi_memory_attribute(EFI_MEMORY_TYPE Type, UINT64 Attribute)
     return Attribute;
 }
 
-typedef struct {
-    UINT32      Type;
-    UINT32      Pad;
-    EFI_PHYSICAL_ADDRESS  PhysicalStart;
-    EFI_VIRTUAL_ADDRESS   VirtualStart;
-    UINT64      NumberOfPages;
-    UINT64      Attribute;
-} EFI_MEMORY_DESCRIPTOR;
-
 typedef EFI_STATUS (*EFI_ALLOCATE_PAGES)(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
                                           UINTN Pages, EFI_PHYSICAL_ADDRESS *Memory);
 typedef EFI_STATUS (*EFI_FREE_PAGES)(EFI_PHYSICAL_ADDRESS Memory, UINTN Pages);
@@ -751,7 +516,6 @@ typedef EFI_STATUS (*EFI_GET_MEMORY_MAP)(UINTN *MemoryMapSize,
                                           UINT32 *DescriptorVersion);
 typedef EFI_STATUS (*EFI_ALLOCATE_POOL)(EFI_MEMORY_TYPE PoolType, UINTN Size, VOID **Buffer);
 typedef EFI_STATUS (*EFI_FREE_POOL)(VOID *Buffer);
-typedef VOID (*EFI_EVENT_NOTIFY)(EFI_EVENT Event, VOID *Context);
 typedef EFI_STATUS (*EFI_CREATE_EVENT)(UINT32 Type, UINTN NotifyTpl,
                                         EFI_EVENT_NOTIFY NotifyFunction,
                                         VOID *NotifyContext,
@@ -825,7 +589,6 @@ typedef EFI_STATUS (*EFI_LOCATE_PROTOCOL)(void *Protocol, VOID *Registration,
 
 #define EFI_LOCATE_ALL_HANDLES        0
 #define EFI_LOCATE_BY_REGISTER_NOTIFY 1
-#define EFI_LOCATE_BY_PROTOCOL        2
 
 typedef EFI_STATUS (*EFI_INSTALL_MULTIPLE_PROTOCOL_INTERFACES)(EFI_HANDLE *Handle, ...);
 typedef EFI_STATUS (*EFI_UNINSTALL_MULTIPLE_PROTOCOL_INTERFACES)(EFI_HANDLE Handle, ...);
@@ -1831,9 +1594,6 @@ typedef struct {
     ACPI_END_TAG_DESCRIPTOR End;
 } __attribute__((packed)) FW_PCI_BAR_RESOURCES;
 
-#define FW_STATIC_ASSERT(cond, name) \
-    typedef char fw_static_assert_##name[(cond) ? 1 : -1]
-
 FW_STATIC_ASSERT(sizeof(ACPI_SDT_HEADER) == 36, acpi_sdt_header_size);
 FW_STATIC_ASSERT(sizeof(IA64_SAL_ENTRYPOINT_DESCRIPTOR) == 48,
                  sal_entrypoint_descriptor_size);
@@ -2194,34 +1954,23 @@ typedef struct {
     UINT64 DebugPortBase;
 } FW_HANDOFF_LEGACY;
 
-typedef struct {
-    FW_HANDOFF_HEADER Header;
-    UINT64 ConsolePolicy;
-    UINT64 IdeDmaEnabled;
-    UINT64 DebugPortFlags;
-    UINT64 DebugPortBase;
-    UINT64 I8042Enabled;
-    UINT64 ProcessorCount;
-    UINT64 NvramPersistent;
-} FW_HANDOFF;
-
-FW_STATIC_ASSERT(sizeof(FW_HANDOFF) == 80, fw_handoff_size);
-FW_STATIC_ASSERT(__builtin_offsetof(FW_HANDOFF, ProcessorCount) == 64,
+FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 80, fw_handoff_size);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                  fw_handoff_processor_count_offset);
-FW_STATIC_ASSERT(__builtin_offsetof(FW_HANDOFF, NvramPersistent) == 72,
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, NvramPersistent) == 72,
                  fw_handoff_nvram_persistent_offset);
 
 static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
 {
-    return Handoff->Magic == FW_HANDOFF_MAGIC &&
+    return Handoff->Magic == IA64_FW_HANDOFF_MAGIC &&
            Handoff->Version >= 1 &&
-           Handoff->Version <= FW_HANDOFF_VERSION;
+           Handoff->Version <= IA64_FW_HANDOFF_VERSION;
 }
 
 static BOOLEAN fw_handoff_ram_size(UINT64 *RamSize)
 {
     FW_HANDOFF_HEADER *handoff =
-        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
     UINT64 ram_size;
 
     if (!fw_handoff_valid(handoff)) {
@@ -2335,50 +2084,52 @@ UINT64 fw_boot_stack_top(void)
     return low_ram_end & ~(IA64_EFI_MEMORY_ALIGN - 1U);
 }
 
-static BOOLEAN fw_handoff_vga_console_primary(void)
+BOOLEAN fw_handoff_vga_console_primary(void)
 {
     FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
     if (!fw_handoff_valid(header) || header->Version < 3) {
         return 0;
     }
     if (header->Version >= 6) {
-        FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+        IA64VpcHandoff *handoff =
+            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
-        return handoff->ConsolePolicy == FW_CONSOLE_POLICY_VGA;
+        return handoff->ConsolePolicy == IA64_FW_CONSOLE_VGA;
     } else {
         FW_HANDOFF_LEGACY *handoff =
-            (FW_HANDOFF_LEGACY *)(UINTN)FW_HANDOFF_ADDR;
+            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
-        return handoff->ConsolePolicy == FW_CONSOLE_POLICY_VGA;
+        return handoff->ConsolePolicy == IA64_FW_CONSOLE_VGA;
     }
 }
 
 static BOOLEAN fw_handoff_ide_dma_enabled(void)
 {
     FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
     if (!fw_handoff_valid(header) || header->Version < 4) {
         return 1;
     }
     if (header->Version >= 6) {
-        FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+        IA64VpcHandoff *handoff =
+            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
         return handoff->IdeDmaEnabled != 0;
     } else {
         FW_HANDOFF_LEGACY *handoff =
-            (FW_HANDOFF_LEGACY *)(UINTN)FW_HANDOFF_ADDR;
+            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
         return handoff->IdeDmaEnabled != 0;
     }
 }
 
-static UINT64 fw_handoff_debug_port_base(void)
+UINT64 fw_handoff_debug_port_base(void)
 {
     FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
     UINT64 flags;
     UINT64 base;
 
@@ -2386,44 +2137,45 @@ static UINT64 fw_handoff_debug_port_base(void)
         return 0;
     }
     if (header->Version >= 6) {
-        FW_HANDOFF *handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+        IA64VpcHandoff *handoff =
+            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
         flags = handoff->DebugPortFlags;
         base = handoff->DebugPortBase;
     } else {
         FW_HANDOFF_LEGACY *handoff =
-            (FW_HANDOFF_LEGACY *)(UINTN)FW_HANDOFF_ADDR;
+            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
         flags = handoff->DebugPortFlags;
         base = handoff->DebugPortBase;
     }
-    return (flags & FW_HANDOFF_DEBUG_PORT_PRESENT) != 0 ? base : 0;
+    return (flags & IA64_FW_DEBUG_PORT_PRESENT) != 0 ? base : 0;
 }
 
-static BOOLEAN fw_handoff_i8042_enabled(void)
+BOOLEAN fw_handoff_i8042_enabled(void)
 {
     FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
-    FW_HANDOFF *handoff;
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
 
     if (!fw_handoff_valid(header) || header->Version < 7) {
         return 1;
     }
-    handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
     return handoff->I8042Enabled != 0;
 }
 
 static UINTN fw_handoff_processor_count(void)
 {
     FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
-    FW_HANDOFF *handoff;
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
     UINT64 count;
 
     if (!fw_handoff_valid(header) || header->Version < 8) {
         return 1;
     }
-    handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
     count = handoff->ProcessorCount;
     if (count == 0 || count > FW_MAX_CPUS) {
         return 1;
@@ -2431,16 +2183,16 @@ static UINTN fw_handoff_processor_count(void)
     return (UINTN)count;
 }
 
-static BOOLEAN fw_handoff_nvram_persistent(void)
+BOOLEAN fw_handoff_nvram_persistent(void)
 {
     FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)FW_HANDOFF_ADDR;
-    FW_HANDOFF *handoff;
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
 
     if (!fw_handoff_valid(header) || header->Version < 9) {
         return 0;
     }
-    handoff = (FW_HANDOFF *)(UINTN)FW_HANDOFF_ADDR;
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
     return handoff->NvramPersistent != 0;
 }
 
@@ -2508,11 +2260,11 @@ static UINT8                  mPs2KeyboardRaw[32];
 static UINTN                  mPs2KeyboardRawRead;
 static UINTN                  mPs2KeyboardRawWrite;
 static UINTN                  mPs2KeyboardRawCount;
-static BOOLEAN                mUsbKeyboardTried;
-static BOOLEAN                mUsbKeyboardReady;
-static BOOLEAN                mUsbKeyboardLowSpeed;
-static UINT8                  mUsbKeyboardPort;
-static FW_OHCI_HCCA           mUsbOhciHcca __attribute__((aligned(256)));
+BOOLEAN                       mUsbKeyboardTried;
+BOOLEAN                       mUsbKeyboardReady;
+BOOLEAN                       mUsbKeyboardLowSpeed;
+UINT8                         mUsbKeyboardPort;
+FW_OHCI_HCCA                  mUsbOhciHcca __attribute__((aligned(256)));
 static FW_OHCI_ED             mUsbOhciControlEd __attribute__((aligned(16)));
 static FW_OHCI_ED             mUsbOhciInterruptEd __attribute__((aligned(16)));
 static FW_OHCI_TD             mUsbOhciControlTd[4] __attribute__((aligned(16)));
@@ -2521,7 +2273,7 @@ static UINT8                  mUsbOhciSetupPacket[8] __attribute__((aligned(16))
 static UINT8                  mUsbOhciDataBuffer[64] __attribute__((aligned(16)));
 static UINT8                  mUsbKeyboardReport[OHCI_USB_KEYBOARD_REPORT_SIZE]
     __attribute__((aligned(16)));
-static UINT8                  mUsbKeyboardPreviousReport[OHCI_USB_KEYBOARD_REPORT_SIZE];
+UINT8                         mUsbKeyboardPreviousReport[OHCI_USB_KEYBOARD_REPORT_SIZE];
 static CHAR16                 mTextChars[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static UINT8                  mTextAttrs[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static BOOLEAN                mTextWrapPending;
@@ -2540,8 +2292,8 @@ static UINTN                  mRuntimeRtc = FW_RTC_BASE;
 static UINTN                  mRuntimeRtcState =
     FW_NVRAM_BASE + FW_NVRAM_RTC_OFFSET;
 
-static void fw_copy_mem(VOID *Destination, const VOID *Source, UINTN Length);
-static void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value);
+void fw_copy_mem(VOID *Destination, const VOID *Source, UINTN Length);
+void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value);
 static EFI_STATUS rs_get_boot0000_variable(UINT32 *Attributes,
                                            UINTN *DataSize, VOID *Data);
 static EFI_STATUS rs_convert_pointer_value(UINTN *Address);
@@ -2549,9 +2301,8 @@ static BOOLEAN ranges_overlap(UINT64 a_base, UINT64 a_size,
                               UINT64 b_base, UINT64 b_size);
 static BOOLEAN efi_pages_to_size(UINTN Pages, UINT64 *Size);
 static void fw_poll_timers(void);
-static UINT64 fw_read_itc(void);
+UINT64 fw_read_itc(void);
 static void nvram_commit(void);
-static void ps2_pointer_consume_byte(UINT8 Byte);
 
 typedef struct {
     BOOLEAN in_use;
@@ -2836,8 +2587,7 @@ static const UINT8 mHiiPackageListProtocolGuid[16];
 static const UINT8 mDebugImageInfoTableGuid[16];
 static const UINT8 mBlockIoProtocolGuid[16];
 static const UINT8 mDiskIoProtocolGuid[16];
-static const UINT8 mSimpleFileSystemProtocolGuid[16];
-static const UINT8 mDevicePathProtocolGuid[16];
+extern const UINT8 mDevicePathProtocolGuid[16];
 static const UINT8 mUnicodeCollationProtocolGuid[16];
 static const UINT8 mConInExProtocolGuid[16];
 static const UINT8 mConOutProtocolGuid[16];
@@ -2871,10 +2621,6 @@ static UINT64 pe_loaded_image_allocation_size(UINTN ImageSize,
 static void pe_release_loaded_image_memory(VOID *ImageBase, UINTN ImageSize,
                                            EFI_MEMORY_TYPE CodeType);
 static void pe_discard_loaded_image_result(PE_LOADED_IMAGE_RESULT *Result);
-static EFI_STATUS fw_ebc_create_image_thunk(EFI_HANDLE ImageHandle,
-                                            VOID *EbcEntryPoint,
-                                            VOID **Thunk);
-static EFI_STATUS fw_ebc_unload_for_image(EFI_HANDLE ImageHandle);
 static BOOLEAN efi_memory_map_has_ia64_descriptor_alignment(void);
 EFI_STATUS bs_handle_protocol(EFI_HANDLE Handle, void *Protocol,
                                VOID **Interface);
@@ -2893,7 +2639,6 @@ static EFI_STATUS fpswa_unload_image(EFI_HANDLE ImageHandle);
 static BOOLEAN fpswa_install_protocols(void);
 static BOOLEAN tcg_install_protocol(void);
 static BOOLEAN tcg_protocol_selftest(void);
-static VOID debug_support_exit_boot_services(VOID);
 EFI_STATUS bs_disconnect_controller(EFI_HANDLE ControllerHandle,
                                     EFI_HANDLE DriverImageHandle,
                                     EFI_HANDLE ChildHandle);
@@ -2930,7 +2675,6 @@ static BOOLEAN installed_protocol_interface(EFI_HANDLE Handle, void *Protocol,
                                              VOID **Interface);
 static BOOLEAN open_protocol_is_driver(UINT32 Attributes);
 static void clear_open_protocol_record(EFI_OPEN_PROTOCOL_RECORD *Rec);
-static UINT64 fw_read_psr(void);
 static BOOLEAN guid_matches(const void *Protocol, const UINT8 *Guid);
 static void copy_guid(UINT8 *Destination, const void *Source);
 static BOOLEAN open_protocol_attribute_legal(UINT32 Attributes);
@@ -4196,17 +3940,29 @@ static BOOLEAN acpi_published_range_valid(const VOID *Table, UINTN Size,
 
 /* --- UART helpers --------------------------------------------------------- */
 
-static volatile UINT8 *uart_reg(UINTN offset)
+volatile UINT8 *fw_uart_reg(UINTN offset)
 {
-    return (volatile UINT8 *)(UART_BASE + offset);
+    return (volatile UINT8 *)(IA64_UART_BASE + offset);
 }
 
-static UINT64 fw_read_psr(void)
+UINT64 fw_read_psr(void)
 {
     UINT64 psr;
 
     __asm__ volatile ("mov %0 = psr" : "=r"(psr));
     return psr;
+}
+
+void fw_flush_instruction_cache(VOID *start, UINTN bytes)
+{
+    UINTN address = (UINTN)start & ~(UINTN)31U;
+    UINTN end = ((UINTN)start + bytes + 31U) & ~(UINTN)31U;
+
+    while (address < end) {
+        __asm__ volatile ("fc %0" :: "r"(address) : "memory");
+        address += 32U;
+    }
+    __asm__ volatile ("sync.i;;\n\tsrlz.i;;" ::: "memory");
 }
 
 static UINT64 __attribute__((noinline)) fw_read_rsc(void)
@@ -4588,7 +4344,7 @@ static BOOLEAN __attribute__((noinline)) sal_loader_handoff_selftest(void)
 
 extern VOID fw_pal_halt_light(VOID);
 
-static UINT64 fw_read_ivr(void)
+UINT64 fw_read_ivr(void)
 {
     UINT64 vector;
 
@@ -4597,7 +4353,7 @@ static UINT64 fw_read_ivr(void)
     return vector & 0xffU;
 }
 
-static void fw_write_eoi(void)
+void fw_write_eoi(void)
 {
     __asm__ volatile ("mov cr.eoi = r0;;\n\tsrlz.d;;" : : : "memory");
 }
@@ -4662,26 +4418,26 @@ static void uart_putc(char c)
     }
 
     /* Some emulated paths don't expose a stable LSR_THRE bit early in boot. */
-    (void)*uart_reg(UART_LSR);
-    *uart_reg(UART_THR) = (UINT8)c;
+    (void)*fw_uart_reg(UART_LSR);
+    *fw_uart_reg(UART_THR) = (UINT8)c;
 }
 
 static BOOLEAN uart_can_read(void)
 {
-    return (*uart_reg(UART_LSR) & UART_LSR_DR) != 0;
+    return (*fw_uart_reg(UART_LSR) & UART_LSR_DR) != 0;
 }
 
 static UINT8 uart_getc(void)
 {
-    return *uart_reg(UART_RBR);
+    return *fw_uart_reg(UART_RBR);
 }
 
-static volatile UINT8 *ps2_reg(UINTN addr)
+volatile UINT8 *ps2_reg(UINTN addr)
 {
     return (volatile UINT8 *)addr;
 }
 
-static UINT8 ps2_read_status(void)
+UINT8 ps2_read_status(void)
 {
     if (!fw_handoff_i8042_enabled()) {
         return 0;
@@ -4713,7 +4469,7 @@ static BOOLEAN ps2_wait_output_full(void)
     return 0;
 }
 
-static BOOLEAN ps2_write_command(UINT8 command)
+BOOLEAN ps2_write_command(UINT8 command)
 {
     if (!ps2_wait_input_clear()) {
         return 0;
@@ -4722,7 +4478,7 @@ static BOOLEAN ps2_write_command(UINT8 command)
     return 1;
 }
 
-static BOOLEAN ps2_write_data(UINT8 data)
+BOOLEAN ps2_write_data(UINT8 data)
 {
     if (!ps2_wait_input_clear()) {
         return 0;
@@ -4731,7 +4487,7 @@ static BOOLEAN ps2_write_data(UINT8 data)
     return 1;
 }
 
-static BOOLEAN ps2_keyboard_raw_push(UINT8 Data)
+BOOLEAN ps2_keyboard_raw_push(UINT8 Data)
 {
     if (mPs2KeyboardRawCount == FW_ARRAY_SIZE(mPs2KeyboardRaw)) {
         return 0;
@@ -4826,7 +4582,7 @@ static void uart_puts(const char *s)
     }
 }
 
-static const char *efi_status_name(EFI_STATUS Status)
+const CHAR8 *efi_status_name(EFI_STATUS Status)
 {
     switch (Status) {
     case EFI_SUCCESS:             return "SUCCESS";
@@ -5443,7 +5199,7 @@ EFI_STATUS efi_conout_string(VOID *This, CHAR16 *String)
     return st;
 }
 
-static void efi_conout_ascii(const char *String)
+void efi_conout_ascii(const CHAR8 *String)
 {
     CHAR16 ch[2];
 
@@ -5939,7 +5695,7 @@ static EFI_STATUS ps2_read_key(EFI_INPUT_KEY *Key)
             code = *ps2_reg(PS2_DATA_PORT);
         }
         if ((status & PS2_STATUS_MOUSE_OBF) != 0) {
-            ps2_pointer_consume_byte(code);
+            fw_pointer_consume_byte(code);
             continue;
         }
 
@@ -6028,32 +5784,32 @@ static volatile UINT32 *usb_ohci_reg(UINTN Offset)
     return (volatile UINT32 *)(UINTN)(PCI_OHCI_MMIO_BAR + Offset);
 }
 
-static UINT32 usb_ohci_read(UINTN Offset)
+UINT32 usb_ohci_read(UINTN Offset)
 {
     return *usb_ohci_reg(Offset);
 }
 
-static void usb_ohci_write(UINTN Offset, UINT32 Value)
+void usb_ohci_write(UINTN Offset, UINT32 Value)
 {
     *usb_ohci_reg(Offset) = Value;
 }
 
-static UINT32 usb_ohci_phys(const VOID *Pointer)
+UINT32 usb_ohci_phys(const VOID *Pointer)
 {
     return (UINT32)(UINTN)Pointer;
 }
 
-static void usb_dma_barrier(void)
+void usb_dma_barrier(void)
 {
     __asm__ volatile ("" ::: "memory");
 }
 
-static UINT32 usb_ohci_ed_head(const FW_OHCI_ED *Ed)
+UINT32 usb_ohci_ed_head(const FW_OHCI_ED *Ed)
 {
     return ((volatile const FW_OHCI_ED *)Ed)->Head;
 }
 
-static UINT32 usb_ohci_ed_tail(const FW_OHCI_ED *Ed)
+UINT32 usb_ohci_ed_tail(const FW_OHCI_ED *Ed)
 {
     return ((volatile const FW_OHCI_ED *)Ed)->Tail;
 }
@@ -6070,9 +5826,9 @@ static UINT32 usb_ohci_td_flags(UINT32 Direction, BOOLEAN BufferRounding)
     return flags;
 }
 
-static void usb_ohci_init_td(FW_OHCI_TD *Td, UINT32 Direction,
-                             VOID *Buffer, UINTN Length, FW_OHCI_TD *Next,
-                             BOOLEAN BufferRounding)
+void usb_ohci_init_td(FW_OHCI_TD *Td, UINT32 Direction,
+                      VOID *Buffer, UINTN Length, FW_OHCI_TD *Next,
+                      BOOLEAN BufferRounding)
 {
     Td->Flags = usb_ohci_td_flags(Direction, BufferRounding);
     if (Length != 0) {
@@ -6085,7 +5841,7 @@ static void usb_ohci_init_td(FW_OHCI_TD *Td, UINT32 Direction,
     Td->Next = Next != NULL ? usb_ohci_phys(Next) : 0;
 }
 
-static UINT32 usb_ohci_td_condition_code(const FW_OHCI_TD *Td)
+UINT32 usb_ohci_td_condition_code(const FW_OHCI_TD *Td)
 {
     return ((volatile const FW_OHCI_TD *)Td)->Flags >> OHCI_TD_CC_SHIFT;
 }
@@ -6178,14 +5934,14 @@ static BOOLEAN usb_ohci_control_transfer(UINT8 DeviceAddress,
     return usb_ohci_wait_control_done(setup_td, status_td);
 }
 
-static BOOLEAN usb_ohci_controller_present(void)
+BOOLEAN usb_ohci_controller_present(void)
 {
     UINT32 revision = usb_ohci_read(OHCI_REG_REVISION);
 
     return revision != 0xffffffffU && (revision & 0xffU) == 0x10U;
 }
 
-static BOOLEAN usb_ohci_reset_controller(void)
+BOOLEAN usb_ohci_reset_controller(void)
 {
     UINTN spin;
 
@@ -6238,7 +5994,7 @@ static BOOLEAN usb_ohci_enable_keyboard_port(void)
     return 0;
 }
 
-static void usb_keyboard_submit_interrupt_td(void)
+void usb_keyboard_submit_interrupt_td(void)
 {
     UINT32 carry = usb_ohci_ed_head(&mUsbOhciInterruptEd) & OHCI_ED_C;
 
@@ -6262,7 +6018,7 @@ static void usb_keyboard_submit_interrupt_td(void)
     usb_dma_barrier();
 }
 
-static BOOLEAN __attribute__((noinline, used)) usb_keyboard_init(void)
+BOOLEAN __attribute__((noinline, used)) usb_keyboard_init(void)
 {
     UINTN i;
 
@@ -6506,7 +6262,7 @@ static BOOLEAN conin_uart_read_wait(UINT8 *ch)
     return 0;
 }
 
-static UINT16 conin_ansi_numeric_scan(UINTN Number)
+UINT16 conin_ansi_numeric_scan(UINTN Number)
 {
     switch (Number) {
     case 1:  return EFI_SCAN_HOME;
@@ -8179,9 +7935,9 @@ static BOOLEAN __attribute__((noinline)) uefi_stall_selftest(void)
 
 typedef UINT64 FW_UINT64_ALIAS __attribute__((may_alias));
 
-static void __attribute__((noinline)) fw_copy_mem(VOID *Destination,
-                                                  const VOID *Source,
-                                                  UINTN Length)
+void __attribute__((noinline)) fw_copy_mem(VOID *Destination,
+                                           const VOID *Source,
+                                           UINTN Length)
 {
     UINT8 *d = (UINT8 *)Destination;
     const UINT8 *s = (const UINT8 *)Source;
@@ -8279,7 +8035,7 @@ void *memcpy(void *Destination, const void *Source, size_t Length)
     return Destination;
 }
 
-static void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value)
+void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value)
 {
     UINT8 *p = (UINT8 *)Buffer;
     UINT64 pattern;
@@ -9566,7 +9322,7 @@ EFI_STATUS bs_create_event_ex(UINT32 Type, UINTN NotifyTpl,
                                   1, Event);
 }
 
-static UINT64 fw_read_itc(void)
+UINT64 fw_read_itc(void)
 {
     UINT64 tick;
 
@@ -11856,7 +11612,7 @@ EFI_STATUS bs_exit_boot_services(EFI_HANDLE ImageHandle, UINTN MapKey)
         return st;
     }
     fw_signal_exit_boot_services_events();
-    debug_support_exit_boot_services();
+    fw_debug_support_exit_boot_services();
     (void)bs_set_watchdog_timer(0, 0, 0, NULL);
     ahci_stop_all_ports();
     graphics_prepare_os_handoff(fw_handoff_vga_console_primary());
@@ -11913,26 +11669,6 @@ EFI_STATUS rs_convert_pointer(UINTN DebugDisposition, VOID **Address);
 
 /* --- EFI Time Services ----------------------------------------------------- */
 
-typedef struct {
-    UINT16  Year;
-    UINT8   Month;
-    UINT8   Day;
-    UINT8   Hour;
-    UINT8   Minute;
-    UINT8   Second;
-    UINT8   Pad1;
-    UINT32  Nanosecond;
-    INT16   TimeZone;
-    UINT8   Daylight;
-    UINT8   Pad2;
-} EFI_TIME;
-
-typedef struct {
-    UINT32  Resolution;
-    UINT32  Accuracy;
-    BOOLEAN SetsToZero;
-} EFI_TIME_CAPABILITIES;
-
 #define EFI_TIME_ADJUST_DAYLIGHT 0x01U
 #define EFI_TIME_IN_DAYLIGHT     0x02U
 #define EFI_TIME_DAYLIGHT_MASK   \
@@ -11982,7 +11718,7 @@ static UINT8 efi_time_days_in_month(UINT16 Year, UINT8 Month)
     return days[Month - 1U];
 }
 
-static BOOLEAN efi_time_valid(const EFI_TIME *Time)
+BOOLEAN efi_time_valid(const EFI_TIME *Time)
 {
     UINT8 days_in_month;
 
@@ -12869,11 +12605,13 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
             EfiMemoryMappedIO, PCI_CONFIG_ECAM_BASE,
             PCI_CONFIG_ECAM_BASE + PCI_CONFIG_ECAM_SIZE,
             EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) ||
-        !efi_memory_map_has_descriptor(EfiMemoryMappedIO, PCI_MMIO_BASE,
-                                       PCI_MMIO_BASE + PCI_MMIO_SIZE,
+        !efi_memory_map_has_descriptor(EfiMemoryMappedIO,
+                                       IA64_PCI_MMIO_BASE,
+                                       IA64_PCI_MMIO_BASE +
+                                           IA64_PCI_MMIO_SIZE,
                                        EFI_MEMORY_UC) ||
-        !efi_memory_map_has_descriptor(EfiMemoryMappedIO, UART_BASE,
-                                       UART_BASE + UART_MMIO_SIZE,
+        !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IA64_UART_BASE,
+                                       IA64_UART_BASE + IA64_UART_MMIO_SIZE,
                                        EFI_MEMORY_UC) ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIOPortSpace,
                                        LEGACY_IO_BASE,
@@ -13492,8 +13230,9 @@ static void efi_init_memory_map(void)
                          EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
 
     /* PCI host-bridge memory window, including VGA/AHCI/OHCI BAR space. */
-    efi_add_memory_range(&index, EfiMemoryMappedIO, PCI_MMIO_BASE,
-                         PCI_MMIO_BASE + PCI_MMIO_SIZE, EFI_MEMORY_UC);
+    efi_add_memory_range(&index, EfiMemoryMappedIO, IA64_PCI_MMIO_BASE,
+                         IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE,
+                         EFI_MEMORY_UC);
 
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_FIRMWARE_ADDRESS_SPACE_BASE,
@@ -13512,8 +13251,8 @@ static void efi_init_memory_map(void)
                          FW_FIRMWARE_ADDRESS_SPACE_END, EFI_MEMORY_UC);
 
     /* Reserve both platform UART pages described by HCDP and DBGP. */
-    efi_add_memory_range(&index, EfiMemoryMappedIO, UART_BASE,
-                         UART_BASE + UART_MMIO_SIZE, EFI_MEMORY_UC);
+    efi_add_memory_range(&index, EfiMemoryMappedIO, IA64_UART_BASE,
+                         IA64_UART_BASE + IA64_UART_MMIO_SIZE, EFI_MEMORY_UC);
 
     mMemoryMapEntries = index;
 }
@@ -14547,8 +14286,9 @@ static void efi_init_platform_tables(void)
     mHcdp.Uart[0].BaseAddress.BitWidth = 8;
     mHcdp.Uart[0].BaseAddress.BitOffset = 0;
     mHcdp.Uart[0].BaseAddress.Reserved = 0;
-    mHcdp.Uart[0].BaseAddress.AddressLow = (UINT32)UART_BASE;
-    mHcdp.Uart[0].BaseAddress.AddressHigh = (UINT32)(UART_BASE >> 32);
+    mHcdp.Uart[0].BaseAddress.AddressLow = (UINT32)IA64_UART_BASE;
+    mHcdp.Uart[0].BaseAddress.AddressHigh =
+        (UINT32)(IA64_UART_BASE >> 32);
     mHcdp.Uart[0].PciDeviceId = 0;
     mHcdp.Uart[0].PciVendorId = 0;
     mHcdp.Uart[0].GlobalInterrupt = 4;
@@ -18743,7 +18483,8 @@ static BOOLEAN lsi_mmio_bar_address(UINT32 Bar, UINT64 *Address)
     }
 
     mmio = Bar & ~(UINT64)0x0fU;
-    if (mmio < PCI_MMIO_BASE || mmio >= PCI_MMIO_BASE + PCI_MMIO_SIZE) {
+    if (mmio < IA64_PCI_MMIO_BASE ||
+        mmio >= IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE) {
         return 0;
     }
     *Address = mmio;
@@ -19413,8 +19154,8 @@ static BOOLEAN ahci_init_controller(void)
     bar = (UINT32)pci_config_read_value(0, location.Bus, location.Device,
                                         location.Function, 0x24U, 4);
     bar &= ~0x0fU;
-    if (bar < PCI_MMIO_BASE ||
-        bar > PCI_MMIO_BASE + PCI_MMIO_SIZE - 0x1000U) {
+    if (bar < IA64_PCI_MMIO_BASE ||
+        bar > IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE - 0x1000U) {
         return 0;
     }
     command = (UINT16)pci_config_read_value(
@@ -21281,77 +21022,12 @@ EFI_STATUS disk_write(EFI_DISK_IO_PROTOCOL *This, UINT32 MediaId,
 
 /* --- EFI Simple File System backed by the El Torito FAT image ------------- */
 
-#define EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_REVISION 0x00010000
-#define EFI_FILE_PROTOCOL_REVISION              0x00010000
-#define EFI_FILE_MODE_READ                      0x0000000000000001ULL
-#define EFI_FILE_MODE_WRITE                     0x0000000000000002ULL
-#define EFI_FILE_MODE_CREATE                    0x8000000000000000ULL
-#define EFI_FILE_READ_ONLY                      0x0000000000000001ULL
-#define EFI_FILE_HIDDEN                         0x0000000000000002ULL
-#define EFI_FILE_SYSTEM                         0x0000000000000004ULL
-#define EFI_FILE_DIRECTORY                      0x0000000000000010ULL
-#define EFI_FILE_ARCHIVE                        0x0000000000000020ULL
-#define EFI_FILE_VALID_ATTR                     0x0000000000000037ULL
-
-typedef struct _EFI_FILE_PROTOCOL EFI_FILE_PROTOCOL;
-typedef EFI_FILE_PROTOCOL *EFI_FILE_HANDLE;
-
-typedef struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
-    UINT64 Revision;
-    EFI_STATUS (*OpenVolume)(struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *This,
-                             EFI_FILE_HANDLE *Root);
-} EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
-
-struct _EFI_FILE_PROTOCOL {
-    UINT64 Revision;
-    EFI_STATUS (*Open)(EFI_FILE_PROTOCOL *This, EFI_FILE_HANDLE *NewHandle,
-                       CHAR16 *FileName, UINT64 OpenMode, UINT64 Attributes);
-    EFI_STATUS (*Close)(EFI_FILE_PROTOCOL *This);
-    EFI_STATUS (*Delete)(EFI_FILE_PROTOCOL *This);
-    EFI_STATUS (*Read)(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
-                       VOID *Buffer);
-    EFI_STATUS (*Write)(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
-                        VOID *Buffer);
-    EFI_STATUS (*GetPosition)(EFI_FILE_PROTOCOL *This, UINT64 *Position);
-    EFI_STATUS (*SetPosition)(EFI_FILE_PROTOCOL *This, UINT64 Position);
-    EFI_STATUS (*GetInfo)(EFI_FILE_PROTOCOL *This, void *InformationType,
-                          UINTN *BufferSize, VOID *Buffer);
-    EFI_STATUS (*SetInfo)(EFI_FILE_PROTOCOL *This, void *InformationType,
-                          UINTN BufferSize, VOID *Buffer);
-    EFI_STATUS (*Flush)(EFI_FILE_PROTOCOL *This);
-};
-
-typedef struct {
-    UINT64 Size;
-    UINT64 FileSize;
-    UINT64 PhysicalSize;
-    UINT8  CreateTime[16];
-    UINT8  LastAccessTime[16];
-    UINT8  ModificationTime[16];
-    UINT64 Attribute;
-    CHAR16 FileName[1];
-} FW_EFI_FILE_INFO;
-
-typedef struct {
-    UINT64 Size;
-    BOOLEAN ReadOnly;
-    UINT8 Reserved[7];
-    UINT64 VolumeSize;
-    UINT64 FreeSpace;
-    UINT32 BlockSize;
-    CHAR16 VolumeLabel[1];
-} FW_EFI_FILE_SYSTEM_INFO;
-
-typedef struct {
-    CHAR16 VolumeLabel[1];
-} FW_EFI_FILE_SYSTEM_VOLUME_LABEL;
-
-static const UINT8 mFileInfoGuid[16] = {
+const UINT8 mFileInfoGuid[16] = {
     0x92, 0x6e, 0x57, 0x09, 0x3f, 0x6d, 0xd2, 0x11,
     0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b
 };
 
-static const UINT8 mFileSystemInfoGuid[16] = {
+const UINT8 mFileSystemInfoGuid[16] = {
     0x93, 0x6e, 0x57, 0x09, 0x3f, 0x6d, 0xd2, 0x11,
     0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b
 };
@@ -21499,12 +21175,6 @@ static VOID fw_padded_ascii_to_char16(const UINT8 *Source, UINTN SourceSize,
 }
 
 typedef struct {
-    UINT8 Type;
-    UINT8 SubType;
-    UINT16 Length;
-} __attribute__((packed)) FW_DEVICE_PATH_NODE;
-
-typedef struct {
     FW_DEVICE_PATH_NODE Header;
     UINT32 BootEntry;
     UINT64 PartitionStart;
@@ -21525,18 +21195,6 @@ FW_STATIC_ASSERT(sizeof(FW_HARD_DRIVE_DEVICE_PATH_NODE) == 42U,
                  hard_drive_device_path_size);
 
 #define FW_IA64_ABI_HARD_DRIVE_DEVICE_PATH_SIZE 48U
-
-typedef struct {
-    FW_DEVICE_PATH_NODE Header;
-    UINT32 Hid;
-    UINT32 Uid;
-} __attribute__((packed)) FW_ACPI_HID_DEVICE_PATH_NODE;
-
-typedef struct {
-    FW_DEVICE_PATH_NODE Header;
-    UINT8 Function;
-    UINT8 Device;
-} __attribute__((packed)) FW_PCI_DEVICE_PATH_NODE;
 
 typedef struct {
     FW_DEVICE_PATH_NODE Header;
@@ -22283,7 +21941,7 @@ static UINTN fw_device_path_size(const VOID *Path)
     return 0;
 }
 
-static EFI_STATUS fw_build_file_device_path(
+EFI_STATUS fw_build_file_device_path(
     EFI_HANDLE DeviceHandle, const FW_DEVICE_PATH_NODE *FilePath,
     UINT8 *Buffer, UINTN BufferSize)
 {
@@ -23357,7 +23015,7 @@ static BOOLEAN fw_set_loaded_image_load_options(EFI_HANDLE ImageHandle,
     return 1;
 }
 
-static EFI_STATUS fw_copy_loaded_image_load_options(EFI_HANDLE ImageHandle,
+EFI_STATUS fw_copy_loaded_image_load_options(EFI_HANDLE ImageHandle,
                                                     const VOID *LoadOptions,
                                                     UINT32 LoadOptionsSize,
                                                     VOID **AllocatedOptions)
@@ -23389,7 +23047,7 @@ static EFI_STATUS fw_copy_loaded_image_load_options(EFI_HANDLE ImageHandle,
     return EFI_SUCCESS;
 }
 
-static EFI_STATUS fw_release_loaded_image_load_options(
+EFI_STATUS fw_release_loaded_image_load_options(
     EFI_HANDLE ImageHandle, VOID *AllocatedOptions)
 {
     EFI_LOADED_IMAGE_RECORD *rec = fw_loaded_image_record(ImageHandle);
@@ -24207,7 +23865,7 @@ EFI_STATUS bs_locate_device_path(void *Protocol, void **DevicePath,
     return EFI_SUCCESS;
 }
 
-static UINT8 fw_ascii_upper(UINT8 c)
+UINT8 fw_ascii_upper(UINT8 c)
 {
     return (c >= 'a' && c <= 'z') ? (UINT8)(c - ('a' - 'A')) : c;
 }
@@ -26750,7 +26408,7 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
     return EFI_SUCCESS;
 }
 
-static UINTN fw_char16_bounded_len(const CHAR16 *name, UINTN Maximum)
+UINTN fw_char16_bounded_len(const CHAR16 *name, UINTN Maximum)
 {
     UINTN len = 0;
 
@@ -27770,7 +27428,6 @@ static const UINT8 mDebugImageInfoTableGuid[16] = {
 #define NVRAM_STORE_VERSION 1U
 #define NVRAM_VAR_MAX 32
 #define NVRAM_VAR_NAME_MAX 64
-#define NVRAM_VAR_DATA_MAX 1024
 #define NVRAM_VAR_STORAGE_OVERHEAD (16U + sizeof(UINT32))
 #define NVRAM_VAR_SLOT_STORAGE \
     (NVRAM_VAR_NAME_MAX * sizeof(CHAR16) + NVRAM_VAR_DATA_MAX + \
@@ -27810,7 +27467,7 @@ static BOOLEAN mNvramSelftestActive;
 #define mNvramVars (mNvramStore->vars)
 #define mNvramVarCount (mNvramStore->count)
 
-static const UINT8 mEfiGlobalVariableGuid[16] = {
+const UINT8 mEfiGlobalVariableGuid[16] = {
     0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11,
     0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c
 };
@@ -27993,8 +27650,8 @@ static BOOLEAN fw_char16_eq_ascii_z(const CHAR16 *s, const char *ascii)
 
 /* --- Protocol handling ---------------------------------------------------- */
 
-#include "decompress.c"
-#include "ebc.c"
+#include "fw-decompress.h"
+#include "fw-ebc.h"
 
 static const UINT8 mBlockIoProtocolGuid[16] = {
     0x21, 0x5b, 0x4e, 0x96, 0x59, 0x64, 0xd2, 0x11,
@@ -28006,12 +27663,12 @@ static const UINT8 mDiskIoProtocolGuid[16] = {
     0x8e, 0x4f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b
 };
 
-static const UINT8 mSimpleFileSystemProtocolGuid[16] = {
+const UINT8 mSimpleFileSystemProtocolGuid[16] = {
     0x22, 0x5b, 0x4e, 0x96, 0x59, 0x64, 0xd2, 0x11,
     0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b
 };
 
-static const UINT8 mDevicePathProtocolGuid[16] = {
+const UINT8 mDevicePathProtocolGuid[16] = {
     0x91, 0x6e, 0x57, 0x09, 0x3f, 0x6d, 0xd2, 0x11,
     0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b
 };
@@ -28118,10 +27775,10 @@ static const FW_PCI_ROOT_BRIDGE_RESOURCES mPciRootBridgeResources = {
         .GeneralFlags = 0,
         .TypeSpecificFlags = 0,
         .AddressSpaceGranularity = 64,
-        .AddressRangeMinimum = PCI_MMIO_BASE,
+        .AddressRangeMinimum = IA64_PCI_MMIO_BASE,
         .AddressRangeMaximum = PCI_MMIO_END,
         .AddressTranslationOffset = PCI_MMIO_TRANSLATION_OFFSET,
-        .AddressLength = PCI_MMIO_SIZE,
+        .AddressLength = IA64_PCI_MMIO_SIZE,
     },
     .End = {
         .Descriptor = 0x79,
@@ -28217,10 +27874,10 @@ static UINTN pci_width_size(EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH Width)
 
 static UINT64 pci_mem_cpu_addr(UINT64 Address)
 {
-    if (Address >= PCI_MMIO_BASE) {
+    if (Address >= IA64_PCI_MMIO_BASE) {
         return Address;
     }
-    return PCI_MMIO_BASE + Address;
+    return IA64_PCI_MMIO_BASE + Address;
 }
 
 static UINT64 pci_io_cpu_addr(UINT64 Address)
@@ -33100,16 +32757,274 @@ VOID rs_reset_system(UINTN ResetType, EFI_STATUS ResetStatus,
     while (1) {}
 }
 
-#include "legacy_io.c"
-#include "debug_protocols.c"
-#include "debug_support.c"
-#include "usb_protocols.c"
-#include "pointer_protocol.c"
-#include "uga_io.c"
+BOOLEAN fw_graphics_present(VOID)
+{
+    return fw_pci_io_device_present(&mPciIoDevices[5]);
+}
+
+UINT64 fw_graphics_bar_length(VOID)
+{
+    return fw_pci_io_expected_bar_length(&mPciIoDevices[5]);
+}
+
+UINT64 fw_graphics_framebuffer_base(VOID)
+{
+    return VGA_FB_BASE;
+}
+
+UINT64 fw_graphics_framebuffer_size(VOID)
+{
+    return mGopMode.FrameBufferSize;
+}
+
+UINT32 fw_graphics_pixels_per_scan_line(VOID)
+{
+    return mGopMode.Info->PixelsPerScanLine;
+}
+
+EFI_STATUS fw_graphics_reset_current_mode(BOOLEAN redraw_text)
+{
+    return graphics_select_mode(mGopMode.Mode, redraw_text);
+}
+
+EFI_STATUS fw_graphics_set_uga_mode(UINT32 horizontal, UINT32 vertical,
+                                    UINT32 color_depth, UINT32 refresh_rate)
+{
+    return uga_set_mode(&mUgaDrawProto, horizontal, vertical, color_depth,
+                        refresh_rate);
+}
+
+EFI_HANDLE fw_graphics_handle(VOID)
+{
+    return mGraphicsHandle;
+}
+
+BOOLEAN fw_protocol_interface_installed(EFI_HANDLE handle, VOID *protocol,
+                                        VOID **interface)
+{
+    return installed_protocol_interface(handle, protocol, interface);
+}
+
+VOID *fw_system_table(VOID)
+{
+    return &mSystemTable;
+}
+
+EFI_HANDLE fw_usb_controller_handle(VOID)
+{
+    return mPciOhciHandle;
+}
+
+void fw_usb_controller_device_path(FW_ACPI_HID_DEVICE_PATH_NODE *acpi,
+                                   FW_PCI_DEVICE_PATH_NODE *pci,
+                                   FW_DEVICE_PATH_NODE *end)
+{
+    *acpi = mPciOhciDevicePath.Acpi;
+    *pci = mPciOhciDevicePath.Pci;
+    *end = mEndDevicePath;
+}
+
+EFI_STATUS fw_pci_root_read(FW_PCI_ROOT_SPACE space, UINTN width,
+                            UINT64 address, UINTN count, VOID *buffer)
+{
+    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH root_width =
+        (EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH)width;
+
+    switch (space) {
+    case FwPciRootMemory:
+        return pci_root_mem_read(&mPciRootBridgeIoProto, root_width,
+                                 address, count, buffer);
+    case FwPciRootIo:
+        return pci_root_io_read(&mPciRootBridgeIoProto, root_width,
+                                address, count, buffer);
+    case FwPciRootConfiguration:
+        return pci_root_cfg_read(&mPciRootBridgeIoProto, root_width,
+                                 address, count, buffer);
+    default:
+        return EFI_INVALID_PARAMETER;
+    }
+}
+
+EFI_STATUS fw_pci_root_write(FW_PCI_ROOT_SPACE space, UINTN width,
+                             UINT64 address, UINTN count, VOID *buffer)
+{
+    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH root_width =
+        (EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH)width;
+
+    switch (space) {
+    case FwPciRootMemory:
+        return pci_root_mem_write(&mPciRootBridgeIoProto, root_width,
+                                  address, count, buffer);
+    case FwPciRootIo:
+        return pci_root_io_write(&mPciRootBridgeIoProto, root_width,
+                                 address, count, buffer);
+    case FwPciRootConfiguration:
+        return pci_root_cfg_write(&mPciRootBridgeIoProto, root_width,
+                                  address, count, buffer);
+    default:
+        return EFI_INVALID_PARAMETER;
+    }
+}
+
+EFI_STATUS fw_pci_root_map(UINTN operation, VOID *host_address,
+                           UINTN *number_of_bytes,
+                           EFI_PHYSICAL_ADDRESS *device_address,
+                           VOID **mapping)
+{
+    return pci_root_map(
+        &mPciRootBridgeIoProto,
+        (EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_OPERATION)operation,
+        host_address, number_of_bytes, device_address, mapping);
+}
+
+EFI_STATUS fw_pci_root_unmap(VOID *mapping)
+{
+    return pci_root_unmap(&mPciRootBridgeIoProto, mapping);
+}
+
+EFI_STATUS fw_pci_root_allocate_buffer(EFI_ALLOCATE_TYPE type,
+                                       EFI_MEMORY_TYPE memory_type,
+                                       UINTN pages, VOID **host_address)
+{
+    return pci_root_allocate_buffer(&mPciRootBridgeIoProto, type,
+                                    memory_type, pages, host_address, 0);
+}
+
+EFI_STATUS fw_pci_root_free_buffer(UINTN pages, VOID *host_address)
+{
+    return pci_root_free_buffer(&mPciRootBridgeIoProto, pages, host_address);
+}
+
+EFI_STATUS fw_pci_root_flush(VOID)
+{
+    return pci_root_flush(&mPciRootBridgeIoProto);
+}
+
+EFI_STATUS fw_pci_copy_device_path(UINT8 bus, UINT8 device, UINT8 function,
+                                   FW_DEVICE_PATH_NODE **path)
+{
+    UINTN i;
+
+    if (path == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    *path = NULL;
+    for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+        const FW_PCI_IO_DEVICE *dev = &mPciIoDevices[i];
+        UINTN path_size;
+        VOID *copy;
+
+        if (!fw_pci_io_device_present(dev) || dev->Bus != bus ||
+            dev->Device != device || dev->Function != function ||
+            dev->DevicePath == NULL) {
+            continue;
+        }
+        path_size = fw_device_path_size(dev->DevicePath);
+        if (path_size == 0) {
+            return EFI_UNSUPPORTED;
+        }
+        if (bs_allocate_pool(EfiBootServicesData, path_size, &copy) !=
+            EFI_SUCCESS) {
+            return EFI_OUT_OF_RESOURCES;
+        }
+        fw_copy_mem(copy, dev->DevicePath, path_size);
+        *path = copy;
+        return EFI_SUCCESS;
+    }
+    return EFI_UNSUPPORTED;
+}
+
+EFI_HANDLE fw_pci_root_handle(VOID)
+{
+    return mPciRootBridgeHandle;
+}
+
+BOOLEAN fw_scsi_controller_present(VOID)
+{
+    return mLsiPresent != 0;
+}
+
+BOOLEAN fw_scsi_device_present(UINTN target)
+{
+    return target < SCSI_DEVICE_MAX && mScsiDevices[target].present != 0;
+}
+
+EFI_HANDLE fw_scsi_controller_handle(VOID)
+{
+    return mPciLsiHandle;
+}
+
+FW_LSI_SCRIPT_RESULT fw_scsi_execute_buffered(
+    UINT8 target, const UINT8 *cdb, UINTN cdb_length, VOID *data,
+    UINT32 data_length, BOOLEAN write_to_device, UINT64 timeout_100ns,
+    UINT8 *target_status)
+{
+    LSI_SCRIPT_RESULT result;
+
+    if (cdb == NULL || cdb_length == 0 || cdb_length > sizeof(mLsiCdb) ||
+        data_length > sizeof(mScsiBounce) ||
+        (data_length != 0 && data == NULL)) {
+        return FwLsiScriptDeviceError;
+    }
+    fw_set_mem(mLsiCdb, sizeof(mLsiCdb), 0);
+    fw_copy_mem(mLsiCdb, cdb, cdb_length);
+    if (data_length != 0) {
+        if (write_to_device) {
+            fw_copy_mem(mScsiBounce, data, data_length);
+        } else {
+            fw_set_mem(mScsiBounce, data_length, 0);
+        }
+    }
+    result = lsi_run_scsi_script_timed(
+        target, mLsiCdb, cdb_length,
+        data_length != 0 ? mScsiBounce : NULL, data_length,
+        timeout_100ns, target_status);
+    if (!write_to_device && data_length != 0 &&
+        (result == LsiScriptSuccess || result == LsiScriptTargetStatus)) {
+        fw_copy_mem(data, mScsiBounce, data_length);
+    }
+    return (FW_LSI_SCRIPT_RESULT)result;
+}
+
+EFI_STATUS fw_scsi_reset_channel(VOID)
+{
+    UINT8 scntl1;
+
+    lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_ABRT);
+    scntl1 = lsi_read8(LSI_REG_SCNTL1);
+    lsi_write8(LSI_REG_SCNTL1, scntl1 | LSI_SCNTL1_RST);
+    if (bs_stall(25U) != EFI_SUCCESS) {
+        return EFI_DEVICE_ERROR;
+    }
+    lsi_write8(LSI_REG_SCNTL1, scntl1 & ~LSI_SCNTL1_RST);
+    if (bs_stall(250000U) != EFI_SUCCESS) {
+        return EFI_DEVICE_ERROR;
+    }
+    lsi_write8(LSI_REG_SCID, SCSI_HOST_ID);
+    lsi_write8(LSI_REG_RESPID0, (UINT8)(1U << SCSI_HOST_ID));
+    lsi_write8(LSI_REG_SIEN0, 0);
+    lsi_write8(LSI_REG_SIEN1, 0);
+    lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_INTF);
+    return EFI_SUCCESS;
+}
+
+FW_LSI_SCRIPT_RESULT fw_scsi_reset_target(UINT8 target,
+                                           UINT64 timeout_100ns)
+{
+    return (FW_LSI_SCRIPT_RESULT)lsi_reset_scsi_target(target,
+                                                        timeout_100ns);
+}
+
+#include "fw-legacy-io.h"
+#include "fw-debug-port.h"
+#include "fw-debug-support.h"
+#include "fw-usb.h"
+#include "fw-pointer.h"
+#include "fw-uga-io.h"
 
 /* --- Updated boot path using FAT + Block I/O ----------------------------- */
 
-static void fw_boot_option_name(UINT16 Option, CHAR16 Name[9])
+void fw_boot_option_name(UINT16 Option, CHAR16 Name[9])
 {
     static const CHAR16 hex[] = {
         '0', '1', '2', '3', '4', '5', '6', '7',
@@ -33127,8 +33042,8 @@ static void fw_boot_option_name(UINT16 Option, CHAR16 Name[9])
     Name[8] = 0;
 }
 
-static UINTN fw_load_option_description_size(const UINT8 *Option,
-                                             UINTN OptionSize)
+UINTN fw_load_option_description_size(const UINT8 *Option,
+                                      UINTN OptionSize)
 {
     UINTN offset = sizeof(UINT32) + sizeof(UINT16);
 
@@ -33261,7 +33176,7 @@ static EFI_STATUS boot_image_from_load_option(UINT16 OptionNumber,
     return st;
 }
 
-static EFI_STATUS boot_image_from_boot_option(UINT16 OptionNumber)
+EFI_STATUS fw_boot_image_from_boot_option(UINT16 OptionNumber)
 {
     /* Do not retain a large firmware stack frame across StartImage(). */
     static UINT8 option[NVRAM_VAR_DATA_MAX];
@@ -33307,7 +33222,7 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_boot_order(void)
         /* BootNext is a one-shot request and must be consumed before use. */
         (void)rs_set_variable(boot_next_name,
                               (void *)mEfiGlobalVariableGuid, 0, 0, NULL);
-        last = boot_image_from_boot_option(boot_next);
+        last = fw_boot_image_from_boot_option(boot_next);
         if (last == EFI_SUCCESS || mBootServicesExited) {
             return last;
         }
@@ -33324,7 +33239,7 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_boot_order(void)
     }
 
     for (i = 0; i < order_size / sizeof(UINT16); i++) {
-        last = boot_image_from_boot_option(order[i]);
+        last = fw_boot_image_from_boot_option(order[i]);
         if (last == EFI_SUCCESS || mBootServicesExited) {
             return last;
         }
@@ -33388,7 +33303,104 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
     return st;
 }
 
-#include "boot_shell.c"
+EFI_STATUS fw_console_read_key(EFI_INPUT_KEY *key)
+{
+    return mConInProto.ReadKeyStroke(&mConInProto, key);
+}
+
+EFI_STATUS fw_console_clear(VOID)
+{
+    return mConOutProto.ClearScreen(&mConOutProto);
+}
+
+BOOLEAN fw_boot_services_exited(VOID)
+{
+    return mBootServicesExited;
+}
+
+EFI_STATUS fw_load_image(BOOLEAN boot_policy, VOID *device_path,
+                         EFI_HANDLE *image)
+{
+    return mBootServices.LoadImage(boot_policy, mImageHandle, device_path,
+                                   NULL, 0, image);
+}
+
+EFI_STATUS fw_start_image(EFI_HANDLE image)
+{
+    return mBootServices.StartImage(image, NULL, NULL);
+}
+
+EFI_STATUS fw_unload_image(EFI_HANDLE image)
+{
+    return mBootServices.UnloadImage(image);
+}
+
+EFI_STATUS fw_set_watchdog_timeout(UINTN timeout_seconds)
+{
+    return mBootServices.SetWatchdogTimer(timeout_seconds, 0, 0, NULL);
+}
+
+void fw_set_sal_loader_handoff_pending(BOOLEAN pending)
+{
+    mSalLoaderHandoffPending = pending;
+}
+
+UINTN fw_partition_count(VOID)
+{
+    UINTN count = 0;
+    UINTN index;
+
+    for (index = 0; index < FW_ARRAY_SIZE(mPartitions); index++) {
+        if (mPartitions[index].in_use) {
+            count++;
+        }
+    }
+    return count;
+}
+
+UINTN fw_processor_count(VOID)
+{
+    return mProcessorCount;
+}
+
+UINT64 fw_installed_ram_size(VOID)
+{
+    return mGuestRamSize;
+}
+
+UINT32 fw_graphics_width(VOID)
+{
+    return mGraphicsWidth;
+}
+
+UINT32 fw_graphics_height(VOID)
+{
+    return mGraphicsHeight;
+}
+
+const CHAR8 *fw_storage_description(BOOLEAN boot_device)
+{
+    FW_STORAGE_DEVICE *device = boot_device ?
+        &mBootStorageDevice : &mDiskStorageDevice;
+
+    if (!storage_device_present(device)) {
+        return "none";
+    }
+    if (device->Kind == FW_STORAGE_SCSI) {
+        return storage_is_cd(device) ? "SCSI optical" : "SCSI disk";
+    }
+    if (device->Kind == FW_STORAGE_AHCI) {
+        return storage_is_cd(device) ? "SATA optical" : "SATA disk";
+    }
+    return storage_is_cd(device) ? "IDE optical" : "IDE disk";
+}
+
+void fw_reset_cold(VOID)
+{
+    rs_reset_system(EFI_RESET_COLD, EFI_SUCCESS, 0, NULL);
+}
+
+#include "fw-boot-shell.h"
 
 /* --- Firmware Entry Point (updated) --------------------------------------- */
 
@@ -33467,8 +33479,9 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     {
         EFI_HANDLE handle = mArchitecturalHandle;
 
-        if (bs_install_protocol(&handle, (void *)mDecompressProtocolGuid, 0,
-                                &mDecompressProto) != EFI_SUCCESS) {
+        if (bs_install_protocol(&handle,
+                                (void *)fw_decompress_protocol_guid, 0,
+                                &fw_decompress_protocol) != EFI_SUCCESS) {
             uart_puts("Decompress Protocol:   installation failed\r\n");
         }
     }
@@ -33718,23 +33731,23 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
         mFpswaHandle = NULL;
     }
     mPciRootBridgeIoProto.ParentHandle = mPciRootBridgeHandle;
-    if (!legacy_io_protocols_install()) {
+    if (!fw_legacy_io_protocols_install()) {
         uart_puts("Platform I/O Protocols: installation failed\r\n");
     }
-    if (!debug_protocols_install()) {
+    if (!fw_debug_port_install()) {
         uart_puts("Debug Port Protocol:   installation failed\r\n");
     }
-    if (!debug_support_install()) {
+    if (!fw_debug_support_install()) {
         uart_puts("Debug Support Protocol: installation failed\r\n");
     }
-    if (!usb_protocols_install()) {
+    if (!fw_usb_protocols_install()) {
         uart_puts("USB Protocols:         installation failed\r\n");
     }
-    if (!simple_pointer_install()) {
+    if (!fw_pointer_install()) {
         uart_puts("Pointer Protocol:      installation failed\r\n");
     }
     efi_init_graphics();
-    if (!uga_io_install()) {
+    if (!fw_uga_io_install()) {
         uart_puts("UGA I/O Protocol:       installation failed\r\n");
     }
     efi_conout_ascii("QEMU IA-64 EFI firmware\r\n");
@@ -33796,11 +33809,11 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "HID boot report decode verified\r\n" :
               "verification failed\r\n");
     uart_puts("USB Protocols:        ");
-    uart_puts(usb_protocols_selftest() ?
+    uart_puts(fw_usb_protocols_selftest() ?
               "host and device interfaces verified\r\n" :
               "verification failed\r\n");
     uart_puts("Simple Pointer:       ");
-    uart_puts(simple_pointer_selftest() ?
+    uart_puts(fw_pointer_selftest() ?
               "relative motion and buttons verified\r\n" :
               "verification failed\r\n");
     uart_puts("Console In Ex:        ");
@@ -33821,28 +33834,28 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "native thunk and byte-code execution verified\r\n" :
               "verification failed\r\n");
     uart_puts("Platform I/O:         ");
-    uart_puts(legacy_io_protocols_selftest() ?
+    uart_puts(fw_legacy_io_protocols_selftest() ?
               "device, serial, and SCSI interfaces verified\r\n" :
               "verification failed\r\n");
     uart_puts("Debug Port:           ");
     if (fw_handoff_debug_port_base() == 0) {
-        uart_puts(debug_protocols_selftest() ?
+        uart_puts(fw_debug_port_selftest() ?
                   "not exposed (no debug UART)\r\n" :
                   "verification failed\r\n");
     } else {
-        uart_puts(debug_protocols_selftest() ?
+        uart_puts(fw_debug_port_selftest() ?
                   "byte-stream protocol verified\r\n" :
                   "verification failed\r\n");
     }
     uart_puts("Debug Support:        ");
-    uart_puts(debug_support_selftest() ?
+    uart_puts(fw_debug_support_selftest() ?
               "exception and periodic callbacks verified\r\n" :
               "verification failed\r\n");
     uart_puts("Graphics Output:      GOP/UGA VGA BGRx "
               "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
               "1280x1024x32 @ 0xc4000000\r\n");
     uart_puts("UGA I/O Protocol:     ");
-    uart_puts(uga_io_selftest() ?
+    uart_puts(fw_uga_io_selftest() ?
               "device tree and request dispatch verified\r\n" :
               "verification failed\r\n");
     uart_puts("GOP SetMode Test:     ");
@@ -34015,7 +34028,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("BOOT path:            SCSI/SATA/ATA Block I/O + FAT resolver\r\n");
     uart_puts("\r\nFirmware ready.\r\n");
 
-    if (fw_shell_hotkey_window()) {
+    if (fw_boot_shell_hotkey_window()) {
         fw_boot_shell_run();
     }
     if (mBootServicesExited) {

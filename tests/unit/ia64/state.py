@@ -12,6 +12,9 @@ class StateParseError(RuntimeError):
     pass
 
 
+IA64_STATE_SCHEMA_VERSION = 1
+
+
 @dataclass(frozen=True)
 class ExpectedFP:
     low: int
@@ -89,6 +92,7 @@ class StateExpectation:
 
 @dataclass
 class Ia64State:
+    schema_version: int | None = None
     ip: int | None = None
     psr: int | None = None
     halted: bool | None = None
@@ -207,7 +211,17 @@ def parse_state(output: str, *, require_fpu: bool = True) -> Ia64State:
         kind, rest = match.groups()
         values = _fields(rest or "")
 
-        if kind == "META":
+        if kind == "SCHEMA":
+            if kind in seen:
+                raise StateParseError(f"duplicate IA64STATE {kind} record")
+            _required(values, ("version",), kind)
+            version = values["version"]
+            if version != IA64_STATE_SCHEMA_VERSION:
+                raise StateParseError(
+                    f"unsupported IA64STATE schema version {version}")
+            state.schema_version = version
+            seen.add(kind)
+        elif kind == "META":
             if kind in seen:
                 raise StateParseError(f"duplicate IA64STATE {kind} record")
             _required(values, ("ip", "psr", "halted"), kind)
@@ -283,8 +297,9 @@ def parse_state(output: str, *, require_fpu: bool = True) -> Ia64State:
         else:
             raise StateParseError(f"unknown IA64STATE record {kind!r}")
 
-    missing_kinds = sorted({"META", "EXCEPTION", "GRNAT", "PR", "AR", "CFM"}
-                           - seen)
+    missing_kinds = sorted({
+        "SCHEMA", "META", "EXCEPTION", "GRNAT", "PR", "AR", "CFM",
+    } - seen)
     if missing_kinds:
         raise StateParseError("missing IA64STATE records: " +
                               ", ".join(missing_kinds))

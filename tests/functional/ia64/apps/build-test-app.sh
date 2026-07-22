@@ -6,6 +6,7 @@ output="$1"
 source="$2"
 linker_script="$3"
 image_base="${4:-0x4000000}"
+common_source="${5:-}"
 output_dir=$(dirname "$output")
 name=$(basename "$output" .efi)
 
@@ -16,13 +17,24 @@ cc=${IA64_CC:-ia64-linux-gnu-gcc}
 ld=${IA64_LD:-ia64-linux-gnu-ld}
 objcopy=${IA64_OBJCOPY:-ia64-linux-gnu-objcopy}
 object="$output_dir/$name.o"
+common_object="$output_dir/$name-common.o"
 elf="$output_dir/$name.elf"
 libgcc=$($cc -print-libgcc-file-name)
 
 $cc -O2 -ffreestanding -fno-builtin -nostdlib -nostdinc -mno-sdata \
     -fno-stack-protector -fno-common -fno-optimize-sibling-calls -fno-pic \
     -Wall -Wextra -Werror -c -o "$object" "$source"
-$ld -nostdlib -static -T "$linker_script" -o "$elf" "$object" "$libgcc"
+if test -n "$common_source"; then
+    $cc -O2 -ffreestanding -fno-builtin -nostdlib -nostdinc -mno-sdata \
+        -fno-stack-protector -fno-common -fno-optimize-sibling-calls \
+        -fno-pic -Wall -Wextra -Werror \
+        -c -o "$common_object" "$common_source"
+    $ld -nostdlib -static -T "$linker_script" -o "$elf" \
+        "$object" "$common_object" "$libgcc"
+else
+    $ld -nostdlib -static -T "$linker_script" -o "$elf" \
+        "$object" "$libgcc"
+fi
 $objcopy --strip-debug -R .comment -O pei-ia64 \
     --image-base="$image_base" --subsystem=10 \
     "$elf" "$output"

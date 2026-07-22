@@ -1,0 +1,12 @@
+entry.S
+firmware.c
+decompress.c
+debug_protocols.c
+pointer_protocol.c
+debug_support.c
+uga_io.c
+usb_protocols.c
+ebc.c
+legacy_io.c
+boot_shell.c
+firmware.lds

@@ -4,6 +4,10 @@
  * EFI 1.10 Simple Pointer protocol for the auxiliary input port.
  */
 
+#include "fw-device-path.h"
+#include "fw-pointer.h"
+#include "fw-services.h"
+
 typedef struct {
     UINT64 ResolutionX;
     UINT64 ResolutionY;
@@ -99,7 +103,7 @@ static VOID pointer_clear_accumulator(VOID)
     mSimplePointerChanged = 0;
 }
 
-static VOID ps2_pointer_consume_byte(UINT8 Byte)
+VOID fw_pointer_consume_byte(UINT8 Byte)
 {
     UINT8 flags;
     INT32 x;
@@ -154,7 +158,7 @@ static VOID ps2_pointer_poll(VOID)
             (status & PS2_STATUS_MOUSE_OBF) == 0) {
             return;
         }
-        ps2_pointer_consume_byte(*ps2_reg(PS2_DATA_PORT));
+        fw_pointer_consume_byte(*ps2_reg(PS2_DATA_PORT));
     }
 }
 
@@ -253,7 +257,7 @@ static VOID simple_pointer_wait_notify(EFI_EVENT Event, VOID *Context)
     }
 }
 
-static BOOLEAN simple_pointer_install(VOID)
+BOOLEAN fw_pointer_install(VOID)
 {
     EFI_STATUS status;
 
@@ -295,7 +299,7 @@ static BOOLEAN simple_pointer_install(VOID)
     return 1;
 }
 
-static BOOLEAN simple_pointer_selftest(VOID)
+BOOLEAN fw_pointer_selftest(VOID)
 {
     EFI_SIMPLE_POINTER_STATE saved_state = mSimplePointerState;
     EFI_SIMPLE_POINTER_STATE state;
@@ -311,9 +315,9 @@ static BOOLEAN simple_pointer_selftest(VOID)
     fw_set_mem(&mSimplePointerState, sizeof(mSimplePointerState), 0);
     mSimplePointerPacketBytes = 0;
     mSimplePointerChanged = 0;
-    ps2_pointer_consume_byte(0x09U);
-    ps2_pointer_consume_byte(5U);
-    ps2_pointer_consume_byte(0xfdU);
+    fw_pointer_consume_byte(0x09U);
+    fw_pointer_consume_byte(5U);
+    fw_pointer_consume_byte(0xfdU);
     ok = simple_pointer_get_state(&mSimplePointerProtocol, &state) ==
              EFI_SUCCESS &&
          state.RelativeMovementX == 5 &&

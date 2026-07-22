@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "target/ia64/decoder.h"
+#include "target/ia64/decode/decode.h"
 
 typedef const char *(*TestFn)(void);
 
@@ -181,12 +181,97 @@ static const char *test_bundle_unpack(void)
     return NULL;
 }
 
+static const char *test_instruction_decode(void)
+{
+    Ia64Instruction insn;
+
+    insn = ia64_decode_insn(IA64_UNIT_RESERVED, 0, 0x1000, 0);
+    if (insn.valid || insn.opcode != IA64_OP_ILLEGAL) {
+        return failf("reserved-unit instruction must be illegal");
+    }
+
+    insn = ia64_decode_insn(IA64_UNIT_M, (1ULL << 27) | 5,
+                            0x2000, 1);
+    if (!insn.valid || insn.opcode != IA64_OP_NOP || insn.qp != 5 ||
+        insn.address != 0x2000 || insn.slot != 1) {
+        return failf("M-unit nop decode");
+    }
+    if (insn.operands.system.immediate != 0) {
+        return failf("typed system immediate operand");
+    }
+
+    insn = ia64_decode_insn(IA64_UNIT_I, 0x2a, 0x3000, 2);
+    if (!insn.valid || insn.opcode != IA64_OP_BREAK || insn.qp != 0x2a) {
+        return failf("I-unit break decode");
+    }
+    return NULL;
+}
+
+static const char *test_typed_operand_views(void)
+{
+    IA64Operands operands = {
+        .decoder = {
+            .r1 = 1,
+            .r2 = 2,
+            .r3 = 3,
+            .p1 = 4,
+            .p2 = 5,
+            .b1 = 6,
+            .b2 = 7,
+            .sf = 8,
+            .fp_precision = 9,
+            .imm = -10,
+        },
+    };
+
+    if (operands.integer.destination != 1 ||
+        operands.integer.source1 != 2 ||
+        operands.integer.source2 != 3 ||
+        operands.integer.predicate1 != 4 ||
+        operands.integer.predicate2 != 5 ||
+        operands.integer.immediate != -10) {
+        return failf("integer operand view");
+    }
+    if (operands.memory.destination != 1 || operands.memory.source != 2 ||
+        operands.memory.base != 3 || operands.memory.immediate != -10) {
+        return failf("memory operand view");
+    }
+    if (operands.branch.link != 6 || operands.branch.target != 7 ||
+        operands.branch.displacement != -10) {
+        return failf("branch operand view");
+    }
+    if (operands.floating.destination != 1 ||
+        operands.floating.source1 != 2 ||
+        operands.floating.source2 != 3 ||
+        operands.floating.auxiliary1 != 4 ||
+        operands.floating.auxiliary2 != 5 ||
+        operands.floating.status_field != 8 ||
+        operands.floating.precision != 9 ||
+        operands.floating.immediate != -10) {
+        return failf("floating operand view");
+    }
+    if (operands.simd.destination != 1 || operands.simd.source1 != 2 ||
+        operands.simd.source2 != 3 || operands.simd.immediate != -10) {
+        return failf("SIMD operand view");
+    }
+    if (operands.system.destination != 1 || operands.system.source != 2 ||
+        operands.system.register_index != 3 ||
+        operands.system.branch_destination != 6 ||
+        operands.system.branch_source != 7 ||
+        operands.system.immediate != -10) {
+        return failf("system operand view");
+    }
+    return NULL;
+}
+
 int main(void)
 {
     static const TestCase tests[] = {
         { "template inventory", test_template_inventory },
         { "template stops", test_template_stops },
         { "bundle unpack", test_bundle_unpack },
+        { "instruction decode", test_instruction_decode },
+        { "typed operand views", test_typed_operand_views },
     };
     unsigned i;
     int status = 0;

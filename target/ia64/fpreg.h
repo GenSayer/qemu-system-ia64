@@ -34,9 +34,9 @@ static inline floatx80 ia64_make_floatx80(uint16_t exp, uint64_t mant)
 
 /*
  * These tag operations sit on every floating-point helper path.  Keep them
- * inline even though the full spill/fill conversion lives in fpreg.c; moving
- * the old op_helper.c inlines behind an out-of-line ABI measurably increases
- * the cost of ordinary FP instructions.
+ * inline even though the full spill/fill conversion lives in fpreg.c; putting
+ * these operations behind an out-of-line ABI measurably increases the cost of
+ * ordinary FP instructions.
  *
  * Include cpu.h before this header so CPUIA64State is complete.
  */
@@ -53,7 +53,7 @@ static inline void ia64_fpreg_mark_written(CPUIA64State *env, unsigned reg)
 
     env->psr |= reg >= 32 ? IA64_PSR_MFH : IA64_PSR_MFL;
     if (reg >= 32) {
-        env->rotating_fr_live = true;
+        env->fp.rotating_fr_live = true;
     }
 }
 
@@ -61,24 +61,24 @@ static inline void ia64_fpreg_clear_tags(CPUIA64State *env, unsigned reg)
 {
     uint64_t mask = ~ia64_fpreg_tag_bit(reg);
 
-    env->fr_nat[reg / 64] &= mask;
-    env->fr_sig[reg / 64] &= mask;
-    env->fr_ext_valid[reg / 64] &= mask;
-    env->fr_int_origin[reg / 64] &= mask;
-    env->fr_int_value[reg] = 0;
+    env->fp.fr_nat[reg / 64] &= mask;
+    env->fp.fr_sig[reg / 64] &= mask;
+    env->fp.fr_ext_valid[reg / 64] &= mask;
+    env->fp.fr_int_origin[reg / 64] &= mask;
+    env->fp.fr_int_value[reg] = 0;
 }
 
 static inline bool ia64_fpreg_is_nat(const CPUIA64State *env, unsigned reg)
 {
     return reg > 1 && reg < IA64_FR_COUNT &&
-           ((env->fr_nat[reg / 64] >> (reg % 64)) & 1);
+           ((env->fp.fr_nat[reg / 64] >> (reg % 64)) & 1);
 }
 
 static inline bool ia64_fpreg_is_integer(const CPUIA64State *env,
                                          unsigned reg)
 {
     return reg > 1 && reg < IA64_FR_COUNT &&
-           ((env->fr_sig[reg / 64] >> (reg % 64)) & 1);
+           ((env->fp.fr_sig[reg / 64] >> (reg % 64)) & 1);
 }
 
 static inline void ia64_fpreg_from_binary64(CPUIA64State *env, unsigned reg,
@@ -90,7 +90,7 @@ static inline void ia64_fpreg_from_binary64(CPUIA64State *env, unsigned reg,
     }
 
     ia64_fpreg_clear_tags(env, reg);
-    env->fr[reg] = value;
+    env->fp.fr[reg] = value;
     ia64_fpreg_mark_written(env, reg);
 }
 

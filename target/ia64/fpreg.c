@@ -16,13 +16,13 @@ bool ia64_fpreg_get_extended(const CPUIA64State *env, unsigned reg,
                              bool *sign, uint32_t *exp, uint64_t *mant)
 {
     if (reg <= 1 || reg >= IA64_FR_COUNT ||
-        !((env->fr_ext_valid[reg / 64] >> (reg % 64)) & 1)) {
+        !((env->fp.fr_ext_valid[reg / 64] >> (reg % 64)) & 1)) {
         return false;
     }
 
-    *sign = (env->fr_ext_sign[reg / 64] >> (reg % 64)) & 1;
-    *exp = env->fr_ext_exp[reg];
-    *mant = env->fr_ext_mant[reg];
+    *sign = (env->fp.fr_ext_sign[reg / 64] >> (reg % 64)) & 1;
+    *exp = env->fp.fr_ext_exp[reg];
+    *mant = env->fp.fr_ext_mant[reg];
     return true;
 }
 
@@ -102,7 +102,7 @@ static uint64_t extended_to_binary64(CPUIA64State *env, bool sign,
                                      uint32_t exp, uint64_t mant)
 {
     uint16_t ext_exp;
-    float_status status = env->fp_status;
+    float_status status = env->fp.fp_status;
 
     if (exp == IA64_FP_REG_SPECIAL_EXP) {
         ext_exp = 0x7fff;
@@ -133,12 +133,13 @@ void ia64_fpreg_to_spill(const CPUIA64State *env, unsigned reg,
     } else if (ia64_fpreg_get_extended(env, reg, &sign, &exp, low)) {
         /* Exact register-format value was retained by fill or arithmetic. */
     } else if (ia64_fpreg_is_integer(env, reg)) {
-        *low = env->fr[reg];
+        *low = env->fp.fr[reg];
         exp = IA64_FP_REG_INTEGER_EXP;
         sign = false;
     } else {
-        binary64_to_register_format(reg == 0 ? 0 :
-                                    reg == 1 ? IA64_FR_ONE : env->fr[reg],
+        binary64_to_register_format(reg == IA64_FR_ZERO_INDEX ? 0 :
+                                    reg == IA64_FR_ONE_INDEX ?
+                                    IA64_FR_ONE : env->fp.fr[reg],
                                     low, &exp, &sign);
     }
 
@@ -164,23 +165,23 @@ void ia64_fpreg_from_spill(CPUIA64State *env, unsigned reg,
     ia64_fpreg_clear_tags(env, reg);
 
     if (!sign && exp == IA64_FP_REG_NATVAL_EXP && low == 0) {
-        env->fr[reg] = 0;
-        env->fr_nat[reg / 64] |= bit;
+        env->fp.fr[reg] = 0;
+        env->fp.fr_nat[reg / 64] |= bit;
     } else if (!sign && exp == IA64_FP_REG_INTEGER_EXP) {
-        env->fr[reg] = low;
-        env->fr_sig[reg / 64] |= bit;
-        env->fr_int_value[reg] = low;
-        env->fr_int_origin[reg / 64] |= bit;
+        env->fp.fr[reg] = low;
+        env->fp.fr_sig[reg / 64] |= bit;
+        env->fp.fr_int_value[reg] = low;
+        env->fp.fr_int_origin[reg / 64] |= bit;
     } else {
-        env->fr[reg] = extended_to_binary64(env, sign, exp, low);
-        env->fr_ext_mant[reg] = low;
-        env->fr_ext_exp[reg] = exp;
+        env->fp.fr[reg] = extended_to_binary64(env, sign, exp, low);
+        env->fp.fr_ext_mant[reg] = low;
+        env->fp.fr_ext_exp[reg] = exp;
         if (sign) {
-            env->fr_ext_sign[reg / 64] |= bit;
+            env->fp.fr_ext_sign[reg / 64] |= bit;
         } else {
-            env->fr_ext_sign[reg / 64] &= ~bit;
+            env->fp.fr_ext_sign[reg / 64] &= ~bit;
         }
-        env->fr_ext_valid[reg / 64] |= bit;
+        env->fp.fr_ext_valid[reg / 64] |= bit;
     }
     ia64_fpreg_mark_written(env, reg);
 }

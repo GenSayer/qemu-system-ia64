@@ -9,6 +9,7 @@ import tempfile
 import time
 from typing import Callable, Iterable, Sequence
 
+from .process import kill_process, terminate_process
 from .qmp import QmpClient, QmpError
 from .state import Ia64State, StateExpectation, parse_state
 
@@ -144,7 +145,7 @@ def run_microprogram(qemu: str, program: MicroProgram,
             bufsize=1,
         )
         if proc.stdin is None or proc.stdout is None:
-            proc.kill()
+            kill_process(proc)
             raise RuntimeError("QEMU QMP pipes were not created")
 
         qmp: QmpClient | None = None
@@ -224,8 +225,7 @@ def run_microprogram(qemu: str, program: MicroProgram,
                     f"last state:\n{detail}")
         except Exception as exc:
             if proc.poll() is None:
-                proc.kill()
-            proc.wait(timeout=2)
+                kill_process(proc)
             stderr.seek(0)
             stderr_text = stderr.read()
             diagnostics = [str(exc)]
@@ -247,8 +247,7 @@ def run_microprogram(qemu: str, program: MicroProgram,
                 try:
                     proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
+                    terminate_process(proc)
             stderr.seek(0)
             stderr_text = stderr.read()
 
@@ -274,7 +273,7 @@ def run_expected_exit(qemu: str, program: MicroProgram) -> str:
         text=True,
     )
     if proc.stdin is None or proc.stdout is None:
-        proc.kill()
+        kill_process(proc)
         raise RuntimeError("QEMU QMP pipes were not created")
     qmp = QmpClient(proc.stdout, proc.stdin)
     try:
@@ -288,7 +287,7 @@ def run_expected_exit(qemu: str, program: MicroProgram) -> str:
     try:
         stdout, stderr = proc.communicate(timeout=program.completion.timeout_s)
     except subprocess.TimeoutExpired as exc:
-        proc.kill()
+        kill_process(proc)
         stdout, stderr = proc.communicate()
         raise RuntimeError(f"{program.name}: QEMU did not exit as expected\n"
                            f"{stdout}\n{stderr}") from exc
