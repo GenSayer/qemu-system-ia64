@@ -1871,6 +1871,7 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     UINTN offset = 0;
     BOOLEAN bus = 0;
     BOOLEAN io = 0;
+    BOOLEAN legacy_memory = 0;
     BOOLEAN memory = 0;
     BOOLEAN end_tag = 0;
 
@@ -1911,6 +1912,14 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        get_u64(descriptor + 30U) == 0 &&
                        get_u64(descriptor + 38U) == 0x1000000U) {
                 io = 1;
+            } else if (descriptor[0] == 0x87U && length == 23U &&
+                       descriptor[3] == 0U &&
+                       get_u32(descriptor + 6U) == 0 &&
+                       get_u32(descriptor + 10U) == 0x000a0000U &&
+                       get_u32(descriptor + 14U) == 0x000bffffU &&
+                       get_u32(descriptor + 18U) == 0 &&
+                       get_u32(descriptor + 22U) == 0x00020000U) {
+                legacy_memory = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U &&
                        get_u64(descriptor + 6U) == 0 &&
@@ -1933,19 +1942,24 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
             offset += 1U + length;
         }
     }
-    return bus && io && memory && end_tag;
+    return bus && io && legacy_memory && memory && end_tag;
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
 {
+    static const UINT8 sb_name[4] = { '_', 'S', 'B', '_' };
     static const UINT8 uart_name[4] = { 'U', 'A', 'R', '0' };
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
     const UINT8 *aml;
     UINTN aml_length;
     const UINT8 *uart;
     const UINT8 *resources;
+    const UINT8 *scope_content;
+    const UINT8 *scope_end;
     UINTN resource_length;
+    UINTN scope_offset;
     UINTN offset = 0;
+    BOOLEAN under_sb = 0;
     BOOLEAN address = 0;
     BOOLEAN irq = 0;
 
@@ -1961,6 +1975,24 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
                           (UINTN)(uart - aml), &resources,
                           &resource_length)) {
         return 0;
+    }
+    for (scope_offset = 0; scope_offset + 2U < aml_length;
+         scope_offset++) {
+        if (aml[scope_offset] != 0x10U ||
+            !aml_package(aml + scope_offset + 1U, aml + aml_length,
+                         &scope_content, &scope_end)) {
+            continue;
+        }
+        if (scope_content + 5U <= scope_end &&
+            scope_content[0] == 0x5cU &&
+            ia64_bytes_equal(scope_content + 1U,
+                             sb_name, sizeof(sb_name)) &&
+            find_bytes(scope_content + 5U,
+                       (UINTN)(scope_end - scope_content - 5U),
+                       uart_name, sizeof(uart_name), 0) != NULL) {
+            under_sb = 1;
+            break;
+        }
     }
     while (offset < resource_length) {
         const UINT8 *descriptor = resources + offset;
@@ -1995,7 +2027,7 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
             offset += 1U + length;
         }
     }
-    return address && irq;
+    return under_sb && address && irq;
 }
 
 static BOOLEAN test_dsdt_prt(const TEST_TABLE_CONTEXT *Context)

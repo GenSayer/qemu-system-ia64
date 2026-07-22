@@ -43,11 +43,6 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
                 Return (C3EN)
             }
         }
-    }
-
-    Scope (\_SB.PCI0)
-    {
-        Name (P2EN, 0x0F)
 
         Device (UAR0)
         {
@@ -62,6 +57,11 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
                 IRQNoFlags () {4}
             })
         }
+    }
+
+    Scope (\_SB.PCI0)
+    {
+        Name (P2EN, 0x0F)
 
         Device (PS2K)
         {
