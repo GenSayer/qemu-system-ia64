@@ -126,12 +126,14 @@
 #define X86_IA32_COMPLETION_EIP(s)                                     \
     ((s)->pc_save == -1 ? cpu_eip : eip_next_tl(s))
 #define X86_AFTER_INSN_WRITEBACK(s, decode) do {                       \
-    if ((((decode)->e.gen == gen_MOV &&                                \
-          (decode)->e.op0 == X86_TYPE_S) ||                            \
-         (decode)->e.gen == gen_POP) &&                                \
-        (decode)->op[0].n == R_SS) {                                   \
+    /* Helpers inspect lazy flags through CPUX86State.cc_op. */         \
+    gen_update_cc_op(s);                                               \
+    if (((decode)->e.gen == gen_MOV &&                                 \
+         (decode)->e.op0 == X86_TYPE_S &&                              \
+         (decode)->op[0].n == R_SS) ||                                 \
+        ((decode)->e.gen == gen_POP &&                                 \
+         (decode)->e.op0 == X86_TYPE_SS)) {                            \
         TCGv old_eflags_ = tcg_temp_new();                             \
-        gen_update_cc_op(s);                                           \
         gen_helper_read_eflags(old_eflags_, tcg_env);                  \
         assume_cc_op(s, CC_OP_EFLAGS);                                 \
         gen_helper_ia32_system_flag(tcg_env, old_eflags_,              \

@@ -94,6 +94,7 @@ from .encoding import (
     cmp4_eq_unc_imm,
     cmp_eq_and,
     cover_b,
+    dep,
     dtr_setup_bundles,
     extr_u,
     getf_sig,
@@ -1918,6 +1919,208 @@ test_ia32_ibr_instruction_breakpoint_fault = require_registers(
         "r10": (1 << 32) | (1 << 16),
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
+
+test_ia32_psr_ss_traps_after_one_instruction_and_resumes = \
+    require_registers(
+        "ia32_psr_ss_traps_after_one_instruction_and_resumes", [
+            *ia32_environment_bundles(
+                0x700, 0x10,
+                csd=IA32_TEST_CSD | (1 << 62),
+                ssd=IA32_TEST_DSD | (1 << 62)),
+            (0x10, *movl_mlx(12, 0x400)),
+            (0x20, *movl_mlx(
+                2, IA64_PSR_IC | IA64_PSR_IS | IA64_PSR_SS)),
+            (0x30, *movl_mlx(3, 0x100)),
+            *rfi_to_gr(0x40, 2, 3),
+            # PUSH and LEA use paths that are not covered by the IA-64
+            # completion hook.  PSR.ss must still stop after PUSH.
+            ia32_bundle(0x100, bytes.fromhex(
+                "55 "           # push ebp
+                "8d 6c 24 90 "  # lea ebp,[esp-0x70]
+                "0f 0b")),      # UD2 intercept
+            (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+             mov_m_cr_gr(20, 16), adds(4, 1, 4), nop_i()),
+            (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+             mov_m_cr_gr(5, 19), dep(20, 0, 20, 40, 1), nop_i()),
+            (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x00,
+             mov_m_cr_gr(6, 22), nop_i(), nop_i()),
+            (IA64_IA32_EXCEPTION_VECTOR + 0x30, 0x00,
+             mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+            (IA64_IA32_EXCEPTION_VECTOR + 0x40, 0x10,
+             nop_m(), nop_i(), rfi_b()),
+            (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+             mov_m_cr_gr(7, 19), nop_i(), nop_i()),
+            (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x10,
+             nop_m(), nop_i(),
+             br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x10,
+                     IA64_IA32_INTERCEPT_VECTOR + 0x10)),
+        ], {
+            "ip": IA64_IA32_INTERCEPT_VECTOR + 0x10,
+            "r4": 1,
+            "r5": 0x101,
+            "r6": 0x101,
+            "r7": 0x105,
+            "r12": 0x3fc,
+            "r13": 0x38c,
+            "exception": IA64_EXCP_NONE,
+        }, entry=0x700, cpu="madison")
+
+test_ia32_eflag_tf_traps_after_one_instruction_and_resumes = \
+    require_registers(
+        "ia32_eflag_tf_traps_after_one_instruction_and_resumes", [
+            *ia32_environment_bundles(
+                0x700, 0x10,
+                csd=IA32_TEST_CSD | (1 << 62),
+                ssd=IA32_TEST_DSD | (1 << 62)),
+            (0x10, *movl_mlx(12, 0x400)),
+            (0x20, *movl_mlx(3, (1 << 8) | 2)),
+            (0x30, 0x00, mov_m_gr_ar(3, 24), nop_i(), nop_i()),
+            (0x40, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS)),
+            (0x50, *movl_mlx(3, 0x100)),
+            *rfi_to_gr(0x60, 2, 3),
+            ia32_bundle(0x100, bytes.fromhex(
+                "55 "
+                "8d 6c 24 90 "
+                "0f 0b")),
+            (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+             mov_m_cr_gr(5, 19), adds(4, 1, 4), nop_i()),
+            (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+             mov_m_cr_gr(6, 22), adds(20, 2, 0), nop_i()),
+            (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x00,
+             mov_m_gr_ar(20, 24), nop_i(), nop_i()),
+            (IA64_IA32_EXCEPTION_VECTOR + 0x30, 0x10,
+             nop_m(), nop_i(), rfi_b()),
+            (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+             mov_m_cr_gr(7, 19), nop_i(), nop_i()),
+            (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x10,
+             nop_m(), nop_i(),
+             br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x10,
+                     IA64_IA32_INTERCEPT_VECTOR + 0x10)),
+        ], {
+            "ip": IA64_IA32_INTERCEPT_VECTOR + 0x10,
+            "r4": 1,
+            "r5": 0x101,
+            "r6": 0x101,
+            "r7": 0x105,
+            "r12": 0x3fc,
+            "r13": 0x38c,
+            "exception": IA64_EXCP_NONE,
+        }, entry=0x700, cpu="madison")
+
+test_ia32_flag_writeback_does_not_enable_single_step = \
+    require_registers(
+        "ia32_flag_writeback_does_not_enable_single_step", [
+            *ia32_environment_bundles(
+                0x700, 0x10,
+                csd=IA32_TEST_CSD | (1 << 62),
+                ssd=IA32_TEST_DSD | (1 << 62)),
+            (0x10, *movl_mlx(12, 0x400)),
+            (0x20, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS)),
+            (0x30, *movl_mlx(3, 0x100)),
+            *rfi_to_gr(0x40, 2, 3),
+            # This loader-style prologue used to copy a SUB operand into
+            # EFLAGS and synthesize EFLAG.tf.
+            ia32_bundle(0x100, bytes.fromhex(
+                "55 "                 # push ebp
+                "8d 6c 24 90 "        # lea ebp,[esp-0x70]
+                "81 ec 64 01 00 00 "  # sub esp,0x164
+                "0f 0b")),            # UD2 intercept
+            (IA64_IA32_EXCEPTION_VECTOR, 0x10,
+             nop_m(), nop_i(),
+             br_cond(IA64_IA32_EXCEPTION_VECTOR,
+                     IA64_IA32_EXCEPTION_VECTOR)),
+            (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+             mov_m_ar_gr(4, 24), nop_i(), nop_i()),
+            (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x00,
+             mov_m_cr_gr(7, 19), nop_i(), nop_i()),
+            (IA64_IA32_INTERCEPT_VECTOR + 0x20, 0x10,
+             nop_m(), nop_i(),
+             br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x20,
+                     IA64_IA32_INTERCEPT_VECTOR + 0x20)),
+        ], {
+            "ip": IA64_IA32_INTERCEPT_VECTOR + 0x20,
+            "r4": 2,
+            "r7": 0x10b,
+            "r12": 0x298,
+            "r13": 0x38c,
+            "exception": IA64_EXCP_NONE,
+        }, entry=0x700, cpu="madison")
+
+test_ia32_pop_edx_does_not_intercept_as_pop_ss = require_registers(
+    "ia32_pop_edx_does_not_intercept_as_pop_ss", [
+        *ia32_environment_bundles(
+            0x700, 0x10,
+            csd=IA32_TEST_CSD | (1 << 62),
+            ssd=IA32_TEST_DSD | (1 << 62)),
+        (0x10, *movl_mlx(12, 0x400)),
+        (0x20, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS)),
+        (0x30, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0x40, 2, 3),
+        # R_EDX and R_SS both have the numeric value 2.  Opcode operand types
+        # must distinguish this ordinary POP from the POP SS system-flag trap.
+        ia32_bundle(0x100, bytes.fromhex(
+            "6a 5c "  # push 0x5c
+            "5a "     # pop edx
+            "0f 0b")),  # UD2 instruction intercept
+        (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+         mov_m_cr_gr(20, 17), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(21, 19), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(22, 22), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x30, 0x00,
+         mov_m_cr_gr(23, 24), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x40, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x40,
+                 IA64_IA32_INTERCEPT_VECTOR + 0x40)),
+    ], {
+        "ip": IA64_IA32_INTERCEPT_VECTOR + 0x40,
+        "r10": 0x5c,
+        "r12": 0x400,
+        "r20": 0x6,
+        "r21": 0x103,
+        "r22": 0x103,
+        "r23": 0x0b0f,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_pop_ss_system_flag_intercept_is_post_instruction = \
+    require_registers(
+        "ia32_pop_ss_system_flag_intercept_is_post_instruction", [
+            *ia32_environment_bundles(
+                0x700, 0x10,
+                csd=IA32_TEST_CSD | (1 << 62),
+                ssd=IA32_TEST_DSD | (1 << 62)),
+            (0x10, *movl_mlx(12, 0x400)),
+            (0x20, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS)),
+            (0x30, *movl_mlx(3, 0x100)),
+            *rfi_to_gr(0x40, 2, 3),
+            ia32_bundle(0x100, bytes.fromhex(
+                "16 "     # push ss
+                "17 "     # pop ss
+                "0f 0b")),  # must not execute
+            (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+             mov_m_cr_gr(20, 17), nop_i(), nop_i()),
+            (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x00,
+             mov_m_cr_gr(21, 19), nop_i(), nop_i()),
+            (IA64_IA32_INTERCEPT_VECTOR + 0x20, 0x00,
+             mov_m_cr_gr(22, 22), nop_i(), nop_i()),
+            (IA64_IA32_INTERCEPT_VECTOR + 0x30, 0x00,
+             mov_m_cr_gr(23, 24), nop_i(), nop_i()),
+            (IA64_IA32_INTERCEPT_VECTOR + 0x40, 0x10,
+             nop_m(), nop_i(),
+             br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x40,
+                     IA64_IA32_INTERCEPT_VECTOR + 0x40)),
+        ], {
+            "ip": IA64_IA32_INTERCEPT_VECTOR + 0x40,
+            "r12": 0x400,
+            "r20": 0x2c000,
+            "r21": 0x102,
+            "r22": 0x101,
+            "r23": 0x2,
+            "exception": IA64_EXCP_NONE,
+        }, entry=0x700, cpu="madison")
 
 test_ia32_ibr_precedes_start_page_instruction_tlb_fault = require_registers(
     "ia32_ibr_precedes_start_page_instruction_tlb_fault", [
@@ -4319,6 +4522,10 @@ CASE_NAMES = (
     'ia32_dfh_faults_first_target_instruction',
     'ia32_fisttp_intercepts_before_cr0_em',
     'ia32_dbr_overlap_raises_post_instruction_trap',
+    'ia32_eflag_tf_traps_after_one_instruction_and_resumes',
+    'ia32_flag_writeback_does_not_enable_single_step',
+    'ia32_pop_edx_does_not_intercept_as_pop_ss',
+    'ia32_pop_ss_system_flag_intercept_is_post_instruction',
     'ia32_data_access_wraps_at_4g',
     'ia32_data_breakpoint_matches_wrapped_byte_at_4g',
     'ia32_data_tlb_fault_precedes_alignment_check',
@@ -4356,6 +4563,7 @@ CASE_NAMES = (
     'ia32_maskmovq_triggers_data_breakpoint',
     'ia32_psr_ac_unaligned_dword_sets_ifa',
     'ia32_psr_ac_unaligned_xchg_sets_ifa',
+    'ia32_psr_ss_traps_after_one_instruction_and_resumes',
     'ia32_read_only_ds_rejects_store',
     'ia32_rep_dbr_traps_after_matching_iteration',
     'ia32_rep_fault_sets_rf_for_restart',

@@ -1942,6 +1942,9 @@ static BOOLEAN                mVirtualAddressMapApplied;
 static UINT64                 mGuestRamSize = FW_LOW_RAM_LIMIT;
 static UINT64                 mGuestLowRamEnd = FW_LOW_RAM_LIMIT;
 static UINTN                  mProcessorCount = 1;
+static UINTN                  mSocketCount = 1;
+static UINTN                  mCoresPerSocket = 1;
+static UINTN                  mThreadsPerCore = 1;
 
 static BOOLEAN fw_data_translation_enabled(void);
 
@@ -1974,11 +1977,17 @@ typedef struct {
     UINT64 DebugPortBase;
 } FW_HANDOFF_LEGACY;
 
-FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 80, fw_handoff_size);
+FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 104, fw_handoff_size);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                  fw_handoff_processor_count_offset);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, NvramPersistent) == 72,
                  fw_handoff_nvram_persistent_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, SocketCount) == 80,
+                 fw_handoff_socket_count_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, CoresPerSocket) == 88,
+                 fw_handoff_cores_per_socket_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ThreadsPerCore) == 96,
+                 fw_handoff_threads_per_core_offset);
 
 static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
 {
@@ -2201,6 +2210,50 @@ static UINTN fw_handoff_processor_count(void)
         return 1;
     }
     return (UINTN)count;
+}
+
+static void fw_handoff_processor_topology(UINTN ProcessorCount)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
+    UINT64 sockets;
+    UINT64 cores;
+    UINT64 threads;
+    UINT64 capacity;
+
+    /*
+     * Version 9 and older described only a processor count.  Preserve their
+     * historical one-package interpretation when an old handoff is used.
+     */
+    mSocketCount = 1;
+    mCoresPerSocket = ProcessorCount;
+    mThreadsPerCore = 1;
+
+    if (!fw_handoff_valid(header) || header->Version < 10) {
+        return;
+    }
+
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    sockets = handoff->SocketCount;
+    cores = handoff->CoresPerSocket;
+    threads = handoff->ThreadsPerCore;
+    if (sockets == 0 || sockets > FW_MAX_CPUS ||
+        cores == 0 || cores > FW_MAX_CPUS ||
+        threads == 0 || threads > FW_MAX_CPUS ||
+        sockets > FW_MAX_CPUS / cores ||
+        sockets * cores > FW_MAX_CPUS / threads) {
+        return;
+    }
+
+    capacity = sockets * cores * threads;
+    if (capacity < ProcessorCount || capacity > FW_MAX_CPUS) {
+        return;
+    }
+
+    mSocketCount = (UINTN)sockets;
+    mCoresPerSocket = (UINTN)cores;
+    mThreadsPerCore = (UINTN)threads;
 }
 
 BOOLEAN fw_handoff_nvram_persistent(void)
@@ -13559,10 +13612,11 @@ static BOOLEAN smbios_build_type3(void)
                                    FW_ARRAY_SIZE(Strings));
 }
 
-static BOOLEAN smbios_build_type4(void)
+static BOOLEAN smbios_build_type4_socket(UINTN SocketIndex)
 {
-    static const CHAR8 * const Strings[] = {
-        "CPU 0",
+    CHAR8 SocketName[] = "CPU 0";
+    const CHAR8 * const Strings[] = {
+        SocketName,
         "QEMU",
         "IA-64",
         "0",
@@ -13570,15 +13624,33 @@ static BOOLEAN smbios_build_type4(void)
         "0",
     };
     SMBIOS_TYPE4_PROCESSOR_INFORMATION T;
+    UINTN threads_per_socket = mCoresPerSocket * mThreadsPerCore;
+    UINTN first_processor = SocketIndex * threads_per_socket;
+    UINTN enabled_threads = 0;
+    UINTN enabled_cores;
+
+    if (SocketIndex >= mSocketCount || SocketIndex >= 10) {
+        return 0;
+    }
+    SocketName[4] = (CHAR8)('0' + SocketIndex);
+    if (first_processor < mProcessorCount) {
+        enabled_threads = mProcessorCount - first_processor;
+        if (enabled_threads > threads_per_socket) {
+            enabled_threads = threads_per_socket;
+        }
+    }
+    enabled_cores = (enabled_threads + mThreadsPerCore - 1U) /
+                    mThreadsPerCore;
 
     fw_set_mem(&T, sizeof(T), 0);
-    smbios_header_init(&T.Hdr, 4, sizeof(T), 0x0400);
+    smbios_header_init(&T.Hdr, 4, sizeof(T),
+                       0x0400U + (UINT16)SocketIndex);
     T.SocketDesignation = 1;
     T.ProcessorType = 0x03;
     T.ProcessorFamily = 0x82;
     T.ProcessorManufacturer = 2;
     T.ProcessorVersion = 3;
-    T.Status = 0x41;
+    T.Status = enabled_threads != 0 ? 0x41 : 0;
     T.ProcessorUpgrade = 0x01;
     T.L1CacheHandle = 0xffff;
     T.L2CacheHandle = 0xffff;
@@ -13586,14 +13658,27 @@ static BOOLEAN smbios_build_type4(void)
     T.SerialNumber = 4;
     T.AssetTag = 5;
     T.PartNumber = 6;
-    T.CoreCount = (UINT8)mProcessorCount;
-    T.CoreEnabled = (UINT8)mProcessorCount;
-    T.ThreadCount = (UINT8)mProcessorCount;
+    T.CoreCount = (UINT8)mCoresPerSocket;
+    T.CoreEnabled = (UINT8)enabled_cores;
+    T.ThreadCount = (UINT8)threads_per_socket;
     T.ProcessorCharacteristics = 0x0004 |
-        (mProcessorCount > 1 ? 0x0008 : 0);
+        (mCoresPerSocket > 1 ? 0x0008 : 0) |
+        (mThreadsPerCore > 1 ? 0x0010 : 0);
     T.ProcessorFamily2 = 0x0082;
     return smbios_append_structure(&T, sizeof(T), Strings,
                                    FW_ARRAY_SIZE(Strings));
+}
+
+static BOOLEAN smbios_build_type4(void)
+{
+    UINTN i;
+
+    for (i = 0; i < mSocketCount; i++) {
+        if (!smbios_build_type4_socket(i)) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static BOOLEAN smbios_build_type16(void)
@@ -13852,6 +13937,7 @@ static BOOLEAN __attribute__((noinline)) smbios_table_integrity_selftest(void)
     UINTN Count = 0;
     UINTN MaxSize = 0;
     UINTN Size;
+    UINTN Type4Count = 0;
     UINTN Type19Count = 0;
     UINT16 RequiredTypes = 0;
 
@@ -13922,19 +14008,41 @@ static BOOLEAN __attribute__((noinline)) smbios_table_integrity_selftest(void)
             }
             RequiredTypes |= 0x008;
             break;
-        case 4:
+        case 4: {
+            UINTN threads_per_socket =
+                mCoresPerSocket * mThreadsPerCore;
+            UINTN first_processor = Type4Count * threads_per_socket;
+            UINTN enabled_threads = 0;
+            UINTN enabled_cores;
+            UINT16 characteristics = 0x0004U |
+                (mCoresPerSocket > 1 ? 0x0008U : 0) |
+                (mThreadsPerCore > 1 ? 0x0010U : 0);
+
+            if (first_processor < mProcessorCount) {
+                enabled_threads = mProcessorCount - first_processor;
+                if (enabled_threads > threads_per_socket) {
+                    enabled_threads = threads_per_socket;
+                }
+            }
+            enabled_cores = (enabled_threads + mThreadsPerCore - 1U) /
+                            mThreadsPerCore;
             if (Length != sizeof(SMBIOS_TYPE4_PROCESSOR_INFORMATION) ||
+                Type4Count >= mSocketCount ||
+                smbios_get_u16(Data, 2) != 0x0400U + Type4Count ||
+                Data[4] != 1 ||
                 Data[5] != 0x03 || Data[6] != 0x82 ||
-                Data[0x23] != mProcessorCount ||
-                Data[0x24] != mProcessorCount ||
-                Data[0x25] != mProcessorCount ||
-                smbios_get_u16(Data, 0x26) !=
-                    (0x0004U | (mProcessorCount > 1 ? 0x0008U : 0)) ||
+                Data[0x18] != (enabled_threads != 0 ? 0x41 : 0) ||
+                Data[0x23] != mCoresPerSocket ||
+                Data[0x24] != enabled_cores ||
+                Data[0x25] != threads_per_socket ||
+                smbios_get_u16(Data, 0x26) != characteristics ||
                 smbios_get_u16(Data, 0x28) != 0x0082) {
                 return 0;
             }
+            Type4Count++;
             RequiredTypes |= 0x010;
             break;
+        }
         case 16:
             if (Length != sizeof(SMBIOS_TYPE16_PHYSICAL_MEMORY_ARRAY) ||
                 Data[4] != 0x03 || Data[5] != 0x03 || Data[6] != 0x03 ||
@@ -14008,6 +14116,7 @@ static BOOLEAN __attribute__((noinline)) smbios_table_integrity_selftest(void)
     return Offset == mSmbiosTableLength &&
            Count == mSmbiosStructureCount &&
            MaxSize == mSmbiosEntryPoint.MaxStructureSize &&
+           Type4Count == mSocketCount &&
            Type19Count == 1U + mGuestHighRamCount &&
            RequiredTypes == 0x3ff;
 }
@@ -33548,6 +33657,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mBootStackTop = stack_top;
     mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
     mProcessorCount = fw_handoff_processor_count();
+    fw_handoff_processor_topology(mProcessorCount);
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 

@@ -46,6 +46,9 @@
 #define IA64_INT10_ROM_BASE          0x000c0000ULL
 #define IA64_INT10_ROM_SIZE          0x00000200U
 #define IA64_INT10_VECTOR_ADDR       0x00000040ULL
+#define IA64_INT10_ROM_PCIR_OFFSET   0x0020U
+#define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
+#define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
 #define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
 #define IA64_INT10_HANDLER_SIZE      116U
 #define IA64_INT10_ROM_OEM_OFFSET    0x0180U
@@ -275,6 +278,8 @@ static void test_int10_rom(void)
     uint8_t zero[IA64_INT10_ROM_SIZE] = { 0 };
     uint8_t vector[4];
     uint32_t vector_linear;
+    uint16_t ati_header;
+    uint16_t ati_pll;
     unsigned checksum = 0;
     QTestState *qts = ia64_vpc_start(NULL);
     size_t i;
@@ -287,10 +292,23 @@ static void test_int10_rom(void)
                     IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert_cmphex(lduw_le_p(rom + 0x13), ==,
                     IA64_INT10_ROM_BASE >> 4);
-    g_assert_cmpmem(rom + 0x40, 4, "PCIR", 4);
-    g_assert_cmphex(lduw_le_p(rom + 0x44), ==, 0x1002);
-    g_assert_cmphex(lduw_le_p(rom + 0x46), ==, 0x5046);
+    g_assert_cmphex(lduw_le_p(rom + 0x18), ==,
+                    IA64_INT10_ROM_PCIR_OFFSET);
+    g_assert_cmpmem(rom + IA64_INT10_ROM_PCIR_OFFSET, 4, "PCIR", 4);
+    g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 4),
+                    ==, 0x1002);
+    g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 6),
+                    ==, 0x5046);
     g_assert_cmpmem(rom + 0x60, 19, "QEMU IA64 VBE INT10", 19);
+    ati_header = lduw_le_p(rom + 0x48);
+    g_assert_cmphex(ati_header, ==, IA64_INT10_ROM_ATI_HEADER_OFFSET);
+    ati_pll = lduw_le_p(rom + ati_header + 0x30);
+    g_assert_cmphex(ati_pll, ==, IA64_INT10_ROM_ATI_PLL_OFFSET);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x08), ==, 23000);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x0e), ==, 2700);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x10), ==, 4);
+    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x12), ==, 12000);
+    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x16), ==, 35000);
     g_assert_cmpmem(rom + IA64_INT10_ROM_OEM_OFFSET, 13,
                     "QEMU IA64 VBE", 13);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET),
@@ -570,11 +588,13 @@ static void test_acpi_reset_register(void)
 }
 
 static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
-                                    uint64_t cpus, uint64_t nvram)
+                                    uint64_t cpus, uint64_t nvram,
+                                    uint64_t sockets, uint64_t cores,
+                                    uint64_t threads)
 {
     IA64VpcHandoff handoff;
 
-    g_assert_cmpuint(sizeof(handoff), ==, 80);
+    g_assert_cmpuint(sizeof(handoff), ==, 104);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
     g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
     g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
@@ -588,13 +608,16 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
     g_assert_cmphex(le64_to_cpu(handoff.I8042Enabled), ==, i8042);
     g_assert_cmphex(le64_to_cpu(handoff.ProcessorCount), ==, cpus);
     g_assert_cmphex(le64_to_cpu(handoff.NvramPersistent), ==, nvram);
+    g_assert_cmphex(le64_to_cpu(handoff.SocketCount), ==, sockets);
+    g_assert_cmphex(le64_to_cpu(handoff.CoresPerSocket), ==, cores);
+    g_assert_cmphex(le64_to_cpu(handoff.ThreadsPerCore), ==, threads);
 }
 
 static void test_firmware_handoff_defaults(void)
 {
-    static const uint8_t expected_v9[sizeof(IA64VpcHandoff)] = {
+    static const uint8_t expected_v10[sizeof(IA64VpcHandoff)] = {
         0x51, 0x49, 0x41, 0x36, 0x34, 0x52, 0x41, 0x4d,
-        0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -603,14 +626,17 @@ static void test_firmware_handoff_defaults(void)
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
 
-    assert_firmware_handoff(qts, 1, 1, 0);
+    assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual),
-                    expected_v9, sizeof(expected_v9));
+                    expected_v10, sizeof(expected_v10));
     qtest_quit(qts);
 }
 
@@ -619,7 +645,7 @@ static void test_firmware_handoff_i8042_off(void)
     QTestState *qts = qtest_init("-machine ia64-vpc,i8042=off "
                                  "-m 256M -S");
 
-    assert_firmware_handoff(qts, 0, 1, 0);
+    assert_firmware_handoff(qts, 0, 1, 0, 1, 1, 1);
     qtest_quit(qts);
 }
 
@@ -631,11 +657,20 @@ static void test_smp_topology(gconstpointer opaque)
     g_autoptr(QDict) response = NULL;
     QList *cpus;
 
-    assert_firmware_handoff(qts, 1, count, 0);
+    assert_firmware_handoff(qts, 1, count, 0, count, 1, 1);
     response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(response, "return"));
     cpus = qdict_get_qlist(response, "return");
     g_assert_cmpuint(qlist_size(cpus), ==, count);
+    qtest_quit(qts);
+}
+
+static void test_smp_explicit_topology(void)
+{
+    QTestState *qts =
+        ia64_vpc_start("-smp 4,sockets=1,cores=2,threads=2");
+
+    assert_firmware_handoff(qts, 1, 4, 0, 1, 2, 2);
     qtest_quit(qts);
 }
 
@@ -1285,6 +1320,8 @@ int main(int argc, char **argv)
 
         qtest_add_data_func(path, GUINT_TO_POINTER(cpus), test_smp_topology);
     }
+    qtest_add_func("/ia64-vpc/smp/explicit-topology",
+                   test_smp_explicit_topology);
     qtest_add_func("/ia64-vpc/smp/reject-full-alat",
                    test_smp_rejects_full_alat);
     qtest_add_func("/ia64-vpc/input/default-usb",

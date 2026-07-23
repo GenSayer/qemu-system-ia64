@@ -2539,9 +2539,10 @@ static BOOLEAN test_sal_smbios_tables(EFI_SYSTEM_TABLE *SystemTable,
     UINTN table_length;
     UINTN structure_count;
     UINTN expected_count;
+    UINTN processor_count = 0;
     UINTN offset = 0;
     BOOLEAN end_table = 0;
-    BOOLEAN processor_topology = 0;
+    BOOLEAN processor_topology = 1;
 
     __asm__ volatile ("mov %0 = r12;;" : "=r"(stack_pointer));
 
@@ -2584,10 +2585,17 @@ static BOOLEAN test_sal_smbios_tables(EFI_SYSTEM_TABLE *SystemTable,
         }
         if (table[offset] == 127U) {
             end_table = 1;
-        } else if (table[offset] == 4U && formatted_length >= 38U) {
-            processor_topology = table[offset + 35U] == 4U &&
-                table[offset + 36U] == 4U &&
-                table[offset + 37U] == 4U;
+        } else if (table[offset] == 4U) {
+            if (formatted_length < 42U || processor_count >= 4U ||
+                get_u16(table + offset + 2U) != 0x0400U + processor_count ||
+                table[offset + 24U] != 0x41U ||
+                table[offset + 35U] != 1U ||
+                table[offset + 36U] != 1U ||
+                table[offset + 37U] != 1U ||
+                get_u16(table + offset + 38U) != 0x0004U) {
+                processor_topology = 0;
+            }
+            processor_count++;
         }
         offset += formatted_length;
         while (offset + 1U < table_length &&
@@ -2600,7 +2608,7 @@ static BOOLEAN test_sal_smbios_tables(EFI_SYSTEM_TABLE *SystemTable,
         offset += 2U;
     }
     return offset == table_length && structure_count == expected_count &&
-           end_table && processor_topology;
+           end_table && processor_count == 4U && processor_topology;
 }
 
 EFI_STATUS ia64_services_main(EFI_HANDLE ImageHandle,

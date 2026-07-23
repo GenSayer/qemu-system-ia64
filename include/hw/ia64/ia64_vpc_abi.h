@@ -12,7 +12,7 @@
 
 #define IA64_FW_HANDOFF_ADDR          0x00000000000ff000ULL
 #define IA64_FW_HANDOFF_MAGIC         0x4d41523436414951ULL /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION       9ULL
+#define IA64_FW_HANDOFF_VERSION       10ULL
 
 #define IA64_FW_CONSOLE_SERIAL        0ULL
 #define IA64_FW_CONSOLE_VGA           1ULL
@@ -36,6 +36,9 @@ typedef struct __attribute__((packed)) IA64VpcHandoff {
     unsigned long long I8042Enabled;
     unsigned long long ProcessorCount;
     unsigned long long NvramPersistent;
+    unsigned long long SocketCount;
+    unsigned long long CoresPerSocket;
+    unsigned long long ThreadsPerCore;
 } IA64VpcHandoff;
 
 #endif /* HW_IA64_VPC_ABI_H */

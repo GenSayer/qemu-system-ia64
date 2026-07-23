@@ -91,6 +91,9 @@
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 #define IA64_INT10_ROM_BASE     0x000c0000U
 #define IA64_INT10_ROM_SIZE     0x00000200U
+#define IA64_INT10_ROM_PCIR_OFFSET    0x0020U
+#define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
+#define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
 #define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
 #define IA64_INT10_ROM_OEM_OFFSET     0x0180U
 #define IA64_INT10_ROM_VENDOR_OFFSET  0x0190U
@@ -117,6 +120,13 @@
 #define IA64_BDA_CHARACTER_HEIGHT 0x00000485U
 #define IA64_BDA_VIDEO_CONTROL   0x00000487U
 #define IA64_BDA_VIDEO_SWITCHES  0x00000488U
+#define IA64_ATI_VENDOR_ID        0x1002U
+#define IA64_ATI_RAGE128_PF_ID    0x5046U
+#define IA64_ATI_PLL_XCLK         23000U
+#define IA64_ATI_PLL_REFERENCE_FREQ 2700U
+#define IA64_ATI_PLL_REFERENCE_DIV  4U
+#define IA64_ATI_PLL_MIN_FREQ     12000U
+#define IA64_ATI_PLL_MAX_FREQ     35000U
 #endif
 #define IA64_IOSAPIC_BASE       0x0000000080110000ULL
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
@@ -1107,6 +1117,41 @@ static const MemoryRegionOps ia64_int10_io_ops = {
     },
 };
 
+static void ia64_int10_install_ati_bios_info(uint8_t *rom,
+                                             uint16_t vendor,
+                                             uint16_t device)
+{
+    if (vendor != IA64_ATI_VENDOR_ID || device != IA64_ATI_RAGE128_PF_ID) {
+        return;
+    }
+
+    /*
+     * Native Rage128 drivers follow the legacy ATI BIOS pointer chain at
+     * 48h to obtain PLL limits.  A generic VBE ROM which only has a valid
+     * 55AAh header is otherwise mistaken for an ATI BIOS, and the driver
+     * interprets executable bytes as clock values.  Publish the small,
+     * device-specific data block expected by those drivers while keeping
+     * all video services in the generic INT 10h implementation.
+     *
+     * Values use the units defined by the Rage128 BIOS interface: clocks
+     * are in 10 kHz units.  They match the range supported by QEMU's
+     * Rage128-compatible display model and its existing VGA BIOS.
+     */
+    stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
+    stw_le_p(rom + IA64_INT10_ROM_ATI_HEADER_OFFSET + 0x30,
+             IA64_INT10_ROM_ATI_PLL_OFFSET);
+    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x08,
+             IA64_ATI_PLL_XCLK);
+    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x0e,
+             IA64_ATI_PLL_REFERENCE_FREQ);
+    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x10,
+             IA64_ATI_PLL_REFERENCE_DIV);
+    stl_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x12,
+             IA64_ATI_PLL_MIN_FREQ);
+    stl_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x16,
+             IA64_ATI_PLL_MAX_FREQ);
+}
+
 static void ia64_vpc_install_int10(IA64VpcMachineState *s)
 {
     uint8_t rom[IA64_INT10_ROM_SIZE] = { 0 };
@@ -1133,22 +1178,28 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     rom[2] = IA64_INT10_ROM_SIZE / 512;
     memcpy(rom + 3, ia64_int10_rom_init, sizeof(ia64_int10_rom_init));
 
-    /* Include a conventional PCI data structure for ROM validators. */
-    stw_le_p(rom + 0x18, 0x40);
-    memcpy(rom + 0x40, "PCIR", 4);
-    stw_le_p(rom + 0x44, vendor);
-    stw_le_p(rom + 0x46, device);
-    stw_le_p(rom + 0x48, 0);
-    stw_le_p(rom + 0x4a, 0x18);
-    rom[0x4c] = 0;
-    rom[0x4d] = 0;
-    rom[0x4e] = 0;
-    rom[0x4f] = PCI_CLASS_DISPLAY_VGA >> 8;
-    stw_le_p(rom + 0x50, IA64_INT10_ROM_SIZE / 512);
-    stw_le_p(rom + 0x52, 0x0100);
-    rom[0x54] = 0;
-    rom[0x55] = 0x80;
+    /*
+     * Keep PCIR away from the legacy ATI BIOS pointer at 48h.  Both fields
+     * are consumed by real drivers and ROM validators.
+     */
+    stw_le_p(rom + 0x18, IA64_INT10_ROM_PCIR_OFFSET);
+    memcpy(rom + IA64_INT10_ROM_PCIR_OFFSET, "PCIR", 4);
+    stw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x04, vendor);
+    stw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x06, device);
+    stw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x08, 0);
+    stw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x0a, 0x18);
+    rom[IA64_INT10_ROM_PCIR_OFFSET + 0x0c] = 0;
+    rom[IA64_INT10_ROM_PCIR_OFFSET + 0x0d] = 0;
+    rom[IA64_INT10_ROM_PCIR_OFFSET + 0x0e] = 0;
+    rom[IA64_INT10_ROM_PCIR_OFFSET + 0x0f] =
+        PCI_CLASS_DISPLAY_VGA >> 8;
+    stw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x10,
+             IA64_INT10_ROM_SIZE / 512);
+    stw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x12, 0x0100);
+    rom[IA64_INT10_ROM_PCIR_OFFSET + 0x14] = 0;
+    rom[IA64_INT10_ROM_PCIR_OFFSET + 0x15] = 0x80;
     memcpy(rom + 0x60, "QEMU IA64 VBE INT10", 20);
+    ia64_int10_install_ati_bios_info(rom, vendor, device);
     memcpy(rom + IA64_INT10_ROM_HANDLER_OFFSET, ia64_int10_handler,
            sizeof(ia64_int10_handler));
     memcpy(rom + IA64_INT10_ROM_OEM_OFFSET,
@@ -1913,12 +1964,18 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     IA64VpcHandoff handoff = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
-    _Static_assert(sizeof(IA64VpcHandoff) == 80,
+    _Static_assert(sizeof(IA64VpcHandoff) == 104,
                    "IA-64 firmware handoff ABI size changed");
     _Static_assert(offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                    "IA-64 firmware handoff CPU count offset changed");
     _Static_assert(offsetof(IA64VpcHandoff, NvramPersistent) == 72,
                    "IA-64 firmware handoff NVRAM offset changed");
+    _Static_assert(offsetof(IA64VpcHandoff, SocketCount) == 80,
+                   "IA-64 firmware handoff socket count offset changed");
+    _Static_assert(offsetof(IA64VpcHandoff, CoresPerSocket) == 88,
+                   "IA-64 firmware handoff core count offset changed");
+    _Static_assert(offsetof(IA64VpcHandoff, ThreadsPerCore) == 96,
+                   "IA-64 firmware handoff thread count offset changed");
 
     handoff.Magic = cpu_to_le64(IA64_FW_HANDOFF_MAGIC);
     handoff.Version = cpu_to_le64(IA64_FW_HANDOFF_VERSION);
@@ -1933,6 +1990,9 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     handoff.ProcessorCount = cpu_to_le64(machine->smp.cpus);
     handoff.NvramPersistent = cpu_to_le64(
         s->nvram_resolved_path != NULL);
+    handoff.SocketCount = cpu_to_le64(machine->smp.sockets);
+    handoff.CoresPerSocket = cpu_to_le64(machine->smp.cores);
+    handoff.ThreadsPerCore = cpu_to_le64(machine->smp.threads);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
 }
