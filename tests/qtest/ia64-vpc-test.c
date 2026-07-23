@@ -15,6 +15,7 @@
 #include "libqtest.h"
 #include "libqos/generic-pcihost.h"
 #include "libqos/pci.h"
+#include "hw/display/bochs-vbe.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
@@ -41,6 +42,39 @@
 #define IA64_IOSAPIC_RTE_REMOTE_IRR  BIT(14)
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
+#define IA64_INT10_ROM_BASE          0x000c0000ULL
+#define IA64_INT10_ROM_SIZE          0x00000200U
+#define IA64_INT10_VECTOR_ADDR       0x00000040ULL
+#define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
+#define IA64_INT10_HANDLER_SIZE      116U
+#define IA64_INT10_ROM_OEM_OFFSET    0x0180U
+#define IA64_INT10_ROM_MODES_OFFSET  0x01d0U
+#define IA64_INT10_IO_BASE           0x01e0U
+#define IA64_INT10_TRIGGER           0x4941U
+#define IA64_VBE2_SIGNATURE          0x32454256U
+#define IA64_VBE_IO_INDEX            0x01ceU
+#define IA64_VBE_IO_DATA             0x01d0U
+
+enum TestInt10Register {
+    TEST_INT10_AX,
+    TEST_INT10_BX,
+    TEST_INT10_CX,
+    TEST_INT10_DX,
+    TEST_INT10_DI,
+    TEST_INT10_ES,
+    TEST_INT10_EXEC,
+    TEST_INT10_DATA,
+};
+
+typedef struct TestInt10Registers {
+    uint16_t ax;
+    uint16_t bx;
+    uint16_t cx;
+    uint16_t dx;
+    uint16_t di;
+    uint16_t es;
+    uint32_t input_signature;
+} TestInt10Registers;
 
 #define IA64_LSI_MMIO_BASE           0x00000000c1030000ULL
 #define IA64_LSI_SCRIPT_ADDR         0x00100000U
@@ -112,6 +146,243 @@ static QTestState *ia64_vpc_start(const char *extra_args)
 static uint64_t ia64_sparse_io_offset(uint32_t port)
 {
     return ((uint64_t)(port >> 2) << 12) | (port & 0xfff);
+}
+
+static void int10_outw(QTestState *qts, uint16_t port, uint16_t value)
+{
+    qtest_writew(qts, IA64_LEGACY_IO_BASE +
+                 ia64_sparse_io_offset(port), value);
+}
+
+static uint16_t int10_inw(QTestState *qts, uint16_t port)
+{
+    return qtest_readw(qts, IA64_LEGACY_IO_BASE +
+                       ia64_sparse_io_offset(port));
+}
+
+static size_t int10_call(QTestState *qts, TestInt10Registers *regs,
+                         uint8_t *response, size_t response_size)
+{
+    static const size_t register_offsets[] = {
+        [TEST_INT10_AX] = offsetof(TestInt10Registers, ax),
+        [TEST_INT10_BX] = offsetof(TestInt10Registers, bx),
+        [TEST_INT10_CX] = offsetof(TestInt10Registers, cx),
+        [TEST_INT10_DX] = offsetof(TestInt10Registers, dx),
+        [TEST_INT10_DI] = offsetof(TestInt10Registers, di),
+        [TEST_INT10_ES] = offsetof(TestInt10Registers, es),
+    };
+    size_t word_count;
+    size_t i;
+
+    for (i = TEST_INT10_AX; i <= TEST_INT10_ES; i++) {
+        uint16_t value;
+
+        memcpy(&value, (uint8_t *)regs + register_offsets[i],
+               sizeof(value));
+        int10_outw(qts, IA64_INT10_IO_BASE + i * 2, value);
+    }
+    if (regs->input_signature != 0) {
+        int10_outw(qts, IA64_INT10_IO_BASE + TEST_INT10_DATA * 2,
+                   (uint16_t)regs->input_signature);
+        int10_outw(qts, IA64_INT10_IO_BASE + TEST_INT10_DATA * 2,
+                   (uint16_t)(regs->input_signature >> 16));
+    }
+    int10_outw(qts, IA64_INT10_IO_BASE + TEST_INT10_EXEC * 2,
+               IA64_INT10_TRIGGER);
+    word_count = int10_inw(qts,
+                           IA64_INT10_IO_BASE + TEST_INT10_EXEC * 2);
+    g_assert_cmpuint(word_count * 2, <=, response_size);
+    for (i = 0; i < word_count; i++) {
+        stw_le_p(response + i * 2, int10_inw(
+            qts, IA64_INT10_IO_BASE + TEST_INT10_DATA * 2));
+    }
+    for (i = TEST_INT10_AX; i <= TEST_INT10_ES; i++) {
+        uint16_t value = int10_inw(qts,
+                                   IA64_INT10_IO_BASE + i * 2);
+
+        memcpy((uint8_t *)regs + register_offsets[i], &value,
+               sizeof(value));
+    }
+    return word_count * 2;
+}
+
+static uint32_t int10_far_to_linear(uint32_t pointer)
+{
+    return (pointer >> 16) * 16 + (pointer & 0xffff);
+}
+
+static uint16_t test_vbe_read(QTestState *qts, uint16_t index)
+{
+    qtest_writew(qts, IA64_LEGACY_IO_BASE + IA64_VBE_IO_INDEX, index);
+    return qtest_readw(qts, IA64_LEGACY_IO_BASE + IA64_VBE_IO_DATA);
+}
+
+static void test_int10_rom(void)
+{
+    uint8_t rom[IA64_INT10_ROM_SIZE];
+    uint8_t zero[IA64_INT10_ROM_SIZE] = { 0 };
+    uint8_t vector[4];
+    uint32_t vector_linear;
+    unsigned checksum = 0;
+    QTestState *qts = ia64_vpc_start(NULL);
+    size_t i;
+
+    qtest_memread(qts, IA64_INT10_ROM_BASE, rom, sizeof(rom));
+    g_assert_cmphex(rom[0], ==, 0x55);
+    g_assert_cmphex(rom[1], ==, 0xaa);
+    g_assert_cmphex(rom[2], ==, 1);
+    g_assert_cmphex(lduw_le_p(rom + 0x0d), ==,
+                    IA64_INT10_ROM_HANDLER_OFFSET);
+    g_assert_cmphex(lduw_le_p(rom + 0x13), ==,
+                    IA64_INT10_ROM_BASE >> 4);
+    g_assert_cmpmem(rom + 0x40, 4, "PCIR", 4);
+    g_assert_cmphex(lduw_le_p(rom + 0x44), ==, 0x1002);
+    g_assert_cmphex(lduw_le_p(rom + 0x46), ==, 0x5046);
+    g_assert_cmpmem(rom + 0x60, 19, "QEMU IA64 VBE INT10", 19);
+    g_assert_cmpmem(rom + IA64_INT10_ROM_OEM_OFFSET, 13,
+                    "QEMU IA64 VBE", 13);
+    g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET),
+                    ==, 0x111);
+    g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET], ==, 0x55);
+    g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET + 1], ==, 0x89);
+    g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET +
+                       IA64_INT10_HANDLER_SIZE], ==, 0);
+    for (i = 0; i < sizeof(rom); i++) {
+        checksum += rom[i];
+    }
+    g_assert_cmphex(checksum & 0xff, ==, 0);
+
+    qtest_memread(qts, IA64_INT10_VECTOR_ADDR, vector, sizeof(vector));
+    g_assert_cmphex(lduw_le_p(vector), ==, IA64_INT10_ROM_HANDLER_OFFSET);
+    g_assert_cmphex(lduw_le_p(vector + 2), ==,
+                    IA64_INT10_ROM_BASE >> 4);
+    vector_linear = lduw_le_p(vector + 2) * 16 + lduw_le_p(vector);
+    g_assert_cmphex(vector_linear, ==,
+                    IA64_INT10_ROM_BASE + IA64_INT10_ROM_HANDLER_OFFSET);
+
+    qtest_memwrite(qts, IA64_INT10_ROM_BASE, zero, sizeof(zero));
+    qtest_memwrite(qts, IA64_INT10_VECTOR_ADDR, zero, sizeof(vector));
+    qtest_system_reset(qts);
+    qtest_memread(qts, IA64_INT10_ROM_BASE, rom, sizeof(rom));
+    qtest_memread(qts, IA64_INT10_VECTOR_ADDR, vector, sizeof(vector));
+    g_assert_cmphex(rom[0], ==, 0x55);
+    g_assert_cmphex(rom[1], ==, 0xaa);
+    g_assert_cmphex(lduw_le_p(vector), ==, IA64_INT10_ROM_HANDLER_OFFSET);
+    g_assert_cmphex(lduw_le_p(vector + 2), ==,
+                    IA64_INT10_ROM_BASE >> 4);
+    qtest_quit(qts);
+}
+
+static void test_int10_vbe_for_device(const char *extra_args)
+{
+    uint8_t response[512];
+    TestInt10Registers regs = {
+        .ax = 0x4f00,
+        .di = 0x0100,
+        .es = 0x2000,
+    };
+    uint32_t modes_linear;
+    unsigned checksum = 0;
+    size_t length;
+    size_t i;
+    QTestState *qts = ia64_vpc_start(extra_args);
+
+    length = int10_call(qts, &regs,
+                        response, sizeof(response));
+    g_assert_cmpuint(length, ==, 256);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmpmem(response, 4, "VESA", 4);
+
+    regs = (TestInt10Registers) {
+        .ax = 0x4f00,
+        .di = 0x0100,
+        .es = 0x2000,
+        .input_signature = IA64_VBE2_SIGNATURE,
+    };
+    length = int10_call(qts, &regs,
+                        response, sizeof(response));
+    g_assert_cmpuint(length, ==, 512);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmpmem(response, 4, "VESA", 4);
+    g_assert_cmphex(lduw_le_p(response + 4), ==, 0x0300);
+    g_assert_cmphex(lduw_le_p(response + 18), ==, 256);
+    modes_linear = int10_far_to_linear(ldl_le_p(response + 14));
+    g_assert_cmphex(modes_linear,
+                    ==, IA64_INT10_ROM_BASE + IA64_INT10_ROM_MODES_OFFSET);
+    g_assert_cmphex(qtest_readw(qts, modes_linear), ==, 0x111);
+    g_assert_cmphex(int10_far_to_linear(ldl_le_p(response + 6)),
+                    ==, IA64_INT10_ROM_BASE + IA64_INT10_ROM_OEM_OFFSET);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4f01;
+    regs.cx = 0x144;
+    length = int10_call(qts, &regs,
+                        response, sizeof(response));
+    g_assert_cmpuint(length, ==, 256);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(lduw_le_p(response) & 0x80, !=, 0);
+    g_assert_cmphex(lduw_le_p(response + 16), ==, 4096);
+    g_assert_cmphex(lduw_le_p(response + 18), ==, 1024);
+    g_assert_cmphex(lduw_le_p(response + 20), ==, 768);
+    g_assert_cmphex(response[25], ==, 32);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 40), ==, 0xc4000000U);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4f02;
+    regs.bx = 0x4143;
+    length = int10_call(qts, &regs,
+                        response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_XRES), ==, 800);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_YRES), ==, 600);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, 32);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_ENABLE) & 0x41,
+                    ==, 0x41);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4f03;
+    length = int10_call(qts, &regs,
+                        response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(regs.bx, ==, 0x4143);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4f06;
+    regs.bx = 1;
+    length = int10_call(qts, &regs,
+                        response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(regs.bx, ==, 3200);
+    g_assert_cmphex(regs.cx, ==, 800);
+    g_assert_cmphex(regs.dx, >, 600);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4f15;
+    regs.bx = 1;
+    length = int10_call(qts, &regs,
+                        response, sizeof(response));
+    g_assert_cmpuint(length, ==, 128);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(response[0], ==, 0x00);
+    g_assert_cmphex(response[1], ==, 0xff);
+    for (i = 0; i < length; i++) {
+        checksum += response[i];
+    }
+    g_assert_cmphex(checksum & 0xff, ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_int10_vbe(void)
+{
+    test_int10_vbe_for_device(NULL);
+}
+
+static void test_int10_vbe_std(void)
+{
+    test_int10_vbe_for_device("-vga std");
 }
 
 static void test_acpi_reset_register(void)
@@ -826,6 +1097,9 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ia64-vpc/acpi-reset-register",
                    test_acpi_reset_register);
+    qtest_add_func("/ia64-vpc/vga/int10-rom", test_int10_rom);
+    qtest_add_func("/ia64-vpc/vga/int10-vbe", test_int10_vbe);
+    qtest_add_func("/ia64-vpc/vga/int10-vbe-std", test_int10_vbe_std);
     qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",

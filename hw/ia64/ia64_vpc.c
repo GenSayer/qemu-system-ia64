@@ -23,6 +23,8 @@
 #include "hw/core/cpu.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/char/serial-mm.h"
+#include "hw/display/bochs-vbe.h"
+#include "hw/display/edid.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "hw/ide/ahci-pci.h"
@@ -85,6 +87,23 @@
 #define IA64_VGA_MMIO_PCI_BASE  0x00000000c8000000ULL
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+#define IA64_INT10_ROM_BASE     0x000c0000U
+#define IA64_INT10_ROM_SIZE     0x00000200U
+#define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
+#define IA64_INT10_ROM_OEM_OFFSET     0x0180U
+#define IA64_INT10_ROM_VENDOR_OFFSET  0x0190U
+#define IA64_INT10_ROM_PRODUCT_OFFSET 0x01a0U
+#define IA64_INT10_ROM_REVISION_OFFSET 0x01c0U
+#define IA64_INT10_ROM_MODES_OFFSET   0x01d0U
+#define IA64_INT10_VECTOR_ADDR  (0x10U * 4U)
+#define IA64_INT10_IO_BASE      0x000001e0U
+#define IA64_INT10_IO_SIZE      0x00000010U
+#define IA64_INT10_TRIGGER      0x4941U
+#define IA64_VBE2_SIGNATURE     0x32454256U
+#define IA64_VBE_IO_INDEX       0x01ceU
+#define IA64_VBE_IO_DATA        0x01d0U
+#endif
 #define IA64_IOSAPIC_BASE       0x0000000080110000ULL
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
 #define IA64_ACPI_PM_IO_BASE    0x00002000U
@@ -105,6 +124,150 @@
 #define IA64_SAPIC_DELIVERY_INT     0
 #define IA64_SAPIC_DELIVERY_NMI     4
 #define IA64_SAPIC_DELIVERY_EXTINT  7
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+enum {
+    IA64_INT10_REG_AX,
+    IA64_INT10_REG_BX,
+    IA64_INT10_REG_CX,
+    IA64_INT10_REG_DX,
+    IA64_INT10_REG_DI,
+    IA64_INT10_REG_ES,
+    IA64_INT10_REG_EXEC,
+    IA64_INT10_REG_DATA,
+};
+
+typedef struct IA64Int10Registers {
+    uint16_t ax;
+    uint16_t bx;
+    uint16_t cx;
+    uint16_t dx;
+    uint16_t di;
+    uint16_t es;
+} IA64Int10Registers;
+
+typedef struct IA64VbeMode {
+    uint16_t number;
+    uint16_t width;
+    uint16_t height;
+    uint8_t bpp;
+} IA64VbeMode;
+
+static const IA64VbeMode ia64_vbe_modes[] = {
+    { 0x111,  640,  480, 16 },
+    { 0x112,  640,  480, 24 },
+    { 0x114,  800,  600, 16 },
+    { 0x115,  800,  600, 24 },
+    { 0x117, 1024,  768, 16 },
+    { 0x118, 1024,  768, 24 },
+    { 0x11a, 1280, 1024, 16 },
+    { 0x11b, 1280, 1024, 24 },
+    { 0x141,  640,  400, 32 },
+    { 0x142,  640,  480, 32 },
+    { 0x143,  800,  600, 32 },
+    { 0x144, 1024,  768, 32 },
+    { 0x145, 1280, 1024, 32 },
+};
+
+static const char ia64_vbe_oem[] = "QEMU IA64 VBE";
+static const char ia64_vbe_vendor[] = "QEMU";
+static const char ia64_vbe_product[] = "IA64 VGA VBE bridge";
+static const char ia64_vbe_revision[] = "1.0";
+
+/*
+ * The real-mode INT 10h entry marshals the registers through the private
+ * I/O window above.  Keeping the executable stub small is intentional: the
+ * VBE implementation remains normal, testable C code, and the stub also
+ * works when the guest uses a software x86 BIOS emulator instead of native
+ * IA-32 execution.  The bytes below are 16-bit code equivalent to:
+ *
+ *     push bp                 ; save registers not returned by VBE
+ *     mov  bp, sp
+ *     push ax
+ *     push dx
+ *     mov  dx, 1e0h
+ *     out  dx, ax
+ *     add  dx, 2
+ *     mov  ax, bx
+ *     out  dx, ax
+ *     add  dx, 2
+ *     mov  ax, cx
+ *     out  dx, ax
+ *     add  dx, 2
+ *     mov  ax, [bp-4]
+ *     out  dx, ax
+ *     add  dx, 2
+ *     mov  ax, di
+ *     out  dx, ax
+ *     add  dx, 2
+ *     mov  ax, es
+ *     out  dx, ax
+ *     add  dx, 2
+ *     cmp  word [bp-2], 4f00h
+ *     jne  execute
+ *     add  dx, 2
+ *     mov  ax, es:[di]
+ *     out  dx, ax
+ *     mov  ax, es:[di+2]
+ *     out  dx, ax             ; pass the VBE2 input signature
+ *     sub  dx, 2
+ * execute:
+ *     mov  ax, 4941h
+ *     out  dx, ax             ; execute the request at 1ech
+ *     in   ax, dx
+ *     mov  cx, ax
+ *     jcxz response_done
+ *     push di
+ *     add  dx, 2
+ *     cld
+ * response_loop:
+ *     in   ax, dx
+ *     stosw
+ *     loop response_loop
+ *     pop  di
+ * response_done:
+ *     mov  dx, 1e0h
+ *     in   ax, dx
+ *     mov  [bp-2], ax
+ *     add  dx, 2
+ *     in   ax, dx
+ *     mov  bx, ax
+ *     add  dx, 2
+ *     in   ax, dx
+ *     mov  cx, ax
+ *     add  dx, 2
+ *     in   ax, dx
+ *     mov  dx, ax
+ *     mov  ax, [bp-2]
+ *     mov  sp, bp
+ *     pop  bp
+ *     iret
+ */
+static const uint8_t ia64_int10_handler[] = {
+    0x55, 0x89, 0xe5, 0x50, 0x52, 0xba, 0xe0, 0x01,
+    0xef, 0x83, 0xc2, 0x02, 0x89, 0xd8, 0xef, 0x83,
+    0xc2, 0x02, 0x89, 0xc8, 0xef, 0x83, 0xc2, 0x02,
+    0x8b, 0x46, 0xfc, 0xef, 0x83, 0xc2, 0x02, 0x89,
+    0xf8, 0xef, 0x83, 0xc2, 0x02, 0x8c, 0xc0, 0xef,
+    0x83, 0xc2, 0x02, 0x81, 0x7e, 0xfe, 0x00, 0x4f,
+    0x75, 0x0f, 0x83, 0xc2, 0x02, 0x26, 0x8b, 0x05,
+    0xef, 0x26, 0x8b, 0x45, 0x02, 0xef, 0x83, 0xea,
+    0x02, 0xb8, 0x41, 0x49, 0xef, 0xed, 0x89, 0xc1,
+    0xe3, 0x0a, 0x57, 0x83, 0xc2, 0x02, 0xfc, 0xed,
+    0xab, 0xe2, 0xfc, 0x5f, 0xba, 0xe0, 0x01, 0xed,
+    0x89, 0x46, 0xfe, 0x83, 0xc2, 0x02, 0xed, 0x89,
+    0xc3, 0x83, 0xc2, 0x02, 0xed, 0x89, 0xc1, 0x83,
+    0xc2, 0x02, 0xed, 0x89, 0xc2, 0x8b, 0x46, 0xfe,
+    0x89, 0xec, 0x5d, 0xcf,
+};
+
+/* Option-ROM initialization entry: install C000:0100 as vector 10h. */
+static const uint8_t ia64_int10_rom_init[] = {
+    0x50, 0x1e, 0x31, 0xc0, 0x8e, 0xd8, 0xc7, 0x06,
+    0x40, 0x00, 0x00, 0x01, 0xc7, 0x06, 0x42, 0x00,
+    0x00, 0xc0, 0x1f, 0x58, 0xcb,
+};
+#endif
 
 #define TYPE_IA64_VPC_MACHINE MACHINE_TYPE_NAME("ia64-vpc")
 OBJECT_DECLARE_SIMPLE_TYPE(IA64VpcMachineState, IA64_VPC_MACHINE)
@@ -138,6 +301,17 @@ struct IA64VpcMachineState {
     MemoryRegion nvram_mmio;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_reset;
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    MemoryRegion int10_pci_io;
+    IA64Int10Registers int10_request;
+    IA64Int10Registers int10_result;
+    uint32_t int10_input_signature;
+    uint8_t int10_response[512];
+    uint16_t int10_response_length;
+    uint16_t int10_response_offset;
+    uint8_t int10_input_signature_words;
+    uint8_t int10_dpms_state;
+#endif
 
     Object *pci_fixup_reset;
     QEMUTimer *watchdog_timer;
@@ -153,6 +327,657 @@ struct IA64VpcMachineState {
     Notifier powerdown_notifier;
     Notifier done_notifier;
 };
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+static const IA64VbeMode *ia64_vbe_find_mode(uint16_t number)
+{
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(ia64_vbe_modes); i++) {
+        if (ia64_vbe_modes[i].number == number) {
+            return &ia64_vbe_modes[i];
+        }
+    }
+    return NULL;
+}
+
+static void ia64_vbe_write(uint16_t index, uint16_t value)
+{
+    address_space_stw_le(&address_space_memory,
+                         IA64_PCI_IO_BASE + IA64_VBE_IO_INDEX,
+                         index, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stw_le(&address_space_memory,
+                         IA64_PCI_IO_BASE + IA64_VBE_IO_DATA,
+                         value, MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static uint16_t ia64_vbe_read(uint16_t index)
+{
+    address_space_stw_le(&address_space_memory,
+                         IA64_PCI_IO_BASE + IA64_VBE_IO_INDEX,
+                         index, MEMTXATTRS_UNSPECIFIED, NULL);
+    return address_space_lduw_le(&address_space_memory,
+                                 IA64_PCI_IO_BASE + IA64_VBE_IO_DATA,
+                                 MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static uint32_t ia64_vbe_memory_size(void)
+{
+    return (uint32_t)ia64_vbe_read(VBE_DISPI_INDEX_VIDEO_MEMORY_64K) *
+           (64 * KiB);
+}
+
+static uint32_t ia64_int10_rom_pointer(uint16_t offset)
+{
+    return ((IA64_INT10_ROM_BASE >> 4) << 16) | offset;
+}
+
+static void ia64_int10_response_clear(IA64VpcMachineState *s)
+{
+    memset(s->int10_response, 0, sizeof(s->int10_response));
+    s->int10_response_length = 0;
+    s->int10_response_offset = 0;
+}
+
+static void ia64_int10_response_size(IA64VpcMachineState *s, size_t size)
+{
+    g_assert(size <= sizeof(s->int10_response));
+    g_assert((size & 1) == 0);
+    memset(s->int10_response, 0, size);
+    s->int10_response_length = size;
+    s->int10_response_offset = 0;
+}
+
+static void ia64_int10_vbe_success(IA64VpcMachineState *s)
+{
+    s->int10_result.ax = 0x004f;
+}
+
+static void ia64_int10_vbe_failure(IA64VpcMachineState *s)
+{
+    s->int10_result.ax = 0x014f;
+}
+
+static void ia64_int10_vbe_unsupported(IA64VpcMachineState *s)
+{
+    s->int10_result.ax = 0x024f;
+}
+
+static void ia64_int10_controller_info(IA64VpcMachineState *s)
+{
+    size_t response_size;
+    uint8_t *info;
+
+    response_size = s->int10_input_signature == IA64_VBE2_SIGNATURE ?
+                    512 : 256;
+    ia64_int10_response_size(s, response_size);
+    info = s->int10_response;
+    memcpy(info, "VESA", 4);
+    stw_le_p(info + 4, 0x0300);
+    stl_le_p(info + 6,
+             ia64_int10_rom_pointer(IA64_INT10_ROM_OEM_OFFSET));
+    stl_le_p(info + 10, 0);
+    stl_le_p(info + 14,
+             ia64_int10_rom_pointer(IA64_INT10_ROM_MODES_OFFSET));
+    stw_le_p(info + 18,
+             ia64_vbe_read(VBE_DISPI_INDEX_VIDEO_MEMORY_64K));
+    stw_le_p(info + 20, 0x0100);
+    stl_le_p(info + 22,
+             ia64_int10_rom_pointer(IA64_INT10_ROM_VENDOR_OFFSET));
+    stl_le_p(info + 26,
+             ia64_int10_rom_pointer(IA64_INT10_ROM_PRODUCT_OFFSET));
+    stl_le_p(info + 30,
+             ia64_int10_rom_pointer(IA64_INT10_ROM_REVISION_OFFSET));
+    ia64_int10_vbe_success(s);
+}
+
+static void ia64_int10_mode_info(IA64VpcMachineState *s)
+{
+    const IA64VbeMode *mode =
+        ia64_vbe_find_mode(s->int10_request.cx & 0x01ff);
+    uint32_t pitch;
+    uint32_t image_size;
+    uint32_t memory_size;
+    uint32_t pages;
+    uint8_t red_size;
+    uint8_t green_size;
+    uint8_t alpha_size;
+    uint8_t alpha_pos;
+    uint8_t *info;
+
+    if (mode == NULL) {
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+
+    ia64_int10_response_size(s, 256);
+    info = s->int10_response;
+    pitch = mode->width * DIV_ROUND_UP(mode->bpp, 8);
+    image_size = pitch * mode->height;
+    memory_size = ia64_vbe_memory_size();
+    if (image_size > memory_size) {
+        ia64_int10_response_clear(s);
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+    pages = memory_size /
+            ((image_size + 64 * KiB - 1) & ~((64 * KiB) - 1));
+    pages = CLAMP(pages, 1, 256) - 1;
+
+    stw_le_p(info + 0, 0x00bb);
+    info[2] = 0x07;
+    info[3] = 0;
+    stw_le_p(info + 4, 64);
+    stw_le_p(info + 6, 64);
+    stw_le_p(info + 8, 0xa000);
+    stw_le_p(info + 10, 0);
+    stl_le_p(info + 12, 0);
+    stw_le_p(info + 16, pitch);
+    stw_le_p(info + 18, mode->width);
+    stw_le_p(info + 20, mode->height);
+    info[22] = 8;
+    info[23] = 16;
+    info[24] = 1;
+    info[25] = mode->bpp;
+    info[26] = 1;
+    info[27] = 6; /* Direct-color memory model. */
+    info[28] = 64;
+    info[29] = pages;
+    info[30] = 1;
+
+    red_size = mode->bpp == 16 ? 5 : 8;
+    green_size = mode->bpp == 16 ? 6 : 8;
+    alpha_size = mode->bpp == 32 ? 8 : 0;
+    alpha_pos = mode->bpp == 32 ? 24 : 0;
+    info[31] = red_size;
+    info[32] = mode->bpp == 16 ? 11 : 16;
+    info[33] = green_size;
+    info[34] = mode->bpp == 16 ? 5 : 8;
+    info[35] = mode->bpp == 16 ? 5 : 8;
+    info[36] = 0;
+    info[37] = alpha_size;
+    info[38] = alpha_pos;
+    info[39] = mode->bpp == 32 ? 2 : 0;
+    stl_le_p(info + 40, IA64_VGA_FB_PCI_BASE);
+    stw_le_p(info + 50, pitch);
+    info[52] = pages;
+    info[53] = pages;
+    memcpy(info + 54, info + 31, 8);
+    ia64_int10_vbe_success(s);
+}
+
+static const IA64VbeMode *ia64_int10_current_mode(IA64VpcMachineState *s,
+                                                   uint16_t *number)
+{
+    const IA64VbeMode *mode = NULL;
+    uint16_t enable = ia64_vbe_read(VBE_DISPI_INDEX_ENABLE);
+    uint16_t width;
+    uint16_t height;
+    uint16_t bpp;
+    size_t i;
+
+    (void)s;
+    if (!(enable & VBE_DISPI_ENABLED)) {
+        *number = 3;
+        return NULL;
+    }
+    width = ia64_vbe_read(VBE_DISPI_INDEX_XRES);
+    height = ia64_vbe_read(VBE_DISPI_INDEX_YRES);
+    bpp = ia64_vbe_read(VBE_DISPI_INDEX_BPP);
+    for (i = 0; i < G_N_ELEMENTS(ia64_vbe_modes); i++) {
+        if (ia64_vbe_modes[i].width == width &&
+            ia64_vbe_modes[i].height == height &&
+            ia64_vbe_modes[i].bpp == bpp) {
+            mode = &ia64_vbe_modes[i];
+            break;
+        }
+    }
+    *number = mode ? mode->number : 3;
+    if (mode && (enable & VBE_DISPI_LFB_ENABLED)) {
+        *number |= 0x4000;
+    }
+    return mode;
+}
+
+static void ia64_int10_set_mode(IA64VpcMachineState *s)
+{
+    const IA64VbeMode *mode =
+        ia64_vbe_find_mode(s->int10_request.bx & 0x01ff);
+    uint32_t image_size;
+    uint16_t enable;
+
+    if (mode == NULL) {
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+    image_size = mode->width * mode->height *
+                 DIV_ROUND_UP(mode->bpp, 8);
+    if (image_size > ia64_vbe_memory_size()) {
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+
+    ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    ia64_vbe_write(VBE_DISPI_INDEX_ID, VBE_DISPI_ID5);
+    ia64_vbe_write(VBE_DISPI_INDEX_BPP, mode->bpp);
+    ia64_vbe_write(VBE_DISPI_INDEX_XRES, mode->width);
+    ia64_vbe_write(VBE_DISPI_INDEX_YRES, mode->height);
+    ia64_vbe_write(VBE_DISPI_INDEX_BANK, 0);
+    ia64_vbe_write(VBE_DISPI_INDEX_VIRT_WIDTH, mode->width);
+    ia64_vbe_write(VBE_DISPI_INDEX_X_OFFSET, 0);
+    ia64_vbe_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+    enable = VBE_DISPI_ENABLED;
+    if (s->int10_request.bx & 0x4000) {
+        enable |= VBE_DISPI_LFB_ENABLED;
+    }
+    if (s->int10_request.bx & 0x8000) {
+        enable |= VBE_DISPI_NOCLEARMEM;
+    }
+    ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, enable);
+    ia64_int10_vbe_success(s);
+}
+
+static void ia64_int10_window_control(IA64VpcMachineState *s)
+{
+    uint8_t subfunction = s->int10_request.bx >> 8;
+    uint8_t window = s->int10_request.bx;
+
+    if (window != 0 || subfunction > 1) {
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+    if (subfunction == 0) {
+        ia64_vbe_write(VBE_DISPI_INDEX_BANK, s->int10_request.dx);
+    } else {
+        s->int10_result.dx = ia64_vbe_read(VBE_DISPI_INDEX_BANK);
+    }
+    ia64_int10_vbe_success(s);
+}
+
+static void ia64_int10_scanline(IA64VpcMachineState *s)
+{
+    uint16_t number;
+    const IA64VbeMode *mode = ia64_int10_current_mode(s, &number);
+    uint8_t subfunction = s->int10_request.bx;
+    uint32_t bytes_per_pixel;
+    uint32_t width;
+    uint32_t pitch;
+
+    if (mode == NULL || subfunction > 2) {
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+
+    bytes_per_pixel = DIV_ROUND_UP(mode->bpp, 8);
+    if (subfunction == 0) {
+        ia64_vbe_write(VBE_DISPI_INDEX_VIRT_WIDTH,
+                       s->int10_request.cx);
+    } else if (subfunction == 2) {
+        width = DIV_ROUND_UP(s->int10_request.cx, bytes_per_pixel);
+        if (width == 0 || width > UINT16_MAX) {
+            ia64_int10_vbe_failure(s);
+            return;
+        }
+        ia64_vbe_write(VBE_DISPI_INDEX_VIRT_WIDTH, width);
+    }
+
+    width = ia64_vbe_read(VBE_DISPI_INDEX_VIRT_WIDTH);
+    pitch = width * bytes_per_pixel;
+    if (pitch == 0) {
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+    s->int10_result.bx = pitch;
+    s->int10_result.cx = width;
+    s->int10_result.dx = MIN(ia64_vbe_memory_size() / pitch, UINT16_MAX);
+    ia64_int10_vbe_success(s);
+}
+
+static void ia64_int10_display_start(IA64VpcMachineState *s)
+{
+    uint16_t number;
+    const IA64VbeMode *mode = ia64_int10_current_mode(s, &number);
+    uint8_t subfunction = s->int10_request.bx;
+
+    if (mode == NULL) {
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+    switch (subfunction) {
+    case 0x00:
+    case 0x80:
+        ia64_vbe_write(VBE_DISPI_INDEX_X_OFFSET, s->int10_request.cx);
+        ia64_vbe_write(VBE_DISPI_INDEX_Y_OFFSET, s->int10_request.dx);
+        break;
+    case 0x01:
+        s->int10_result.cx = ia64_vbe_read(VBE_DISPI_INDEX_X_OFFSET);
+        s->int10_result.dx = ia64_vbe_read(VBE_DISPI_INDEX_Y_OFFSET);
+        break;
+    default:
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+    ia64_int10_vbe_success(s);
+}
+
+static void ia64_int10_dpms(IA64VpcMachineState *s)
+{
+    uint8_t subfunction = s->int10_request.bx;
+
+    switch (subfunction) {
+    case 0:
+        s->int10_result.bx = 0x0f30;
+        break;
+    case 1:
+        s->int10_dpms_state = (s->int10_request.bx >> 8) & 0x0f;
+        break;
+    case 2:
+        s->int10_result.bx = (uint16_t)s->int10_dpms_state << 8 | 2;
+        break;
+    default:
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+    ia64_int10_vbe_success(s);
+}
+
+static void ia64_int10_ddc(IA64VpcMachineState *s)
+{
+    qemu_edid_info edid_info = {
+        .vendor = "RHT",
+        .name = "QEMU IA64",
+        .prefx = 1280,
+        .prefy = 1024,
+        .maxx = 1280,
+        .maxy = 1024,
+        .refresh_rate = 60000,
+    };
+    uint8_t subfunction = s->int10_request.bx;
+
+    switch (subfunction) {
+    case 0:
+        s->int10_result.bx = 0x0103;
+        break;
+    case 1:
+        if (s->int10_request.dx != 0) {
+            ia64_int10_vbe_failure(s);
+            return;
+        }
+        ia64_int10_response_size(s, 128);
+        qemu_edid_generate(s->int10_response, 128, &edid_info);
+        break;
+    default:
+        ia64_int10_vbe_failure(s);
+        return;
+    }
+    ia64_int10_vbe_success(s);
+}
+
+static void ia64_int10_execute(IA64VpcMachineState *s)
+{
+    uint16_t current_mode;
+
+    s->int10_result = s->int10_request;
+    ia64_int10_response_clear(s);
+
+    if ((s->int10_request.ax & 0xff00) == 0x4f00) {
+        switch (s->int10_request.ax & 0xff) {
+        case 0x00:
+            ia64_int10_controller_info(s);
+            return;
+        case 0x01:
+            ia64_int10_mode_info(s);
+            return;
+        case 0x02:
+            ia64_int10_set_mode(s);
+            return;
+        case 0x03:
+            ia64_int10_current_mode(s, &current_mode);
+            s->int10_result.bx = current_mode;
+            ia64_int10_vbe_success(s);
+            return;
+        case 0x05:
+            ia64_int10_window_control(s);
+            return;
+        case 0x06:
+            ia64_int10_scanline(s);
+            return;
+        case 0x07:
+            ia64_int10_display_start(s);
+            return;
+        case 0x10:
+            ia64_int10_dpms(s);
+            return;
+        case 0x15:
+            ia64_int10_ddc(s);
+            return;
+        default:
+            ia64_int10_vbe_unsupported(s);
+            return;
+        }
+    }
+
+    switch (s->int10_request.ax >> 8) {
+    case 0x00:
+        if ((s->int10_request.ax & 0xff) == 3) {
+            ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+        }
+        break;
+    case 0x0f:
+        s->int10_result.ax = 80 << 8 | 3;
+        s->int10_result.bx &= 0x00ff;
+        break;
+    case 0x1a:
+        if ((s->int10_request.ax & 0xff) == 0) {
+            s->int10_result.ax = 0x001a;
+            s->int10_result.bx = 0x0008;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static uint64_t ia64_int10_io_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    unsigned reg = addr >> 1;
+
+    if (size != 2 || (addr & 1)) {
+        return 0xffff;
+    }
+    switch (reg) {
+    case IA64_INT10_REG_AX:
+        return s->int10_result.ax;
+    case IA64_INT10_REG_BX:
+        return s->int10_result.bx;
+    case IA64_INT10_REG_CX:
+        return s->int10_result.cx;
+    case IA64_INT10_REG_DX:
+        return s->int10_result.dx;
+    case IA64_INT10_REG_DI:
+        return s->int10_result.di;
+    case IA64_INT10_REG_ES:
+        return s->int10_result.es;
+    case IA64_INT10_REG_EXEC:
+        return s->int10_response_length / 2;
+    case IA64_INT10_REG_DATA:
+        if (s->int10_response_offset < s->int10_response_length) {
+            uint16_t value = lduw_le_p(s->int10_response +
+                                      s->int10_response_offset);
+
+            s->int10_response_offset += 2;
+            return value;
+        }
+        return 0;
+    default:
+        return 0xffff;
+    }
+}
+
+static void ia64_int10_io_write(void *opaque, hwaddr addr, uint64_t value,
+                                unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    unsigned reg = addr >> 1;
+
+    if (size != 2 || (addr & 1)) {
+        return;
+    }
+    switch (reg) {
+    case IA64_INT10_REG_AX:
+        s->int10_request.ax = value;
+        s->int10_input_signature = 0;
+        s->int10_input_signature_words = 0;
+        break;
+    case IA64_INT10_REG_BX:
+        s->int10_request.bx = value;
+        break;
+    case IA64_INT10_REG_CX:
+        s->int10_request.cx = value;
+        break;
+    case IA64_INT10_REG_DX:
+        s->int10_request.dx = value;
+        break;
+    case IA64_INT10_REG_DI:
+        s->int10_request.di = value;
+        break;
+    case IA64_INT10_REG_ES:
+        s->int10_request.es = value;
+        break;
+    case IA64_INT10_REG_EXEC:
+        if ((uint16_t)value == IA64_INT10_TRIGGER) {
+            ia64_int10_execute(s);
+        }
+        break;
+    case IA64_INT10_REG_DATA:
+        if (s->int10_input_signature_words < 2) {
+            s->int10_input_signature |=
+                (uint32_t)(uint16_t)value <<
+                (s->int10_input_signature_words * 16);
+            s->int10_input_signature_words++;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ia64_int10_io_ops = {
+    .read = ia64_int10_io_read,
+    .write = ia64_int10_io_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 2,
+        .max_access_size = 2,
+        .unaligned = false,
+    },
+    .impl = {
+        .min_access_size = 2,
+        .max_access_size = 2,
+        .unaligned = false,
+    },
+};
+
+static void ia64_vpc_install_int10(IA64VpcMachineState *s)
+{
+    uint8_t rom[IA64_INT10_ROM_SIZE] = { 0 };
+    uint8_t vector[4];
+    uint8_t checksum = 0;
+    uint16_t vendor = pci_get_word(s->vga_dev->config + PCI_VENDOR_ID);
+    uint16_t device = pci_get_word(s->vga_dev->config + PCI_DEVICE_ID);
+    size_t i;
+
+    g_assert(IA64_INT10_ROM_HANDLER_OFFSET +
+             sizeof(ia64_int10_handler) <= IA64_INT10_ROM_OEM_OFFSET);
+    g_assert(IA64_INT10_ROM_OEM_OFFSET + sizeof(ia64_vbe_oem) <=
+             IA64_INT10_ROM_VENDOR_OFFSET);
+    g_assert(IA64_INT10_ROM_VENDOR_OFFSET + sizeof(ia64_vbe_vendor) <=
+             IA64_INT10_ROM_PRODUCT_OFFSET);
+    g_assert(IA64_INT10_ROM_PRODUCT_OFFSET + sizeof(ia64_vbe_product) <=
+             IA64_INT10_ROM_REVISION_OFFSET);
+    g_assert(IA64_INT10_ROM_REVISION_OFFSET + sizeof(ia64_vbe_revision) <=
+             IA64_INT10_ROM_MODES_OFFSET);
+    g_assert(IA64_INT10_ROM_MODES_OFFSET +
+             (G_N_ELEMENTS(ia64_vbe_modes) + 1) * 2 < sizeof(rom));
+    rom[0] = 0x55;
+    rom[1] = 0xaa;
+    rom[2] = IA64_INT10_ROM_SIZE / 512;
+    memcpy(rom + 3, ia64_int10_rom_init, sizeof(ia64_int10_rom_init));
+
+    /* Include a conventional PCI data structure for ROM validators. */
+    stw_le_p(rom + 0x18, 0x40);
+    memcpy(rom + 0x40, "PCIR", 4);
+    stw_le_p(rom + 0x44, vendor);
+    stw_le_p(rom + 0x46, device);
+    stw_le_p(rom + 0x48, 0);
+    stw_le_p(rom + 0x4a, 0x18);
+    rom[0x4c] = 0;
+    rom[0x4d] = 0;
+    rom[0x4e] = 0;
+    rom[0x4f] = PCI_CLASS_DISPLAY_VGA >> 8;
+    stw_le_p(rom + 0x50, IA64_INT10_ROM_SIZE / 512);
+    stw_le_p(rom + 0x52, 0x0100);
+    rom[0x54] = 0;
+    rom[0x55] = 0x80;
+    memcpy(rom + 0x60, "QEMU IA64 VBE INT10", 20);
+    memcpy(rom + IA64_INT10_ROM_HANDLER_OFFSET, ia64_int10_handler,
+           sizeof(ia64_int10_handler));
+    memcpy(rom + IA64_INT10_ROM_OEM_OFFSET,
+           ia64_vbe_oem, sizeof(ia64_vbe_oem));
+    memcpy(rom + IA64_INT10_ROM_VENDOR_OFFSET,
+           ia64_vbe_vendor, sizeof(ia64_vbe_vendor));
+    memcpy(rom + IA64_INT10_ROM_PRODUCT_OFFSET,
+           ia64_vbe_product, sizeof(ia64_vbe_product));
+    memcpy(rom + IA64_INT10_ROM_REVISION_OFFSET,
+           ia64_vbe_revision, sizeof(ia64_vbe_revision));
+    for (i = 0; i < G_N_ELEMENTS(ia64_vbe_modes); i++) {
+        stw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET + i * 2,
+                 ia64_vbe_modes[i].number);
+    }
+    stw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET +
+             G_N_ELEMENTS(ia64_vbe_modes) * 2, 0xffff);
+
+    for (i = 0; i < sizeof(rom) - 1; i++) {
+        checksum += rom[i];
+    }
+    rom[sizeof(rom) - 1] = -checksum;
+    cpu_physical_memory_write(IA64_INT10_ROM_BASE, rom, sizeof(rom));
+
+    /*
+     * Keep the interrupt entry inside its option ROM.  In addition to being
+     * the conventional PC BIOS layout, Windows videoprt validates that the
+     * INT 10h vector resolves into the C0000h-CFFFFh video-ROM window before
+     * it enables its x86 BIOS emulator.
+     */
+    stw_le_p(vector, IA64_INT10_ROM_HANDLER_OFFSET);
+    stw_le_p(vector + 2, IA64_INT10_ROM_BASE >> 4);
+    cpu_physical_memory_write(IA64_INT10_VECTOR_ADDR, vector,
+                              sizeof(vector));
+}
+
+static void ia64_vpc_reset_int10(IA64VpcMachineState *s)
+{
+    memset(&s->int10_request, 0, sizeof(s->int10_request));
+    memset(&s->int10_result, 0, sizeof(s->int10_result));
+    s->int10_input_signature = 0;
+    s->int10_input_signature_words = 0;
+    ia64_int10_response_clear(s);
+    s->int10_dpms_state = 0;
+    ia64_vpc_install_int10(s);
+}
+
+static void ia64_vpc_init_int10(IA64VpcMachineState *s,
+                                MemoryRegion *pci_io)
+{
+    memory_region_init_io(&s->int10_pci_io, OBJECT(s),
+                          &ia64_int10_io_ops, s,
+                          "ia64-vpc.int10-pci-io", IA64_INT10_IO_SIZE);
+    memory_region_add_subregion(pci_io, IA64_INT10_IO_BASE,
+                                &s->int10_pci_io);
+    ia64_vpc_reset_int10(s);
+}
+#endif
 
 static uint64_t ia64_vpc_rtc_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -1257,6 +2082,11 @@ static void ia64_vpc_reset(void *opaque)
     acpi_pm1_cnt_reset(&s->acpi_regs);
     acpi_pm_tmr_reset(&s->acpi_regs);
     acpi_gpe_reset(&s->acpi_regs);
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    if (s->vga_dev != NULL) {
+        ia64_vpc_reset_int10(s);
+    }
+#endif
 }
 
 /*
@@ -1518,6 +2348,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
     ia64_vpc_configure_vga(s->vga_dev);
     ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    if (s->vga_dev != NULL) {
+        ia64_vpc_init_int10(s, pci_io);
+    }
+#endif
 #ifdef CONFIG_IA64_VPC_NETWORK
     ia64_vpc_init_network(s, pci_bus);
 #endif

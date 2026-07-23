@@ -44,6 +44,12 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
             }
         }
 
+    }
+
+    Scope (\_SB.PCI0)
+    {
+        Name (P2EN, 0x0F)
+
         Device (UAR0)
         {
             Name (_HID, "PNP0501")
@@ -54,14 +60,13 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
                     MaxFixed, NonCacheable, ReadWrite,
                     0, 0x00000047F0000000, 0x00000047F0000007,
                     0, 8)
-                IRQNoFlags () {4}
+                // The UART is wired to IOSAPIC GSI 4, not a legacy PIC IRQ.
+                Interrupt (ResourceConsumer, Level, ActiveLow, Shared, ,,)
+                {
+                    4
+                }
             })
         }
-    }
-
-    Scope (\_SB.PCI0)
-    {
-        Name (P2EN, 0x0F)
 
         Device (PS2K)
         {

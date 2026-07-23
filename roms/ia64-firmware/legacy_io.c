@@ -279,12 +279,6 @@ struct _EFI_SERIAL_IO_PROTOCOL {
 #define EFI_SERIAL_SOFTWARE_LOOPBACK_ENABLE     0x2000U
 #define EFI_SERIAL_HARDWARE_FLOW_CONTROL_ENABLE 0x4000U
 
-typedef struct {
-    FW_ACPI_HID_DEVICE_PATH_NODE Acpi;
-    FW_UART_DEVICE_PATH_NODE Uart;
-    FW_DEVICE_PATH_NODE End;
-} __attribute__((packed)) FW_SERIAL_DEVICE_PATH;
-
 static const UINT8 mSerialIoProtocolGuid[16] = {
     0x6f, 0xcf, 0x25, 0xbb, 0xd4, 0xf1, 0xd2, 0x11,
     0x9a, 0x0c, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0xfd
@@ -301,7 +295,7 @@ static UINTN mSerialLoopbackCount;
 static FW_SERIAL_DEVICE_PATH mSerialDevicePath = {
     .Acpi = {
         .Header = { 0x02, 0x01, sizeof(FW_ACPI_HID_DEVICE_PATH_NODE) },
-        .Hid = 0x0501d041U,
+        .Hid = FW_UART_DEVICE_PATH_HID_PNP0501,
         .Uid = 0,
     },
     .Uart = {
@@ -989,7 +983,9 @@ BOOLEAN fw_legacy_io_protocols_selftest(VOID)
         return 0;
     }
 
-    if (mSerialIoProtocol.SetControl(&mSerialIoProtocol,
+    if (mSerialDevicePath.Acpi.Hid != FW_UART_DEVICE_PATH_HID_PNP0501 ||
+        mSerialDevicePath.Acpi.Uid != 0 ||
+        mSerialIoProtocol.SetControl(&mSerialIoProtocol,
             EFI_SERIAL_SOFTWARE_LOOPBACK_ENABLE) != EFI_SUCCESS) {
         return 0;
     }

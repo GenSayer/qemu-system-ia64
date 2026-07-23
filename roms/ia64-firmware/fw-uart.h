@@ -30,4 +30,12 @@ typedef struct {
     UINT8 StopBits;
 } __attribute__((packed)) FW_UART_DEVICE_PATH_NODE;
 
+#define FW_UART_DEVICE_PATH_HID_PNP0501 0x050141d0U
+
+typedef struct {
+    FW_ACPI_HID_DEVICE_PATH_NODE Acpi;
+    FW_UART_DEVICE_PATH_NODE Uart;
+    FW_DEVICE_PATH_NODE End;
+} __attribute__((packed)) FW_SERIAL_DEVICE_PATH;
+
 #endif /* IA64_FIRMWARE_FW_UART_H */

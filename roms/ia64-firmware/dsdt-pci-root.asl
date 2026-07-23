@@ -33,6 +33,11 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
                     0, 0xC1000000, 0xD0FFFFFF, 0, 0x10000000)
+                // Parent window for the ACPI-enumerated MMIO UART child.
+                QWordMemory (ResourceProducer, PosDecode, MinFixed,
+                    MaxFixed, NonCacheable, ReadWrite,
+                    0, 0x00000047F0000000, 0x00000047F0000007,
+                    0, 8)
             })
             Name (_PRT, Package ()
             {

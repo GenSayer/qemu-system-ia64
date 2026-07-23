@@ -20,6 +20,7 @@
 #include "fw-legacy-io.h"
 #include "fw-pointer.h"
 #include "fw-services.h"
+#include "fw-uart.h"
 #include "fw-uga-io.h"
 #include "fw-usb.h"
 
@@ -1066,12 +1067,12 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[577];
+    UINT8 Aml[623];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[362];
+    UINT8 Aml[368];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -1628,8 +1629,8 @@ FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 613, acpi_dsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 398, acpi_ssdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 659, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 404, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
@@ -1703,7 +1704,13 @@ FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE32_SYSTEM_BOOT_INFORMATION) == 11,
 FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE127_END_OF_TABLE) == 4,
                  smbios_type127_size);
 
+#define HCDP_UART_FLAG_ACTIVE_LOW       (1u << 1)
 #define HCDP_UART_FLAG_PRIMARY_CONSOLE  (1u << 2)
+#define HCDP_UART_FLAG_INTERRUPT        (1u << 6)
+#define HCDP_UART_ACPI_HID_PNP0501      0x0105d041U
+#define HCDP_UART_PSEUDO_CLOCK_RATE     115200U
+#define HCDP_CONOUT_VGA_INDEX            0U
+#define HCDP_CONOUT_UART_INDEX           1U
 #define HCDP_DEVICE_FLAG_PRIMARY_CONSOLE 1u
 #define HCDP_DEVICE_TYPE_VGA_CONSOLE    ((1u << 3) | 2u)
 #define HCDP_PCI_INTERFACE_TYPE         1u
@@ -1742,8 +1749,9 @@ static ACPI_FACS               mFacs __attribute__((aligned(64)));
 /*
  * Source: dsdt-pci-root.asl (compiled with iasl -on).
  *
- * AML body for \_SB.PCI0 with _HID/_CID, _CRS windows, and _PRT entries
- * routing the fixed root-bus PCI INTx pins to IOSAPIC GSIs 16..19.
+ * AML body for \_SB.PCI0 with _HID/_CID, _CRS windows (including the
+ * parent window for the UART child), and _PRT entries routing the fixed
+ * root-bus PCI INTx pins to IOSAPIC GSIs 16..19.
  *
  * The root bridge _HID must be PNP0A03 (conventional PCI), not PNP0A08:
  * some guest OS installers validate every ancestor device of the install
@@ -1756,13 +1764,13 @@ static ACPI_DSDT               mDsdt = {
     .Aml = {
     /* Name (_S5, Package (0x04) { Zero, Zero, Zero, Zero }) */
     0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
-    0x10, 0x44, 0x23, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x4b, 0x22,
+    0x10, 0x42, 0x26, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x49, 0x25,
     0x50, 0x43, 0x49, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50, 0x4e,
     0x50, 0x30, 0x41, 0x30, 0x33, 0x00, 0x08, 0x5f, 0x43, 0x49, 0x44, 0x0d,
     0x50, 0x4e, 0x50, 0x30, 0x41, 0x30, 0x33, 0x00, 0x08, 0x5f, 0x53, 0x45,
     0x47, 0x00, 0x08, 0x5f, 0x42, 0x42, 0x4e, 0x00, 0x08, 0x5f, 0x55, 0x49,
     0x44, 0x00, 0x08, 0x5f, 0x43, 0x43, 0x41, 0x01, 0x08, 0x5f, 0x43, 0x52,
-    0x53, 0x11, 0x4c, 0x08, 0x0a, 0x88, 0x88, 0x0d, 0x00, 0x02, 0x0c, 0x00,
+    0x53, 0x11, 0x4a, 0x0b, 0x0a, 0xb6, 0x88, 0x0d, 0x00, 0x02, 0x0c, 0x00,
     0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x8a, 0x2b,
     0x00, 0x01, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00,
@@ -1774,7 +1782,12 @@ static ACPI_DSDT               mDsdt = {
     0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0xc1, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xd0, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x79, 0x00, 0x08, 0x5f, 0x50, 0x52,
+    0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+    0x8a, 0x2b, 0x00, 0x00, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x07, 0x00,
+    0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x79, 0x00, 0x08, 0x5f, 0x50, 0x52,
     0x54, 0x12, 0x49, 0x15, 0x1c, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x00,
     0x00, 0x0a, 0x10, 0x12, 0x09, 0x04, 0x0b, 0xff, 0xff, 0x01, 0x00, 0x0a,
     0x11, 0x12, 0x0a, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x02, 0x00, 0x0a, 0x12,
@@ -1812,10 +1825,11 @@ static ACPI_SSDT               mSsdt = {
         /*
          * Source: ssdt-platform-devices.asl
          *
-         * Scope (\_SB) contains CPU0..CPU3, patchable _STA values, and
-         * Device (UAR0) { _HID PNP0501; _CRS { QWordMemory UART; IRQ 4 } }.
+         * Scope (\_SB) contains CPU0..CPU3 and patchable _STA values.
          * Scope (\_SB.PCI0) {
          *   Name (P2EN, 0x0F)
+         *   Device (UAR0) { _HID PNP0501;
+         *     _CRS { QWordMemory UART; level/active-low/shared GSI 4 } }
          *   Device (PS2K) { _HID PNP0303; _STA { Return (P2EN) };
          *                   _CRS { IO 0x60; IO 0x64; IRQ 1 } }
          *   Device (PS2M) { _HID PNP0F13; _STA { Return (P2EN) };
@@ -1823,7 +1837,7 @@ static ACPI_SSDT               mSsdt = {
          * }
          */
         0xa0, 0x0f, 0x00, 0x15, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43,
-        0x49, 0x30, 0x06, 0x00, 0x10, 0x4f, 0x0d, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
+        0x49, 0x30, 0x06, 0x00, 0x10, 0x47, 0x08, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
         0x08, 0x43, 0x30, 0x45, 0x4e, 0x0a, 0x0f, 0x08, 0x43, 0x31, 0x45, 0x4e,
         0x0a, 0x0f, 0x08, 0x43, 0x32, 0x45, 0x4e, 0x0a, 0x0f, 0x08, 0x43, 0x33,
         0x45, 0x4e, 0x0a, 0x0f, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x30, 0x00,
@@ -1835,17 +1849,17 @@ static ACPI_SSDT               mSsdt = {
         0x00, 0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4,
         0x43, 0x32, 0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x33, 0x03,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00,
-        0xa4, 0x43, 0x33, 0x45, 0x4e, 0x5b, 0x82, 0x46, 0x05,
-        0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48,
+        0xa4, 0x43, 0x33, 0x45, 0x4e,
+        0x10, 0x47, 0x0d, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43, 0x49,
+        0x30, 0x08, 0x50, 0x32, 0x45, 0x4e, 0x0a, 0x0f,
+        0x5b, 0x82, 0x4c, 0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48,
         0x49, 0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08,
-        0x5f, 0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x36,
-        0x0a, 0x33, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x5f, 0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x3c,
+        0x0a, 0x39, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
         0x07, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x22, 0x10, 0x00, 0x79, 0x00,
-        0x10, 0x49, 0x07, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43, 0x49,
-        0x30, 0x08, 0x50, 0x32, 0x45, 0x4e, 0x0a, 0x0f,
+        0x89, 0x06, 0x00, 0x0d, 0x01, 0x04, 0x00, 0x00, 0x00, 0x79, 0x00,
         0x5b, 0x82, 0x39, 0x50, 0x53, 0x32, 0x4b,
         0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x14, 0x0b,
         0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32, 0x45, 0x4e, 0x08, 0x5f,
@@ -1861,7 +1875,7 @@ static ACPI_SSDT               mSsdt = {
 #define SSDT_CPU1_ENABLED_OFFSET 37U
 #define SSDT_CPU2_ENABLED_OFFSET 44U
 #define SSDT_CPU3_ENABLED_OFFSET 51U
-#define SSDT_PS2_ENABLED_OFFSET 259U
+#define SSDT_PS2_ENABLED_OFFSET 171U
 static ACPI_MCFG               mMcfg;
 static ACPI_MADT               mMadt;
 static ACPI_SRAT               mSrat;
@@ -14278,10 +14292,11 @@ static void efi_init_platform_tables(void)
     init_sdt_header(&mHcdp.Hdr, EFI_SIGNATURE_32('H', 'C', 'D', 'P'),
                     sizeof(mHcdp));
     mHcdp.Hdr.Revision = 3;
-    mHcdp.EntryCount = 2;
+    /* Only the fixed-length type 0/1 UART descriptors are counted here. */
+    mHcdp.EntryCount = 1;
     mHcdp.Uart[0].Type = 0;
     mHcdp.Uart[0].Bits = 8;
-    mHcdp.Uart[0].Parity = 0;
+    mHcdp.Uart[0].Parity = 1;
     mHcdp.Uart[0].StopBits = 1;
     mHcdp.Uart[0].PciSegment = 0;
     mHcdp.Uart[0].PciBus = 0;
@@ -14295,20 +14310,24 @@ static void efi_init_platform_tables(void)
     mHcdp.Uart[0].BaseAddress.AddressLow = (UINT32)IA64_UART_BASE;
     mHcdp.Uart[0].BaseAddress.AddressHigh =
         (UINT32)(IA64_UART_BASE >> 32);
-    mHcdp.Uart[0].PciDeviceId = 0;
-    mHcdp.Uart[0].PciVendorId = 0;
+    /* With the PCI flag clear, these fields carry ACPI _HID and _UID. */
+    mHcdp.Uart[0].PciDeviceId =
+        (UINT16)HCDP_UART_ACPI_HID_PNP0501;
+    mHcdp.Uart[0].PciVendorId =
+        (UINT16)(HCDP_UART_ACPI_HID_PNP0501 >> 16);
     mHcdp.Uart[0].GlobalInterrupt = 4;
-    mHcdp.Uart[0].ClockRate = 1843200;
+    mHcdp.Uart[0].ClockRate = HCDP_UART_PSEUDO_CLOCK_RATE;
     mHcdp.Uart[0].PciProgrammingInterface = 0x02;
     mHcdp.Uart[0].Flags =
-        vga_primary ? 0 : HCDP_UART_FLAG_PRIMARY_CONSOLE;
-    mHcdp.Uart[0].ConOutIndex = 0;
+        HCDP_UART_FLAG_ACTIVE_LOW | HCDP_UART_FLAG_INTERRUPT |
+        (vga_primary ? 0 : HCDP_UART_FLAG_PRIMARY_CONSOLE);
+    mHcdp.Uart[0].ConOutIndex = HCDP_CONOUT_UART_INDEX;
     mHcdp.Uart[0].Reserved = 0;
     mHcdp.Device[0].Type = HCDP_DEVICE_TYPE_VGA_CONSOLE;
     mHcdp.Device[0].Flags =
         vga_primary ? HCDP_DEVICE_FLAG_PRIMARY_CONSOLE : 0;
     mHcdp.Device[0].Length = sizeof(mHcdp.Device[0]);
-    mHcdp.Device[0].EfiIndex = 0;
+    mHcdp.Device[0].EfiIndex = HCDP_CONOUT_VGA_INDEX;
     mHcdp.Device[0].Pci.Interconnect = HCDP_PCI_INTERFACE_TYPE;
     mHcdp.Device[0].Pci.Reserved = 0;
     mHcdp.Device[0].Pci.Length = sizeof(mHcdp.Device[0].Pci);
@@ -14463,6 +14482,10 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         0x00, 0x00, 0x02, 0x00,
     };
     UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
+    UINT8 hcdp_uart_flags =
+        HCDP_UART_FLAG_ACTIVE_LOW | HCDP_UART_FLAG_INTERRUPT |
+        (fw_handoff_vga_console_primary() ?
+         0 : HCDP_UART_FLAG_PRIMARY_CONSOLE);
     UINTN i;
     UINT64 debug_port_base = fw_handoff_debug_port_base();
     BOOLEAN debug_port_present = debug_port_base != 0;
@@ -14665,12 +14688,40 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiMadt->Iosapic.Address != IOSAPIC_BASE ||
         mAcpiSlit->Localities != 1 ||
         mAcpiSlit->Entry[0] != 10 ||
-        mAcpiHcdp->Uart[0].Flags !=
-            (fw_handoff_vga_console_primary() ?
-             0 : HCDP_UART_FLAG_PRIMARY_CONSOLE) ||
+        mAcpiHcdp->EntryCount != 1 ||
+        mAcpiHcdp->Uart[0].Type != 0 ||
+        mAcpiHcdp->Uart[0].Bits != 8 ||
+        mAcpiHcdp->Uart[0].Parity != 1 ||
+        mAcpiHcdp->Uart[0].StopBits != 1 ||
+        mAcpiHcdp->Uart[0].PciSegment != 0 ||
+        mAcpiHcdp->Uart[0].PciBus != 0 ||
+        mAcpiHcdp->Uart[0].PciDevice != 0 ||
+        mAcpiHcdp->Uart[0].PciFunction != 0 ||
+        mAcpiHcdp->Uart[0].Baud != 115200 ||
+        !acpi_gas_matches(&mAcpiHcdp->Uart[0].BaseAddress,
+                          ACPI_GAS_SYSTEM_MEMORY, 8, IA64_UART_BASE) ||
+        mAcpiHcdp->Uart[0].PciDeviceId !=
+            (UINT16)HCDP_UART_ACPI_HID_PNP0501 ||
+        mAcpiHcdp->Uart[0].PciVendorId !=
+            (UINT16)(HCDP_UART_ACPI_HID_PNP0501 >> 16) ||
+        mAcpiHcdp->Uart[0].GlobalInterrupt != 4 ||
+        mAcpiHcdp->Uart[0].ClockRate != HCDP_UART_PSEUDO_CLOCK_RATE ||
+        mAcpiHcdp->Uart[0].PciProgrammingInterface != 0x02 ||
+        mAcpiHcdp->Uart[0].Flags != hcdp_uart_flags ||
+        mAcpiHcdp->Uart[0].ConOutIndex != HCDP_CONOUT_UART_INDEX ||
+        mAcpiHcdp->Uart[0].Reserved != 0 ||
+        mAcpiHcdp->Device[0].Type != HCDP_DEVICE_TYPE_VGA_CONSOLE ||
         mAcpiHcdp->Device[0].Flags !=
             (fw_handoff_vga_console_primary() ?
              HCDP_DEVICE_FLAG_PRIMARY_CONSOLE : 0) ||
+        mAcpiHcdp->Device[0].Length != sizeof(mAcpiHcdp->Device[0]) ||
+        mAcpiHcdp->Device[0].EfiIndex != HCDP_CONOUT_VGA_INDEX ||
+        mAcpiHcdp->Device[0].Pci.Interconnect !=
+            HCDP_PCI_INTERFACE_TYPE ||
+        mAcpiHcdp->Device[0].Pci.Reserved != 0 ||
+        mAcpiHcdp->Device[0].Pci.Length !=
+            sizeof(mAcpiHcdp->Device[0].Pci) ||
+        mAcpiHcdp->Device[0].Pci.Segment != 0 ||
         mAcpiHcdp->Device[0].Pci.Bus != 0 ||
         mAcpiHcdp->Device[0].Pci.Device != 5 ||
         mAcpiHcdp->Device[0].Pci.Function != 0 ||
@@ -21273,6 +21324,14 @@ typedef struct {
 } __attribute__((packed)) FW_GRAPHICS_DEVICE_PATH;
 
 typedef struct {
+    FW_GRAPHICS_DEVICE_PATH Graphics;
+    FW_SERIAL_DEVICE_PATH Serial;
+} __attribute__((packed)) FW_CONSOLE_OUTPUT_DEVICE_PATH;
+
+FW_STATIC_ASSERT(sizeof(FW_CONSOLE_OUTPUT_DEVICE_PATH) == 57U,
+                 console_output_device_path_size);
+
+typedef struct {
     FW_ACPI_HID_DEVICE_PATH_NODE Acpi;
     FW_DEVICE_PATH_NODE End;
 } __attribute__((packed)) FW_PCI_ROOT_BRIDGE_DEVICE_PATH;
@@ -21540,6 +21599,62 @@ static FW_GRAPHICS_DEVICE_PATH mGraphicsDevicePath = {
         .Type = 0x7f,
         .SubType = 0xff,
         .Length = 4,
+    },
+};
+
+static FW_CONSOLE_OUTPUT_DEVICE_PATH mConsoleOutputDevicePath = {
+    .Graphics = {
+        .Acpi = {
+            .Header = {
+                .Type = 0x02,
+                .SubType = 0x01,
+                .Length = sizeof(FW_ACPI_HID_DEVICE_PATH_NODE),
+            },
+            .Hid = 0x0A0341D0,
+            .Uid = 0,
+        },
+        .Pci = {
+            .Header = {
+                .Type = 0x01,
+                .SubType = 0x01,
+                .Length = sizeof(FW_PCI_DEVICE_PATH_NODE),
+            },
+            .Function = 0,
+            .Device = 5,
+        },
+        .End = {
+            .Type = 0x7f,
+            .SubType = 0x01,
+            .Length = sizeof(FW_DEVICE_PATH_NODE),
+        },
+    },
+    .Serial = {
+        .Acpi = {
+            .Header = {
+                .Type = 0x02,
+                .SubType = 0x01,
+                .Length = sizeof(FW_ACPI_HID_DEVICE_PATH_NODE),
+            },
+            .Hid = FW_UART_DEVICE_PATH_HID_PNP0501,
+            .Uid = 0,
+        },
+        .Uart = {
+            .Header = {
+                .Type = 0x03,
+                .SubType = 0x0e,
+                .Length = sizeof(FW_UART_DEVICE_PATH_NODE),
+            },
+            .Reserved = 0,
+            .BaudRate = 115200,
+            .DataBits = 8,
+            .Parity = NoParity,
+            .StopBits = OneStopBit,
+        },
+        .End = {
+            .Type = 0x7f,
+            .SubType = 0xff,
+            .Length = sizeof(FW_DEVICE_PATH_NODE),
+        },
     },
 };
 
@@ -27532,7 +27647,7 @@ static FW_FIRMWARE_VARIABLE mFirmwareVariables[] = {
     {
         "ConOutDev", mEfiGlobalVariableGuid,
         EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
-        &mGraphicsDevicePath, sizeof(mGraphicsDevicePath), NULL,
+        &mConsoleOutputDevicePath, sizeof(mConsoleOutputDevicePath), NULL,
     },
     {
         "ErrOut", mEfiGlobalVariableGuid,

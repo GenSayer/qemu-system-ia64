@@ -30,6 +30,10 @@ static UINT8 acpi20_guid[16] = IA64_GUID_ACPI20;
 static UINT8 sal_guid[16] = IA64_GUID_SAL;
 static UINT8 hcdp_guid[16] = IA64_GUID_HCDP;
 static UINT8 smbios_guid[16] = IA64_GUID_SMBIOS;
+static UINT8 efi_global_variable_guid[16] = {
+    0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11,
+    0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c,
+};
 static UINT8 debug_image_guid[16] = {
     0x77, 0x2e, 0x15, 0x49, 0xda, 0x1a, 0x64, 0x47,
     0xb7, 0xa2, 0x7a, 0xfe, 0xfe, 0xd9, 0x5e, 0x8b,
@@ -52,6 +56,9 @@ static UINT8 start_image_change_guid[16] = {
 };
 static CHAR16 variable_name[] = {
     'I', 'A', '6', '4', 'F', 'u', 'n', 'c', 'T', 'e', 's', 't', 0,
+};
+static CHAR16 conout_dev_name[] = {
+    'C', 'o', 'n', 'O', 'u', 't', 'D', 'e', 'v', 0,
 };
 
 typedef struct {
@@ -202,6 +209,13 @@ typedef struct {
 #define TEST_SPARSE_IO_BASE          0x000000800010000000ULL
 #define TEST_SPARSE_IO_SIZE          0x0000000004000000ULL
 #define TEST_PM_IO_BASE              0x2000U
+#define TEST_HCDP_LENGTH             129U
+#define TEST_HCDP_UART_HID           0x0105d041U
+#define TEST_HCDP_UART_BASE_FLAGS    0x42U
+#define TEST_HCDP_UART_PRIMARY       0x04U
+#define TEST_HCDP_UART_CONOUT_INDEX  1U
+#define TEST_CONOUT_DEV_SIZE         57U
+#define TEST_DEVICE_PATH_PNP0501     0x050141d0U
 
 #define TEST_SAL_GET_STATE_INFO      0x01000001ULL
 #define TEST_SAL_GET_STATE_INFO_SIZE 0x01000002ULL
@@ -1459,6 +1473,39 @@ static BOOLEAN variable_name_matches(const CHAR16 *Name, const CHAR16 *Want)
     return Name[index] == Want[index];
 }
 
+static BOOLEAN test_console_output_device_paths(EFI_RUNTIME_SERVICES *Rs)
+{
+    UINT8 path[TEST_CONOUT_DEV_SIZE];
+    UINT32 attributes = 0;
+    UINTN size = sizeof(path);
+
+    return Rs->GetVariable(conout_dev_name, efi_global_variable_guid,
+                           &attributes, &size, path) == EFI_SUCCESS &&
+           attributes == (EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                          EFI_VARIABLE_RUNTIME_ACCESS) &&
+           size == sizeof(path) &&
+           path[0] == 0x02U && path[1] == 0x01U &&
+           get_u16(path + 2U) == 12U &&
+           get_u32(path + 4U) == 0x0a0341d0U &&
+           get_u32(path + 8U) == 0 &&
+           path[12U] == 0x01U && path[13U] == 0x01U &&
+           get_u16(path + 14U) == 6U &&
+           path[16U] == 0 && path[17U] == 5U &&
+           path[18U] == 0x7fU && path[19U] == 0x01U &&
+           get_u16(path + 20U) == 4U &&
+           path[22U] == 0x02U && path[23U] == 0x01U &&
+           get_u16(path + 24U) == 12U &&
+           get_u32(path + 26U) == TEST_DEVICE_PATH_PNP0501 &&
+           get_u32(path + 30U) == 0 &&
+           path[34U] == 0x03U && path[35U] == 0x0eU &&
+           get_u16(path + 36U) == 19U &&
+           get_u32(path + 38U) == 0 &&
+           get_u64(path + 42U) == 115200U &&
+           path[50U] == 8U && path[51U] == 1U && path[52U] == 1U &&
+           path[53U] == 0x7fU && path[54U] == 0xffU &&
+           get_u16(path + 55U) == 4U;
+}
+
 static BOOLEAN test_variable_services(EFI_SYSTEM_TABLE *SystemTable)
 {
     EFI_RUNTIME_SERVICES *rs = SystemTable->RuntimeServices;
@@ -1486,7 +1533,8 @@ static BOOLEAN test_variable_services(EFI_SYSTEM_TABLE *SystemTable)
     BOOLEAN deleted = 0;
     BOOLEAN ok = 0;
 
-    if (rs->SetVariable(
+    if (!test_console_output_device_paths(rs) ||
+        rs->SetVariable(
             variable_name, variable_guid, requested_attributes,
             sizeof(value), value) != EFI_SUCCESS ||
         rs->GetVariable(variable_name, variable_guid, &attributes, &size,
@@ -1873,6 +1921,7 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     BOOLEAN io = 0;
     BOOLEAN legacy_memory = 0;
     BOOLEAN memory = 0;
+    BOOLEAN uart_window = 0;
     BOOLEAN end_tag = 0;
 
     if (!Context->Valid) {
@@ -1929,6 +1978,14 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        get_u64(descriptor + 30U) == 0 &&
                        get_u64(descriptor + 38U) == TEST_PCI_MMIO_SIZE) {
                 memory = 1;
+            } else if (descriptor[0] == 0x8aU && length == 43U &&
+                       descriptor[3] == 0U && descriptor[4] == 0x0cU &&
+                       get_u64(descriptor + 6U) == 0 &&
+                       get_u64(descriptor + 14U) == TEST_UART_BASE &&
+                       get_u64(descriptor + 22U) == TEST_UART_BASE + 7U &&
+                       get_u64(descriptor + 30U) == 0 &&
+                       get_u64(descriptor + 38U) == 8U) {
+                uart_window = 1;
             }
             offset += 3U + length;
         } else {
@@ -1942,12 +1999,13 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
             offset += 1U + length;
         }
     }
-    return bus && io && legacy_memory && memory && end_tag;
+    return bus && io && legacy_memory && memory && uart_window && end_tag;
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
 {
     static const UINT8 sb_name[4] = { '_', 'S', 'B', '_' };
+    static const UINT8 pci0_name[4] = { 'P', 'C', 'I', '0' };
     static const UINT8 uart_name[4] = { 'U', 'A', 'R', '0' };
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
     const UINT8 *aml;
@@ -1959,7 +2017,7 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
     UINTN resource_length;
     UINTN scope_offset;
     UINTN offset = 0;
-    BOOLEAN under_sb = 0;
+    BOOLEAN under_pci0 = 0;
     BOOLEAN address = 0;
     BOOLEAN irq = 0;
 
@@ -1983,14 +2041,17 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
                          &scope_content, &scope_end)) {
             continue;
         }
-        if (scope_content + 5U <= scope_end &&
+        if (scope_content + 10U <= scope_end &&
             scope_content[0] == 0x5cU &&
-            ia64_bytes_equal(scope_content + 1U,
+            scope_content[1] == 0x2eU &&
+            ia64_bytes_equal(scope_content + 2U,
                              sb_name, sizeof(sb_name)) &&
-            find_bytes(scope_content + 5U,
-                       (UINTN)(scope_end - scope_content - 5U),
+            ia64_bytes_equal(scope_content + 6U,
+                             pci0_name, sizeof(pci0_name)) &&
+            find_bytes(scope_content + 10U,
+                       (UINTN)(scope_end - scope_content - 10U),
                        uart_name, sizeof(uart_name), 0) != NULL) {
-            under_sb = 1;
+            under_pci0 = 1;
             break;
         }
     }
@@ -2014,20 +2075,21 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
                 get_u64(descriptor + 38U) == 8U) {
                 address = 1;
             }
+            if (descriptor[0] == 0x89U && length == 6U &&
+                descriptor[3] == 0x0dU && descriptor[4] == 1U &&
+                get_u32(descriptor + 5U) == 4U) {
+                irq = 1;
+            }
             offset += 3U + length;
         } else {
             length = descriptor[0] & 7U;
             if (length > resource_length - offset - 1U) {
                 return 0;
             }
-            if ((descriptor[0] >> 3) == 4U && length == 2U &&
-                get_u16(descriptor + 1U) == (1U << 4)) {
-                irq = 1;
-            }
             offset += 1U + length;
         }
     }
-    return under_sb && address && irq;
+    return under_pci0 && address && irq;
 }
 
 static BOOLEAN test_dsdt_prt(const TEST_TABLE_CONTEXT *Context)
@@ -2306,16 +2368,27 @@ static BOOLEAN test_acpi_console_tables(const TEST_TABLE_CONTEXT *Context)
 {
     const UINT8 *hcdp;
 
-    if (!Context->Valid || get_u32((const UINT8 *)Context->Hcdp + 4U) < 92U) {
+    if (!Context->Valid ||
+        get_u32((const UINT8 *)Context->Hcdp + 4U) != TEST_HCDP_LENGTH) {
         return 0;
     }
     hcdp = (const UINT8 *)Context->Hcdp;
-    if (get_u32(hcdp + 36U) != 2U || hcdp[40U] != 0 ||
-        hcdp[41U] != 8U || hcdp[42U] != 0 || hcdp[43U] != 1U ||
+    if (get_u32(hcdp + 36U) != 1U || hcdp[40U] != 0 ||
+        hcdp[41U] != 8U || hcdp[42U] != 1U || hcdp[43U] != 1U ||
+        get_u32(hcdp + 44U) != 0 ||
         get_u64(hcdp + 48U) != 115200U ||
         !gas_matches(hcdp + 56U, 0, 8, TEST_UART_BASE) ||
+        get_u32(hcdp + 68U) != TEST_HCDP_UART_HID ||
         get_u32(hcdp + 72U) != 4U ||
-        get_u32(hcdp + 76U) != 1843200U) {
+        get_u32(hcdp + 76U) != 115200U || hcdp[80U] != 0x02U ||
+        (hcdp[81U] & (UINT8)~TEST_HCDP_UART_PRIMARY) !=
+            TEST_HCDP_UART_BASE_FLAGS ||
+        get_u16(hcdp + 82U) != TEST_HCDP_UART_CONOUT_INDEX ||
+        get_u32(hcdp + 84U) != 0 ||
+        hcdp[88U] != 0x0aU || (hcdp[89U] & (UINT8)~1U) != 0 ||
+        get_u16(hcdp + 90U) != 41U || get_u16(hcdp + 92U) != 0 ||
+        hcdp[94U] != 1U || get_u16(hcdp + 96U) != 34U ||
+        hcdp[99U] != 0 || hcdp[100U] != 5U || hcdp[101U] != 0) {
         return 0;
     }
     if (Context->Dbgp != NULL) {
