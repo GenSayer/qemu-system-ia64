@@ -16,6 +16,7 @@
 #include "libqos/generic-pcihost.h"
 #include "libqos/pci.h"
 #include "hw/display/bochs-vbe.h"
+#include "hw/display/vga_regs.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
@@ -54,6 +55,14 @@
 #define IA64_VBE2_SIGNATURE          0x32454256U
 #define IA64_VBE_IO_INDEX            0x01ceU
 #define IA64_VBE_IO_DATA             0x01d0U
+#define IA64_VGA_FB_BASE             0x00000000c4000000ULL
+#define IA64_VGA_LEGACY_BASE         0x00000000000a0000ULL
+#define IA64_BDA_VIDEO_MODE          0x00000449ULL
+#define IA64_BDA_VIDEO_COLUMNS       0x0000044aULL
+#define IA64_BDA_VIDEO_PAGE_SIZE     0x0000044cULL
+#define IA64_BDA_VIDEO_ROWS          0x00000484ULL
+#define IA64_BDA_CHARACTER_HEIGHT    0x00000485ULL
+#define IA64_BDA_VIDEO_CONTROL       0x00000487ULL
 
 enum TestInt10Register {
     TEST_INT10_AX,
@@ -215,6 +224,49 @@ static uint16_t test_vbe_read(QTestState *qts, uint16_t index)
 {
     qtest_writew(qts, IA64_LEGACY_IO_BASE + IA64_VBE_IO_INDEX, index);
     return qtest_readw(qts, IA64_LEGACY_IO_BASE + IA64_VBE_IO_DATA);
+}
+
+static uint8_t test_vga_indexed_read(QTestState *qts, uint16_t index_port,
+                                     uint16_t data_port, uint8_t index)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index_port, index);
+    return qtest_readb(qts, IA64_LEGACY_IO_BASE + data_port);
+}
+
+static void test_assert_ppm_pixel(const char *filename, unsigned width,
+                                  unsigned height, unsigned x, unsigned y,
+                                  uint8_t red, uint8_t green, uint8_t blue)
+{
+    g_autofree char *contents = NULL;
+    g_autoptr(GError) error = NULL;
+    const uint8_t *pixel;
+    char *end;
+    unsigned actual_width;
+    unsigned actual_height;
+    unsigned maximum;
+    gsize length;
+
+    g_assert_true(g_file_get_contents(filename, &contents, &length, &error));
+    g_assert_no_error(error);
+    g_assert_true(g_str_has_prefix(contents, "P6\n"));
+    actual_width = g_ascii_strtoull(contents + 3, &end, 10);
+    actual_height = g_ascii_strtoull(end, &end, 10);
+    maximum = g_ascii_strtoull(end, &end, 10);
+    g_assert_cmpuint(actual_width, ==, width);
+    g_assert_cmpuint(actual_height, ==, height);
+    g_assert_cmpuint(maximum, ==, 255);
+    g_assert_cmpuint(x, <, width);
+    g_assert_cmpuint(y, <, height);
+    g_assert_cmpuint(length - (end - contents), >,
+                     (gsize)width * height * 3);
+    g_assert_true(g_ascii_isspace(*end));
+    if (*end++ == '\r' && *end == '\n') {
+        end++;
+    }
+    pixel = (const uint8_t *)end + ((gsize)y * width + x) * 3;
+    g_assert_cmphex(pixel[0], ==, red);
+    g_assert_cmphex(pixel[1], ==, green);
+    g_assert_cmphex(pixel[2], ==, blue);
 }
 
 static void test_int10_rom(void)
@@ -383,6 +435,126 @@ static void test_int10_vbe(void)
 static void test_int10_vbe_std(void)
 {
     test_int10_vbe_for_device("-vga std");
+}
+
+static void test_int10_legacy_for_device(const char *extra_args)
+{
+    uint8_t response[2];
+    uint8_t marker[16];
+    uint8_t actual[sizeof(marker)];
+    uint8_t zero[sizeof(marker)] = { 0 };
+    TestInt10Registers regs;
+    QTestState *qts = ia64_vpc_start(extra_args);
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *ppm = NULL;
+    g_autoptr(GError) error = NULL;
+    size_t length;
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4f02;
+    regs.bx = 0x4143;
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+
+    memset(marker, 0xa5, sizeof(marker));
+    qtest_memwrite(qts, IA64_VGA_FB_BASE, marker, sizeof(marker));
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x0012;
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_ENABLE), ==, 0);
+    g_assert_cmphex(test_vga_indexed_read(qts, VGA_SEQ_I, VGA_SEQ_D,
+                                          VGA_SEQ_MEMORY_MODE), ==, 0x06);
+    g_assert_cmphex(test_vga_indexed_read(qts, VGA_CRT_IC, VGA_CRT_DC,
+                                          VGA_CRTC_H_DISP), ==, 0x4f);
+    g_assert_cmphex(test_vga_indexed_read(qts, VGA_CRT_IC, VGA_CRT_DC,
+                                          VGA_CRTC_V_DISP_END), ==, 0xdf);
+    g_assert_cmphex(test_vga_indexed_read(qts, VGA_GFX_I, VGA_GFX_D,
+                                          VGA_GFX_MISC), ==, 0x05);
+    qtest_memread(qts, IA64_VGA_FB_BASE, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), zero, sizeof(zero));
+    g_assert_cmphex(qtest_readb(qts, IA64_BDA_VIDEO_MODE), ==, 0x12);
+    g_assert_cmphex(qtest_readw(qts, IA64_BDA_VIDEO_COLUMNS), ==, 80);
+    g_assert_cmphex(qtest_readw(qts, IA64_BDA_VIDEO_PAGE_SIZE), ==,
+                    0xa000);
+    g_assert_cmphex(qtest_readb(qts, IA64_BDA_VIDEO_ROWS), ==, 29);
+    g_assert_cmphex(qtest_readw(qts, IA64_BDA_CHARACTER_HEIGHT), ==, 16);
+    g_assert_cmphex(qtest_readb(qts, IA64_BDA_VIDEO_CONTROL), ==, 0x60);
+
+    /* Match bootvid.dll's planar write path and verify actual scanout. */
+    qtest_writeb(qts, IA64_VGA_LEGACY_BASE, 0xff);
+    tmpdir = g_dir_make_tmp("ia64-int10-legacy-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    ppm = g_build_filename(tmpdir, "mode12.ppm", NULL);
+    qtest_qmp_assert_success(qts,
+                             "{'execute':'screendump','arguments':"
+                             " {'filename':%s}}", ppm);
+    test_assert_ppm_pixel(ppm, 640, 480, 0, 0, 0xff, 0xff, 0xff);
+    test_assert_ppm_pixel(ppm, 640, 480, 8, 0, 0, 0, 0);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x0f00;
+    regs.bx = 0xabcd;
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x5012);
+    g_assert_cmphex(regs.bx, ==, 0x00cd);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4f02;
+    regs.bx = 0x4143;
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    memset(marker, 0x5a, sizeof(marker));
+    qtest_memwrite(qts, IA64_VGA_FB_BASE, marker, sizeof(marker));
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x0092;
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    qtest_memread(qts, IA64_VGA_FB_BASE, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), marker, sizeof(marker));
+    g_assert_cmphex(qtest_readb(qts, IA64_BDA_VIDEO_CONTROL), ==, 0xe0);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x0f00;
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x5012);
+
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4f02;
+    regs.bx = 0x4143;
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_XRES), ==, 800);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_YRES), ==, 600);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, 32);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_ENABLE) & 0x41,
+                    ==, 0x41);
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x0f00;
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x5003);
+    qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(ppm), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+static void test_int10_legacy(void)
+{
+    test_int10_legacy_for_device(NULL);
+}
+
+static void test_int10_legacy_std(void)
+{
+    test_int10_legacy_for_device("-vga std");
 }
 
 static void test_acpi_reset_register(void)
@@ -1100,6 +1272,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/vga/int10-rom", test_int10_rom);
     qtest_add_func("/ia64-vpc/vga/int10-vbe", test_int10_vbe);
     qtest_add_func("/ia64-vpc/vga/int10-vbe-std", test_int10_vbe_std);
+    qtest_add_func("/ia64-vpc/vga/int10-legacy", test_int10_legacy);
+    qtest_add_func("/ia64-vpc/vga/int10-legacy-std",
+                   test_int10_legacy_std);
     qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",

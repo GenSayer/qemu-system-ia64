@@ -25,6 +25,7 @@
 #include "hw/char/serial-mm.h"
 #include "hw/display/bochs-vbe.h"
 #include "hw/display/edid.h"
+#include "hw/display/vga_regs.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "hw/ide/ahci-pci.h"
@@ -103,6 +104,19 @@
 #define IA64_VBE2_SIGNATURE     0x32454256U
 #define IA64_VBE_IO_INDEX       0x01ceU
 #define IA64_VBE_IO_DATA        0x01d0U
+#define IA64_VGA_PLANAR_MEMORY_SIZE (256 * KiB)
+#define IA64_BDA_VIDEO_MODE      0x00000449U
+#define IA64_BDA_VIDEO_COLUMNS   0x0000044aU
+#define IA64_BDA_VIDEO_PAGE_SIZE 0x0000044cU
+#define IA64_BDA_VIDEO_PAGE_START 0x0000044eU
+#define IA64_BDA_CURSOR_POSITIONS 0x00000450U
+#define IA64_BDA_CURSOR_TYPE     0x00000460U
+#define IA64_BDA_VIDEO_PAGE      0x00000462U
+#define IA64_BDA_CRTC_ADDRESS    0x00000463U
+#define IA64_BDA_VIDEO_ROWS      0x00000484U
+#define IA64_BDA_CHARACTER_HEIGHT 0x00000485U
+#define IA64_BDA_VIDEO_CONTROL   0x00000487U
+#define IA64_BDA_VIDEO_SWITCHES  0x00000488U
 #endif
 #define IA64_IOSAPIC_BASE       0x0000000080110000ULL
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
@@ -153,6 +167,19 @@ typedef struct IA64VbeMode {
     uint8_t bpp;
 } IA64VbeMode;
 
+typedef struct IA64VgaLegacyMode {
+    uint8_t number;
+    uint8_t columns;
+    uint8_t rows;
+    uint8_t character_height;
+    uint16_t page_size;
+    uint8_t misc;
+    const uint8_t *sequencer;
+    const uint8_t *crtc;
+    const uint8_t *attribute;
+    const uint8_t *graphics;
+} IA64VgaLegacyMode;
+
 static const IA64VbeMode ia64_vbe_modes[] = {
     { 0x111,  640,  480, 16 },
     { 0x112,  640,  480, 24 },
@@ -167,6 +194,44 @@ static const IA64VbeMode ia64_vbe_modes[] = {
     { 0x143,  800,  600, 32 },
     { 0x144, 1024,  768, 32 },
     { 0x145, 1280, 1024, 32 },
+};
+
+/* Standard VGA BIOS mode 12h: 640x480, 16-color planar graphics. */
+static const uint8_t ia64_vga_mode_12_sequencer[] = {
+    0x01, 0x0f, 0x00, 0x06,
+};
+
+static const uint8_t ia64_vga_mode_12_crtc[] = {
+    0x5f, 0x4f, 0x50, 0x82, 0x54, 0x80, 0x0b, 0x3e,
+    0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xea, 0x8c, 0xdf, 0x28, 0x00, 0xe7, 0x04, 0xe3,
+    0xff,
+};
+
+static const uint8_t ia64_vga_mode_12_attribute[] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
+    0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+    0x01, 0x00, 0x0f, 0x00, 0x00,
+};
+
+static const uint8_t ia64_vga_mode_12_graphics[] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0f,
+    0xff,
+};
+
+static const IA64VgaLegacyMode ia64_vga_legacy_modes[] = {
+    {
+        .number = 0x12,
+        .columns = 80,
+        .rows = 30,
+        .character_height = 16,
+        .page_size = 0xa000,
+        .misc = 0xe3,
+        .sequencer = ia64_vga_mode_12_sequencer,
+        .crtc = ia64_vga_mode_12_crtc,
+        .attribute = ia64_vga_mode_12_attribute,
+        .graphics = ia64_vga_mode_12_graphics,
+    },
 };
 
 static const char ia64_vbe_oem[] = "QEMU IA64 VBE";
@@ -311,6 +376,8 @@ struct IA64VpcMachineState {
     uint16_t int10_response_offset;
     uint8_t int10_input_signature_words;
     uint8_t int10_dpms_state;
+    uint8_t int10_legacy_mode;
+    uint8_t int10_legacy_columns;
 #endif
 
     Object *pci_fixup_reset;
@@ -341,6 +408,18 @@ static const IA64VbeMode *ia64_vbe_find_mode(uint16_t number)
     return NULL;
 }
 
+static const IA64VgaLegacyMode *ia64_vga_find_legacy_mode(uint8_t number)
+{
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(ia64_vga_legacy_modes); i++) {
+        if (ia64_vga_legacy_modes[i].number == number) {
+            return &ia64_vga_legacy_modes[i];
+        }
+    }
+    return NULL;
+}
+
 static void ia64_vbe_write(uint16_t index, uint16_t value)
 {
     address_space_stw_le(&address_space_memory,
@@ -365,6 +444,152 @@ static uint32_t ia64_vbe_memory_size(void)
 {
     return (uint32_t)ia64_vbe_read(VBE_DISPI_INDEX_VIDEO_MEMORY_64K) *
            (64 * KiB);
+}
+
+static void ia64_vga_writeb(uint16_t port, uint8_t value)
+{
+    address_space_stb(&address_space_memory, IA64_PCI_IO_BASE + port,
+                      value, MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static uint8_t ia64_vga_readb(uint16_t port)
+{
+    return address_space_ldub(&address_space_memory,
+                              IA64_PCI_IO_BASE + port,
+                              MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static void ia64_vga_indexed_write(uint16_t index_port,
+                                   uint16_t data_port,
+                                   uint8_t index, uint8_t value)
+{
+    ia64_vga_writeb(index_port, index);
+    ia64_vga_writeb(data_port, value);
+}
+
+static void ia64_int10_update_legacy_bda(const IA64VgaLegacyMode *mode,
+                                         bool no_clear)
+{
+    address_space_stb(&address_space_memory, IA64_BDA_VIDEO_MODE,
+                      mode->number, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stw_le(&address_space_memory, IA64_BDA_VIDEO_COLUMNS,
+                         mode->columns, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stw_le(&address_space_memory, IA64_BDA_VIDEO_PAGE_SIZE,
+                         mode->page_size, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stw_le(&address_space_memory, IA64_BDA_VIDEO_PAGE_START,
+                         0, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_set(&address_space_memory, IA64_BDA_CURSOR_POSITIONS,
+                      0, 16, MEMTXATTRS_UNSPECIFIED);
+    address_space_stw_le(&address_space_memory, IA64_BDA_CURSOR_TYPE,
+                         0, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stb(&address_space_memory, IA64_BDA_VIDEO_PAGE,
+                      0, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stw_le(&address_space_memory, IA64_BDA_CRTC_ADDRESS,
+                         VGA_CRT_IC, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stb(&address_space_memory, IA64_BDA_VIDEO_ROWS,
+                      mode->rows - 1, MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stw_le(&address_space_memory, IA64_BDA_CHARACTER_HEIGHT,
+                         mode->character_height,
+                         MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stb(&address_space_memory, IA64_BDA_VIDEO_CONTROL,
+                      0x60 | (no_clear ? 0x80 : 0),
+                      MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stb(&address_space_memory, IA64_BDA_VIDEO_SWITCHES,
+                      0xf9, MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static void ia64_vga_load_ega_palette(void)
+{
+    unsigned int color;
+
+    ia64_vga_writeb(VGA_PEL_MSK, 0xff);
+    ia64_vga_writeb(VGA_PEL_IW, 0);
+    for (color = 0; color < 64; color++) {
+        uint8_t red = (color & 0x04 ? 0x2a : 0) |
+                      (color & 0x20 ? 0x15 : 0);
+        uint8_t green = (color & 0x02 ? 0x2a : 0) |
+                        (color & 0x10 ? 0x15 : 0);
+        uint8_t blue = (color & 0x01 ? 0x2a : 0) |
+                       (color & 0x08 ? 0x15 : 0);
+
+        ia64_vga_writeb(VGA_PEL_D, red);
+        ia64_vga_writeb(VGA_PEL_D, green);
+        ia64_vga_writeb(VGA_PEL_D, blue);
+    }
+}
+
+static void ia64_int10_program_legacy_mode(IA64VpcMachineState *s,
+                                            const IA64VgaLegacyMode *mode,
+                                            bool no_clear)
+{
+    size_t i;
+
+    /*
+     * A legacy VGA caller uses the planar A0000h aperture.  Disable the
+     * synthetic VBE layout before programming standard VGA registers so a
+     * previous packed-pixel framebuffer cannot reinterpret those writes.
+     */
+    ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    ia64_vga_indexed_write(VGA_SEQ_I, VGA_SEQ_D, VGA_SEQ_RESET, 0x01);
+    for (i = 0; i < VGA_SEQ_C - 1; i++) {
+        ia64_vga_indexed_write(VGA_SEQ_I, VGA_SEQ_D, i + 1,
+                               mode->sequencer[i]);
+    }
+    ia64_vga_writeb(VGA_MIS_W, mode->misc);
+    ia64_vga_indexed_write(VGA_GFX_I, VGA_GFX_D, VGA_GFX_MISC,
+                           mode->graphics[VGA_GFX_MISC]);
+    ia64_vga_indexed_write(VGA_SEQ_I, VGA_SEQ_D, VGA_SEQ_RESET, 0x03);
+    for (i = 0; i < VGA_GFX_C; i++) {
+        ia64_vga_indexed_write(VGA_GFX_I, VGA_GFX_D, i,
+                               mode->graphics[i]);
+    }
+
+    ia64_vga_indexed_write(VGA_CRT_IC, VGA_CRT_DC,
+                           VGA_CRTC_V_SYNC_END, 0);
+    for (i = 0; i < VGA_CRT_C; i++) {
+        ia64_vga_indexed_write(VGA_CRT_IC, VGA_CRT_DC, i,
+                               mode->crtc[i]);
+    }
+    for (i = 0; i < VGA_ATT_C; i++) {
+        (void)ia64_vga_readb(VGA_IS1_RC);
+        ia64_vga_writeb(VGA_ATT_W, i);
+        ia64_vga_writeb(VGA_ATT_W, mode->attribute[i]);
+    }
+    ia64_vga_load_ega_palette();
+
+    if (!no_clear) {
+        address_space_set(&address_space_memory, IA64_VGA_FB_PCI_BASE,
+                          0, IA64_VGA_PLANAR_MEMORY_SIZE,
+                          MEMTXATTRS_UNSPECIFIED);
+    }
+    (void)ia64_vga_readb(VGA_IS1_RC);
+    ia64_vga_writeb(VGA_ATT_W, VGA_AR_ENABLE_DISPLAY);
+
+    s->int10_legacy_mode = mode->number;
+    s->int10_legacy_columns = mode->columns;
+    ia64_int10_update_legacy_bda(mode, no_clear);
+}
+
+static bool ia64_int10_set_legacy_mode(IA64VpcMachineState *s,
+                                       uint8_t request)
+{
+    uint8_t number = request & 0x7f;
+    bool no_clear = request & 0x80;
+    const IA64VgaLegacyMode *mode;
+
+    if (number == 3) {
+        ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+        s->int10_legacy_mode = number;
+        s->int10_legacy_columns = 80;
+        return true;
+    }
+
+    mode = ia64_vga_find_legacy_mode(number);
+    if (mode == NULL) {
+        return false;
+    }
+    ia64_int10_program_legacy_mode(s, mode, no_clear);
+    return true;
 }
 
 static uint32_t ia64_int10_rom_pointer(uint16_t offset)
@@ -759,12 +984,15 @@ static void ia64_int10_execute(IA64VpcMachineState *s)
 
     switch (s->int10_request.ax >> 8) {
     case 0x00:
-        if ((s->int10_request.ax & 0xff) == 3) {
-            ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
-        }
+        ia64_int10_set_legacy_mode(s, s->int10_request.ax);
         break;
     case 0x0f:
-        s->int10_result.ax = 80 << 8 | 3;
+        if (ia64_vbe_read(VBE_DISPI_INDEX_ENABLE) & VBE_DISPI_ENABLED) {
+            s->int10_result.ax = 80 << 8 | 3;
+        } else {
+            s->int10_result.ax = (uint16_t)s->int10_legacy_columns << 8 |
+                                 s->int10_legacy_mode;
+        }
         s->int10_result.bx &= 0x00ff;
         break;
     case 0x1a:
@@ -964,6 +1192,8 @@ static void ia64_vpc_reset_int10(IA64VpcMachineState *s)
     s->int10_input_signature_words = 0;
     ia64_int10_response_clear(s);
     s->int10_dpms_state = 0;
+    s->int10_legacy_mode = 3;
+    s->int10_legacy_columns = 80;
     ia64_vpc_install_int10(s);
 }
 
