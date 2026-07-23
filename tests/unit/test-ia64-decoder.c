@@ -204,6 +204,17 @@ static const char *test_instruction_decode(void)
     if (!insn.valid || insn.opcode != IA64_OP_BREAK || insn.qp != 0x2a) {
         return failf("I-unit break decode");
     }
+
+    /*
+     * This long forward chk.s.i displacement shares the hint.i x6 and r3
+     * fields.  The x3 field distinguishes the two encodings.
+     */
+    insn = ia64_decode_insn(IA64_UNIT_I, 0x020c042680ULL, 0x1b6c0, 2);
+    if (!insn.valid || insn.opcode != IA64_OP_CHK_S ||
+        insn.operands.memory.source != 33 ||
+        insn.operands.memory.immediate != 0x601a0) {
+        return failf("I-unit chk.s must not decode as hint.i");
+    }
     return NULL;
 }
 

@@ -53,6 +53,7 @@ from .encoding import (
     bundle_words,
     chk_a_clr_m,
     chk_a_nc_m,
+    chk_s_i,
     chk_s_m,
     cmp4_eq_imm,
     cmp4_eq_unc_imm,
@@ -1839,6 +1840,34 @@ test_chk_s_m_branches_on_nat = require_registers(
          br_cond(0x60, 0x60)),
     ], {"ip": 0x60, "r4": 0}, entry=0x10)
 
+test_chk_s_i_long_branch_on_stacked_nat = require_registers(
+    "chk_s_i_long_branch_on_stacked_nat", [
+        (0x10, 0x00, alloc_m(45, 24, 16, 0, 0), nop_i(),
+         nop_i()),
+        (0x20, *movl_mlx(9, 1 << 32)),
+        (0x30, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x100, 0),
+         nop_i()),
+        (0x40, 0x00, ld8_fill_postinc(33, 3, 0), nop_i(),
+         nop_i()),
+        # The displacement fields deliberately overlap the hint.i pattern.
+        (0x50, 0x08, nop_m(), nop_m(),
+         chk_s_i(33, 0x50, 0x601f0)),
+        (0x60, 0x10, nop_m(), adds(4, 1, 0),
+         br_cond(0x60, 0x80)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+        (0x601f0, 0x10, nop_m(), adds(5, 1, 0),
+         br_cond(0x601f0, 0x60200)),
+        (0x60200, 0x10, nop_m(), nop_i(),
+         br_cond(0x60200, 0x60200)),
+    ], {
+        "ip": 0x60200,
+        "exception": IA64_EXCP_NONE,
+        "r4": 0,
+        "r5": 1,
+        "r33_nat": 1,
+    }, entry=0x10)
+
 test_chk_a_nc_m_decode = require_registers("chk_a_nc_m_decode", [
     (0x10, 0x00, addl(3, 0x100, 0), nop_i(),
      nop_i()),
@@ -2479,6 +2508,7 @@ CASE_NAMES = (
     'chk_a_clr_removes_entry',
     'chk_a_m_branches_on_miss',
     'chk_a_nc_m_decode',
+    'chk_s_i_long_branch_on_stacked_nat',
     'chk_s_m_branches_on_nat',
     'cloop_zero_st1_clears_cross_page_range',
     'cloop_zero_st1_invalidates_alat_range',

@@ -1140,6 +1140,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
     if (unit == IA64_UNIT_I || unit == IA64_UNIT_X) {
         if (unit == IA64_UNIT_I &&
             ia64_b_op(raw) == 0 &&
+            ia64_bits(raw, 33, 3) == 0 &&
             ia64_bits(raw, 27, 6) == 0x01 &&
             ia64_bits(raw, 20, 7) == 64) {
             Ia64Instruction insn =
