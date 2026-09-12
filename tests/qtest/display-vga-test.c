@@ -5405,8 +5405,10 @@ static void ati_rv100_command_budget(void)
 
     qtest_system_reset(qts);
     ati_pci_enable(qts);
+    /* Host cursor rebuilds require an enabled native scanout. */
     qtest_writel(qts, IA64_RV100_MMIO_BASE + ATI_CRTC_GEN_CNTL,
-                 ATI_CRTC_CUR_EN);
+                 ATI_CRTC_EXT_DISP_EN | ATI_CRTC_EN |
+                 ATI_CRTC_PIX_WIDTH_32 | ATI_CRTC_CUR_EN);
     cursor_ring[0] = ((CURSOR_WRITES - 1) << 16) |
                      R100_CP_PACKET0_ONE_REG | (ATI_CUR_CLR1 >> 2);
     for (i = 1; i <= CURSOR_WRITES; i++) {
@@ -8315,7 +8317,7 @@ static void ati_cursor_vnc_read(int fd, uint8_t *data, size_t size)
     }
 }
 
-static void ati_cursor_assert_vnc_hidden(QTestState *qts)
+static void ati_cursor_assert_vnc_visible(QTestState *qts, bool visible)
 {
     static const uint32_t encodings[] = {
         0xffffff11U, /* RichCursor */
@@ -8357,6 +8359,7 @@ static void ati_cursor_assert_vnc_hidden(QTestState *qts)
         g_autofree uint8_t *pixels = NULL;
         g_autofree uint8_t *mask = NULL;
         unsigned int width, height, size;
+        bool opaque = false;
 
         /* SetEncodings sends the current cursor without a screen request. */
         stl_be_p(request + 4, encodings[i]);
@@ -8382,18 +8385,24 @@ static void ati_cursor_assert_vnc_hidden(QTestState *qts)
         ati_cursor_vnc_read(fd, pixels, size);
         if (i) {
             for (unsigned int j = 3; j < size; j += 4) {
-                g_assert_cmphex(pixels[j], ==, 0);
+                opaque |= pixels[j] != 0;
             }
         } else {
             size = DIV_ROUND_UP(width, 8) * height;
             mask = g_malloc(size);
             ati_cursor_vnc_read(fd, mask, size);
             for (unsigned int j = 0; j < size; j++) {
-                g_assert_cmphex(mask[j], ==, 0);
+                opaque |= mask[j] != 0;
             }
         }
+        g_assert_cmpint(opaque, ==, visible);
     }
     close(fd);
+}
+
+static void ati_cursor_assert_vnc_hidden(QTestState *qts)
+{
+    ati_cursor_assert_vnc_visible(qts, false);
 }
 
 static void ati_radeon_surface_swap(void)
@@ -8602,6 +8611,80 @@ static void ati_radeon_cursor_position(void)
     qtest_quit(qts);
     g_assert_cmpint(g_unlink(screen), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+static void ati_cursor_vga_mode(void)
+{
+    static const struct {
+        const char *model;
+        uint64_t mmio;
+        uint64_t fb;
+    } devices[] = {
+        { "rage128p", IA64_ATI_MMIO_BASE, IA64_ATI_FB_BASE },
+        { "rv100", IA64_RV100_MMIO_BASE, IA64_RV100_FB_BASE },
+        { "es1000", IA64_RV100_MMIO_BASE, IA64_RV100_FB_BASE },
+    };
+    static const uint8_t crtc[][2] = {
+        { 0x01, 7 }, { 0x07, 0 }, { 0x09, 0x40 },
+        { 0x12, 47 }, { VGA_CRTC_OFFSET, 4 }, { 0x17, 0xe3 },
+    };
+    const uint32_t control = ATI_CRTC_EXT_DISP_EN | ATI_CRTC_EN |
+                             ATI_CRTC_PIX_WIDTH_32 | ATI_CRTC_CUR_EN;
+
+    for (unsigned int i = 0; i < ARRAY_SIZE(devices) * 2; i++) {
+        bool guest_cursor = i < ARRAY_SIZE(devices);
+        unsigned int dev = i % ARRAY_SIZE(devices);
+        uint64_t mmio = devices[dev].mmio;
+        g_autofree char *ppm = g_build_filename(
+            g_get_tmp_dir(), "ati-cursor-vga-mode.XXXXXX", NULL);
+        QTestState *qts = qtest_initf(
+            "-machine ia64-vpc,nvram=none -m 256M -S -display vnc=none "
+            "-vga ati -global ati-vga.model=%s "
+            "-global ati-vga.guest_hwcursor=%s", devices[dev].model,
+            guest_cursor ? "on" : "off");
+        int fd = g_mkstemp(ppm);
+
+        g_assert_cmpint(fd, >=, 0);
+        close(fd);
+        ati_pci_enable(qts);
+        for (unsigned int j = 0; j < ARRAY_SIZE(crtc); j++) {
+            qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_CRTC_INDEX),
+                         crtc[j][0]);
+            qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_CRTC_DATA),
+                         crtc[j][1]);
+        }
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_INDEX), 1);
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 1);
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX), VGA_GFX_MISC);
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 1);
+        qtest_memset(qts, devices[dev].fb + 0x10000, 0, 64 * 16);
+        qtest_writel(qts, mmio + ATI_CUR_CLR0, 0x00ff0000);
+        qtest_writel(qts, mmio + ATI_CUR_OFFSET, 0x10000);
+        ati_cursor_prepare_scanout(qts, devices[dev].fb, mmio, 64, 48, 0);
+        ati_cursor_screendump(qts, ppm);
+        assert_ppm_pixel(ppm, 64, 48, 0, 0, guest_cursor ? 0xff : 0, 0, 0);
+        ati_cursor_assert_vnc_visible(qts, !guest_cursor);
+
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_INDEX), VGA_SEQ_RESET);
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 1);
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 3);
+        ati_cursor_screendump(qts, ppm);
+        assert_ppm_pixel(ppm, 64, 48, 0, 0, 0, 0, 0);
+        ati_cursor_assert_vnc_hidden(qts);
+
+        qtest_writel(qts, mmio + ATI_CRTC_GEN_CNTL, 0);
+        qtest_writel(qts, mmio + ATI_CRTC_GEN_CNTL, control);
+        ati_cursor_screendump(qts, ppm);
+        assert_ppm_pixel(ppm, 64, 48, 0, 0, guest_cursor ? 0xff : 0, 0, 0);
+        ati_cursor_assert_vnc_visible(qts, !guest_cursor);
+
+        qtest_writeb(qts, mmio + ATI_CRTC_GEN_CNTL + 3, 0);
+        ati_cursor_screendump(qts, ppm);
+        assert_ppm_pixel(ppm, 64, 48, 0, 0, 0, 0, 0);
+        ati_cursor_assert_vnc_hidden(qts);
+        qtest_quit(qts);
+        g_assert_cmpint(g_unlink(ppm), ==, 0);
+    }
 }
 
 static void ati_radeon_hwcursor(void)
@@ -13138,6 +13221,8 @@ int main(int argc, char **argv)
                        ati_radeon_mono_cursor_swap);
         qtest_add_func("/display/pci/ati-radeon-cursor-position",
                        ati_radeon_cursor_position);
+        qtest_add_func("/display/pci/ati-cursor-vga-mode",
+                       ati_cursor_vga_mode);
         qtest_add_func("/display/pci/ati-rage128-mono-hwcursor",
                        ati_rage128_mono_hwcursor);
         qtest_add_func("/display/pci/ati-rv100-3d-ring",
