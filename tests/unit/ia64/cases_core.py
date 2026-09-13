@@ -2860,6 +2860,45 @@ test_br_cloop_decrements_lc = require_registers("br_cloop_decrements_lc", [
      br_cond(0x50, 0x50)),
 ], {"ip": 0x50, "r4": 3, "r5": 0}, entry=0x10)
 
+
+def _br_cloop_following_self_loops(name, *, ic, lc):
+    return require_registers(name, [
+        (0x10, 0x00, ssm(IA64_PSR_IC) if ic else rsm(IA64_PSR_IC),
+         nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x11, nop_m(), nop_i(), br_cond(0x30, 0x100)),
+        (0x100, 0x00, nop_m(), addl(3, 0x4000, 0), addl(8, 0x4000, 0)),
+        (0x110, 0x00, nop_m(), mov_lc_imm(lc), adds(4, 0x5a, 0)),
+        (0x120, 0x00, nop_m(), nop_i(), nop_i()),
+        (0x130, 0x11, nop_m(), nop_i(), br_cloop(0x130, 0x180)),
+        (0x140, 0x19, st8_postinc(3, 4, 8), nop_m(),
+         br_cloop(0x140, 0x140)),
+        (0x150, 0x00, nop_m(), mov_lc_imm(2), nop_i()),
+        (0x160, 0x19, st8_postinc(3, 4, 8), nop_m(),
+         br_cloop(0x160, 0x160)),
+        (0x170, 0x11, nop_m(), nop_i(), br_cond(0x170, 0x180)),
+        (0x180, 0x00, ld8(6, 8), mov_ar_lc(5), nop_i()),
+        (0x190, 0x11, nop_m(), nop_i(), br_cond(0x190, 0x190)),
+        raw_bundle(0x4000, 0, 0),
+    ], {
+        "ip": 0x190,
+        "r3": 0x4000 if lc else 0x4020,
+        "r5": lc - 1 if lc else 0,
+        "r6": 0 if lc else 0x5a,
+        "exception": IA64_EXCP_NONE,
+    }, cpu="merced")
+
+
+test_br_cloop_skips_self_loops_ic0 = _br_cloop_following_self_loops(
+    "br_cloop_skips_self_loops_ic0", ic=False, lc=3)
+test_br_cloop_skips_self_loops_ic1 = _br_cloop_following_self_loops(
+    "br_cloop_skips_self_loops_ic1", ic=True, lc=3)
+test_br_cloop_reaches_self_loops_ic0 = _br_cloop_following_self_loops(
+    "br_cloop_reaches_self_loops_ic0", ic=False, lc=0)
+test_br_cloop_reaches_self_loops_ic1 = _br_cloop_following_self_loops(
+    "br_cloop_reaches_self_loops_ic1", ic=True, lc=0)
+
+
 test_br_ctop_rotating_pipeline = require_registers("br_ctop_rotating_pipeline", [
     (0x10, 0x00, alloc_m(9, 35, 35, 4, 0),
      mov_i_imm_ar(66, 25), mov_lc_imm(0)),
@@ -3590,7 +3629,11 @@ CASE_NAMES = (
     'br_call_ret_strcpy_pipeline_stops_on_first_zero_word',
     'br_counted_low6_constant_zero_violation',
     'br_cloop_decrements_lc',
+    'br_cloop_reaches_self_loops_ic0',
+    'br_cloop_reaches_self_loops_ic1',
     'br_cloop_requires_slot2',
+    'br_cloop_skips_self_loops_ic0',
+    'br_cloop_skips_self_loops_ic1',
     'br_ctop_long_rotating_pipeline',
     'br_ctop_many_decode',
     'br_ctop_rotating_pipeline',

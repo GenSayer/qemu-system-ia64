@@ -2421,6 +2421,48 @@ test_fminmax_scalar_tie_uses_f3 = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+
+def test_fcmp_opposite_sign_equal_magnitude(qemu):
+    # Opposite signs compare equal only for signed zero.
+    for positive in (0, 0x0010000000000000, 0x3ff0000000000000,
+                     0x7fefffffffffffff, 0x7ff0000000000000):
+        negative = positive | (1 << 63)
+        predicates = ((1 << 6) | (1 << 9) | (1 << 10) |
+                      (1 << 12) | (1 << 15) | (1 << 16)
+                      if positive == 0 else
+                      (1 << 7) | (1 << 9) | (1 << 11) |
+                      (1 << 13) | (1 << 14) | (1 << 16))
+        require_registers(
+            f"fcmp_opposite_sign_equal_magnitude_{positive:016x}", [
+                (0x10, *movl_mlx(2, positive)),
+                (0x20, *movl_mlx(3, negative)),
+                (0x30, 0x09, setf_d(6, 2), setf_d(7, 3), nop_i()),
+                (0x40, 0x1c, nop_m(), fcmp(6, 7, 6, 7, rel=0), nop_b()),
+                (0x50, 0x1c, nop_m(), fcmp(8, 9, 6, 7, rel=1), nop_b()),
+                (0x60, 0x1c, nop_m(), fcmp(10, 11, 6, 7, rel=2), nop_b()),
+                (0x70, 0x1c, nop_m(), fcmp(12, 13, 7, 6, rel=0), nop_b()),
+                (0x80, 0x1c, nop_m(), fcmp(14, 15, 7, 6, rel=1), nop_b()),
+                (0x90, 0x1c, nop_m(), fcmp(16, 17, 7, 6, rel=2), nop_b()),
+                (0xa0, 0x0d, nop_m(), fmin(8, 7, 6), nop_i()),
+                (0xb0, 0x0d, nop_m(), fmax(9, 6, 7), nop_i()),
+                (0xc0, 0x0d, nop_m(), famin(10, 7, 6), nop_i()),
+                (0xd0, 0x0d, nop_m(), famax(11, 6, 7), nop_i()),
+                (0xe0, 0x10, nop_m(), nop_i(), br_cond(0xe0, 0xe0)),
+            ], {
+                "ip": 0xe0,
+                "pr_mask": ExpectedBits(mask=((1 << 18) - (1 << 6)),
+                                        value=predicates),
+                "f8": ExpectedFP(*binary64_to_spill(
+                    positive if positive == 0 else negative)),
+                "f9": ExpectedFP(*binary64_to_spill(
+                    negative if positive == 0 else positive)),
+                "f10": ExpectedFP(*binary64_to_spill(positive)),
+                "f11": ExpectedFP(*binary64_to_spill(negative)),
+                "ar_fpsr": DEFAULT_FPSR,
+                "exception": IA64_EXCP_NONE,
+            }, entry=0x10)(qemu)
+
+
 test_fcmp_wre1_orders_full_register_range = require_registers(
     "fcmp_wre1_orders_full_register_range", [
         (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
@@ -6260,6 +6302,7 @@ CASE_NAMES = (
     'fp_binary_wre1_transports_17bit_range',
     'fcmp_invalid_fault_restores_predicates',
     'fcmp_natval_clears_predicates',
+    'fcmp_opposite_sign_equal_magnitude',
     'fcmp_p2_high_bit_not_fchkfs',
     'fcmp_qnan_quiet_relations',
     'fcmp_qnan_quiet_with_invalid_enabled',
